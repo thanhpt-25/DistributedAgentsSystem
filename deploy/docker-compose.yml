@@ -1,0 +1,271 @@
+# Local multi-node DAS stack (Requirement 14).
+#
+#   cp deploy/.env.example deploy/.env      # then edit credentials / LLM settings
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#   docker compose -f deploy/docker-compose.yml --profile ollama up -d   # local LLM
+#   docker compose -f deploy/docker-compose.yml up -d --scale manager=3  # scale (14.5, 14.6)
+#   docker compose -f deploy/docker-compose.yml --profile observability up -d  # Prometheus,
+#       Grafana, Jaeger on 127.0.0.1:9090 / :3000 / :16686 (Requirement 18)
+#
+# Every network address reaches the agents through DAS__* environment
+# variables; nothing in das/ knows these service names (14.8). To run a role on
+# another host, point the same variables at that host's addresses.
+
+name: das
+
+x-agent-healthcheck: &agent-healthcheck
+  # The images ship no curl; urlopen raises (exit 1) on 503 or connection errors.
+  test:
+    - CMD
+    - python
+    - -c
+    - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=3)"
+  interval: 5s
+  timeout: 4s
+  retries: 3
+  # Covers limits.startup_timeout (60 s) for dependency retries.
+  start_period: 60s
+
+x-agent: &agent
+  restart: unless-stopped
+  # Above limits.shutdown_timeout (30 s) so SIGTERM-triggered graceful shutdown
+  # finishes before Docker sends SIGKILL (11.3, 14.6).
+  stop_grace_period: 45s
+  # Each replica advertises its own gRPC endpoint. Docker sets HOSTNAME to the
+  # container ID, which Docker's embedded DNS resolves on the compose network.
+  # An explicit DAS__GRPC__ADVERTISE_HOST (e.g. a multi-host setup) wins.
+  entrypoint:
+    - /bin/sh
+    - -c
+    - 'export DAS__GRPC__ADVERTISE_HOST="$${DAS__GRPC__ADVERTISE_HOST:-$$HOSTNAME}"; exec das "$$@"'
+    - das
+  command: ["run", "--config", "/etc/das/config.yaml"]
+  networks: [das]
+
+x-dependencies: &dependencies
+  rabbitmq:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  ollama:
+    condition: service_healthy
+    # Only when the ollama profile is enabled.
+    required: false
+
+# LLM settings pass through from deploy/.env by name; unset names stay unset
+# in the container (an empty DAS__LLM__BASE_URL would fail validation).
+x-llm-env: &llm-env
+  DAS__LLM__PROVIDER:
+  DAS__LLM__MODEL:
+  DAS__LLM__API_KEY:
+  DAS__LLM__BASE_URL:
+  DAS__LLM__AWS_REGION:
+  DAS__LLM__AWS_ACCESS_KEY_ID:
+  DAS__LLM__AWS_SECRET_ACCESS_KEY:
+  DAS__LLM__AWS_SESSION_TOKEN:
+
+# Tracing is off unless deploy/.env sets DAS__TRACING__ENABLED=true. The
+# endpoint points at the jaeger service of the observability profile over the
+# das network; it is only dialed while tracing is enabled (18.8).
+x-tracing-env: &tracing-env
+  DAS__TRACING__ENABLED: ${DAS__TRACING__ENABLED:-false}
+  DAS__TRACING__OTLP_ENDPOINT: http://jaeger:4317
+  DAS__TRACING__OTLP_PROTOCOL: grpc
+x-address-env: &address-env
+  DAS__RABBITMQ__URL: amqp://${RABBITMQ_USER:?set RABBITMQ_USER in deploy/.env}:${RABBITMQ_PASS:?set RABBITMQ_PASS in deploy/.env}@${DAS_RABBITMQ_HOST:-rabbitmq}:5672/
+  DAS__REDIS__URL: redis://${DAS_REDIS_HOST:-redis}:6379/0
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    hostname: rabbitmq # stable node name, so the data volume survives recreation
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set RABBITMQ_USER in deploy/.env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:?set RABBITMQ_PASS in deploy/.env}
+    volumes:
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - rabbitmq-data:/var/lib/rabbitmq
+    # Import after boot: importing at boot (load_definitions) would skip seeding
+    # the default user, and the definitions file deliberately holds no users.
+    # The hook runs as the rabbitmq user and waits for the server to create its
+    # Erlang cookie, so the CLI never writes a cookie the server can't read.
+    post_start:
+      - user: rabbitmq
+        command:
+          - sh
+          - -c
+          - "until [ -s /var/lib/rabbitmq/.erlang.cookie ] && rabbitmqctl -q await_startup --timeout 10 >/dev/null 2>&1; do sleep 2; done; rabbitmqctl -q import_definitions /etc/rabbitmq/definitions.json"
+    healthcheck:
+      # Healthy only once AMQP is up and the definitions (das-jobs policy) are in.
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_port_connectivity && rabbitmqctl -q list_policies | grep -q das-jobs"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    ports:
+      - "127.0.0.1:${DAS_RABBITMQ_MGMT_PORT:-15672}:15672"
+    networks: [das]
+
+  redis:
+    image: redis:7.4
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [das]
+
+  gateway:
+    <<: *agent
+    build:
+      context: ..
+      dockerfile: deploy/docker/gateway.Dockerfile
+    image: das-gateway:local
+    environment:
+      <<: *tracing-env
+      DAS__REDIS__URL: redis://${DAS_REDIS_HOST:-redis}:6379/0
+      DAS__API_KEYS: ${DAS_GATEWAY_API_KEYS:?set DAS_GATEWAY_API_KEYS in deploy/.env}
+      # Passed through by name; unset leaves the Admin_API disabled (403 admin_disabled).
+      DAS__ADMIN_API_KEYS:
+    volumes:
+      - ./config/gateway.yaml:/etc/das/config.yaml:ro
+    healthcheck:
+      <<: *agent-healthcheck
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${DAS_GATEWAY_PORT:-8080}:8080"
+
+  manager:
+    <<: *agent
+    build:
+      context: ..
+      dockerfile: deploy/docker/manager.Dockerfile
+    image: das-manager:local
+    deploy:
+      replicas: 2
+    environment:
+      <<: [*address-env, *llm-env, *tracing-env]
+      DAS__RABBITMQ__MANAGEMENT_URL: http://${DAS_RABBITMQ_HOST:-rabbitmq}:15672
+    volumes:
+      - ./config/manager.yaml:/etc/das/config.yaml:ro
+    healthcheck: *agent-healthcheck
+    depends_on: *dependencies
+
+  worker-research:
+    <<: *agent
+    build: &worker-build
+      context: ..
+      dockerfile: deploy/docker/worker.Dockerfile
+    image: das-worker:local
+    environment:
+      <<: [*address-env, *llm-env, *tracing-env]
+      DAS__WORKER__CAPABILITIES: research,summarize
+    volumes:
+      - ./config/worker.yaml:/etc/das/config.yaml:ro
+    healthcheck: *agent-healthcheck
+    depends_on: *dependencies
+
+  worker-review:
+    <<: *agent
+    # Same image and config file as worker-research; only the Capabilities differ (14.3).
+    build: *worker-build
+    image: das-worker:local
+    environment:
+      <<: [*address-env, *llm-env, *tracing-env]
+      DAS__WORKER__CAPABILITIES: code-review
+    volumes:
+      - ./config/worker.yaml:/etc/das/config.yaml:ro
+    healthcheck: *agent-healthcheck
+    depends_on: *dependencies
+
+  ollama:
+    image: ollama/ollama:${DAS_OLLAMA_TAG:-0.12.6}
+    profiles: [ollama]
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [das]
+
+  # --- observability profile (Requirement 18) ----------------------------------
+  # Off by default, so the v1 service set is unchanged without the profile.
+  # Every published port binds to 127.0.0.1; OTLP (4317/4318) is reachable only
+  # on the das network.
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    profiles: [observability]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks: [das]
+
+  jaeger:
+    # All-in-one: OTLP gRPC 4317 and OTLP HTTP 4318, UI and query API on 16686.
+    image: jaegertracing/jaeger:2.22.0
+    profiles: [observability]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:16686:16686"
+    networks: [das]
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    profiles: [observability]
+    # No restart policy: a missing admin credential must stop the container
+    # instead of restarting it in a loop (18.11).
+    environment:
+      # ${VAR:?} is not used: Compose interpolates every service even when its
+      # profile is off, which would break the v1 stack without these variables.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    # Refuse to start with Grafana's default admin/admin when deploy/.env lacks
+    # either credential or sets it empty, naming the missing variable; otherwise
+    # hand over to the image's own entrypoint (/run.sh).
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        missing=0
+        if [ -z "$${GF_SECURITY_ADMIN_USER}" ]; then echo "GRAFANA_ADMIN_USER is not set in deploy/.env" >&2; missing=1; fi
+        if [ -z "$${GF_SECURITY_ADMIN_PASSWORD}" ]; then echo "GRAFANA_ADMIN_PASSWORD is not set in deploy/.env" >&2; missing=1; fi
+        [ "$$missing" -eq 0 ] || exit 1
+        exec /run.sh "$$@"
+      - grafana
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - jaeger
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [das]
+
+networks:
+  das: {}
+
+volumes:
+  rabbitmq-data: {}
+  redis-data: {}
+  ollama-data: {}

@@ -1,0 +1,20 @@
+# Images only need pyproject.toml, uv.lock and das/. Keep the context small and
+# free of local state or secrets.
+.git
+.gitignore
+.venv
+.kiro
+.hypothesis
+.pytest_cache
+.import_linter_cache
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+dist
+build
+tests
+deploy
+CLAUDE.md
+.env
+.env.*
+*.secrets*

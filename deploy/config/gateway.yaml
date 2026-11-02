@@ -1,0 +1,29 @@
+# Gateway_API sample Agent_Config (mounted at /etc/das/config.yaml).
+#
+# Supplied by the environment (see deploy/docker-compose.yml and .env.example):
+#   DAS__REDIS__URL              redis://<host>:6379/0
+#   DAS__GRPC__ADVERTISE_HOST    this container's reachable host name
+#   DAS__API_KEYS                comma-separated API keys (secret: env or secrets_file only)
+#   DAS__ADMIN_API_KEYS          comma-separated Admin_API keys (secret: env or secrets_file only)
+#   DAS__TRACING__*              tracing switch and OTLP endpoint (observability profile)
+role: gateway
+http_port: 8080
+# Ops_Port: /metrics, /livez, /readyz (scraped by Prometheus). /healthz stays on http_port.
+health_port: 8081
+
+# The Gateway only uses the control transport (best-effort cancel_request to
+# the lease-owning Manager); the jobs name is required by the schema but unused.
+transports:
+  jobs: rabbitmq
+  control: grpc
+
+grpc:
+  bind: "0.0.0.0:50051"
+  advertise_port: 50051
+
+limits:
+  max_prompt_length: 32000
+  heartbeat_interval: 5
+  shutdown_timeout: 30
+  startup_timeout: 60
+  startup_retry_interval: 2

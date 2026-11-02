@@ -1,0 +1,46 @@
+# Test-only override for the end-to-end tests (task 19.4). Used as:
+#
+#   docker compose --project-directory deploy -p das-e2e \
+#     -f deploy/docker-compose.yml -f tests/integration/e2e/docker-compose.e2e.yml ...
+#
+# Relative paths resolve against the project directory (deploy/).
+#
+# It adds `llm-stub`, an Ollama-compatible fake LLM (llm_stub.py, stdlib only),
+# and points every Manager and Worker at it through the real `ollama` provider.
+# The production images and das/ are unchanged; FakeAdapter stays unselectable
+# by config (Req 10.7).
+x-stub-llm-env: &stub-llm-env
+  DAS__LLM__PROVIDER: ollama
+  DAS__LLM__MODEL: fake-llm
+  DAS__LLM__BASE_URL: http://llm-stub:11434
+x-stub-dep: &stub-dep
+  llm-stub:
+    condition: service_healthy
+services:
+  llm-stub:
+    image: python:3.12-slim
+    command: ["python", "-u", "/stub/llm_stub.py"]
+    volumes:
+      - ../tests/integration/e2e/llm_stub.py:/stub/llm_stub.py:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:11434/api/tags', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    networks: [das]
+  manager:
+    environment:
+      <<: *stub-llm-env
+      # Shorter Lease so the takeover test does not wait 30 s for expiry.
+      DAS__LIMITS__LEASE_DURATION: "10"
+    depends_on: *stub-dep
+  worker-research:
+    environment: *stub-llm-env
+    depends_on: *stub-dep
+  worker-review:
+    environment: *stub-llm-env
+    depends_on: *stub-dep

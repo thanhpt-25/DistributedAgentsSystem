@@ -1,0 +1,629 @@
+{
+  "uid": "das-overview",
+  "title": "DAS Overview",
+  "description": "Distributed Agents System: requests, jobs, queues, LLM calls, leases, registry and dead letters (Requirement 18.5). Rates are per second over 5 minutes.",
+  "tags": [
+    "das"
+  ],
+  "timezone": "utc",
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request rate by status",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (status) (rate(das_requests_finished_total[5m]))",
+          "legendFormat": "{{status}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Request duration p50 / p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(das_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(das_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Job transitions by capability and state",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (capability, state) (rate(das_job_transitions_total[5m]))",
+          "legendFormat": "{{capability}} {{state}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Job attempts",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (capability) (rate(das_job_attempts_sum[5m])) / sum by (capability) (rate(das_job_attempts_count[5m]))",
+          "legendFormat": "{{capability}} mean",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, capability) (rate(das_job_attempts_bucket[5m])))",
+          "legendFormat": "{{capability}} p95",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Queue depth",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "max by (queue) (das_queue_depth)",
+          "legendFormat": "{{queue}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "LLM call rate by provider / model",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (provider, model) (rate(das_llm_calls_total[5m]))",
+          "legendFormat": "{{provider}}/{{model}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "LLM error ratio",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum(rate(das_llm_calls_total{outcome!=\"success\"}[5m])) / sum(rate(das_llm_calls_total[5m]))",
+          "legendFormat": "error ratio",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "LLM call duration p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(das_llm_call_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{provider}}/{{model}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "LLM token rate by provider / model",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (provider, model) (rate(das_llm_tokens_total[5m]))",
+          "legendFormat": "{{provider}}/{{model}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Estimated LLM cost rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (provider, model, currency) (rate(das_llm_estimated_cost_total[5m]))",
+          "legendFormat": "{{provider}}/{{model}} {{currency}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Lease acquisitions and losses",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (kind) (rate(das_lease_acquisitions_total[5m]))",
+          "legendFormat": "acquired {{kind}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (reason) (rate(das_lease_losses_total[5m]))",
+          "legendFormat": "lost {{reason}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Registry agents by role and status",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "max by (role, status) (das_registry_agents)",
+          "legendFormat": "{{role}} {{status}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Dead letter record rate by reason",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (reason) (rate(das_dlq_records_created_total[5m]))",
+          "legendFormat": "{{reason}}",
+          "range": true
+        }
+      ]
+    }
+  ]
+}

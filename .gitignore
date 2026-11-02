@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Local compose secrets (copy of deploy/.env.example)
+deploy/.env
+
+# Local logs
+*.log

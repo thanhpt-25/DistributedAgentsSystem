@@ -1,0 +1,124 @@
+[project]
+name = "das"
+version = "0.1.0"
+description = "Distributed Agent System: Manager and Worker agents coordinated through Redis, RabbitMQ, and gRPC"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic==2.14.1",
+    "fastapi==0.161.1",
+    "uvicorn==0.54.0",
+    "starlette==1.9.0",
+    "structlog==26.1.0",
+    "redis==8.1.0",
+    "aio-pika==10.1.1",
+    "grpcio==1.84.1",
+    "grpcio-tools==1.84.1",
+    "httpx==0.28.1",
+    "openai==3.37.0",
+    "anthropic==2.1.0",
+    "aioboto3==15.5.0",
+    "pyyaml==6.0.3",
+    # Phase 2 observability (Req 19.4). Transitive deps are pinned in uv.lock.
+    "prometheus-client==0.26.0",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-exporter-otlp-proto-grpc==1.45.1",
+    "opentelemetry-exporter-otlp-proto-http==1.45.1",
+]
+
+[project.scripts]
+das = "das.cli:entry_point"
+# Transport adapters (Req 8, 15). v1 ships rabbitmq and grpc only; no http/kafka (15.3).
+[project.entry-points."das.transports"]
+rabbitmq = "das.transport.rabbitmq:RabbitMQTransport"
+grpc = "das.transport.grpc_rpc:GrpcTransport"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "hypothesis==6.170.8",
+    "fakeredis[lua]==2.40.0",
+    "testcontainers==4.15.0",
+    "respx==0.23.1",
+    "import-linter==2.15",
+    # Phase 3 lint and type check (Req 5.1, 6.1). Transitive stubs
+    # (types-aiobotocore, types-s3transfer) are pinned in uv.lock.
+    "ruff==0.17.3",
+    "mypy==2.4.0",
+    "types-PyYAML==6.0.12.20260906",
+    "types-grpcio==1.84.0.20261021",
+    "types-protobuf==7.35.1.20260906",
+    "types-aioboto3==15.5.0",
+    "botocore-stubs==1.40.61",
+    # Repeat_Run_Check (Req 10.4, 10.8).
+    "pytest-repeat==0.9.4",
+]
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["das"]
+# State_Store Lua scripts are loaded at runtime via importlib.resources.
+artifacts = ["das/state/lua/*.lua"]
+
+[tool.hatch.build.targets.sdist]
+artifacts = ["das/state/lua/*.lua"]
+
+# Lint_Check (Req 5.2, 5.3, 5.6). Generated_Code in das/transport/proto is excluded,
+# also when a path is passed explicitly (force-exclude). No global ignore list and no
+# per-file-ignores; single lines use `# noqa: <code>` (Req 5.5).
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = ["das/transport/proto"]
+force-exclude = true
+
+[tool.ruff.lint]
+select = ["E", "F"]
+
+# Type_Check (Req 6.2-6.4, 6.6, 6.8). Not strict; only the das package. No global
+# ignore_missing_imports or follow_imports. Generated_Code uses ignore_errors instead
+# of exclude so modules importing das_pb2 keep its types (design H8).
+[tool.mypy]
+python_version = "3.12"
+files = ["das"]
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+enable_error_code = ["ignore-without-code"]
+
+[[tool.mypy.overrides]]
+module = ["das.transport.proto", "das.transport.proto.*"]  # Generated_Code (OD 3.3)
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: tests that need Docker (testcontainers / Compose)",
+]
+
+# Requirement 15.4: Manager and Worker logic talk to the network only through the
+# Transport interface and MessageCodec, never directly through broker/RPC/Redis clients.
+# Indirect imports (e.g. via das.state or das.transport adapters) are allowed.
+[tool.importlinter]
+root_packages = ["das"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Manager and Worker logic do not import protocol client libraries"
+type = "forbidden"
+source_modules = ["das.manager", "das.worker"]
+forbidden_modules = [
+    "aio_pika",
+    "aiormq",
+    "pamqp",
+    "grpc",
+    "redis",
+    "prometheus_client",
+    "opentelemetry",
+]
+allow_indirect_imports = true

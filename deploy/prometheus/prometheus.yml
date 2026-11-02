@@ -1,0 +1,35 @@
+# Prometheus scrape config for the observability profile (Requirement 18).
+#
+# Every DAS agent serves /metrics on its Ops_Port (health_port 8081). Targets
+# are discovered from the A records Docker's embedded DNS publishes for each
+# Compose service, one record per replica, so `docker compose up --scale ...`
+# adds targets on the next DNS refresh without editing this file or
+# restarting Prometheus (18.10).
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: gateway
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: [gateway]
+        type: A
+        port: 8081
+        refresh_interval: 15s
+
+  - job_name: manager
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: [manager]
+        type: A
+        port: 8081
+        refresh_interval: 15s
+
+  - job_name: worker
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: [worker-research, worker-review]
+        type: A
+        port: 8081
+        refresh_interval: 15s

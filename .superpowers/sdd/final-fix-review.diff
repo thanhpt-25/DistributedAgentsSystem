@@ -1,0 +1,289 @@
+# Final-review fix package (no git: diff vs snapshot taken before the fix)
+
+diff --color -ruN -U10 -x __pycache__ .superpowers/sdd/snap-ffix/das/client/budget.py das/client/budget.py
+--- .superpowers/sdd/snap-ffix/das/client/budget.py	2026-10-30 10:50:25
++++ das/client/budget.py	2026-10-30 10:52:06
+@@ -1,21 +1,21 @@
+ """Per-Request budgets (Phase 4 Req 5). Pure.
+ 
+ ``resolve_budget`` merges the client's Budget with the key's default and never
+ raises a limit (Property 4). ``budget_status`` measures Budget_Used against a
+ Budget; the Manager's reducer stops dispatching once it reports ``exceeded``.
+ """
+ from __future__ import annotations
+ 
+ from collections.abc import Mapping, Sequence
+ from dataclasses import dataclass
+-from decimal import Decimal
++from decimal import Decimal, InvalidOperation
+ from typing import Any, Literal
+ 
+ from das.models.usage import UsageRecord
+ from das.ops.cost import PriceTable, format_amount, unrounded_costs
+ 
+ BUDGET_FIELDS: tuple[str, ...] = ("max_total_tokens", "max_cost")
+ 
+ ExceededKind = Literal["tokens", "cost", "unenforceable"]
+ 
+ 
+@@ -46,29 +46,35 @@
+         """JSON object with only the set fields; ``max_cost`` as canonical decimal text."""
+         obj: dict[str, Any] = {}
+         if self.max_total_tokens is not None:
+             obj["max_total_tokens"] = self.max_total_tokens
+         if self.max_cost is not None:
+             obj["max_cost"] = decimal_text(self.max_cost)
+         return obj
+ 
+     @classmethod
+     def from_json_obj(cls, obj: Mapping[str, Any]) -> Budget:
+-        """Inverse of :meth:`to_json_obj` (the form stored on the Request record)."""
++        """Inverse of :meth:`to_json_obj` (the form stored on the Request record).
++
++        Invalid stored values raise ``ValueError``.
++        """
+         unknown = set(obj) - set(BUDGET_FIELDS)
+         if unknown:
+             raise ValueError(f"unknown budget fields: {sorted(unknown)}")
+         cost = obj.get("max_cost")
+-        return cls(
+-            max_total_tokens=obj.get("max_total_tokens"),
+-            max_cost=Decimal(cost) if cost is not None else None,
+-        )
++        if cost is not None and not isinstance(cost, str):
++            raise ValueError("max_cost must be a decimal string")
++        try:
++            max_cost = Decimal(cost) if cost is not None else None
++        except InvalidOperation as exc:
++            raise ValueError("max_cost must be a decimal string") from exc
++        return cls(max_total_tokens=obj.get("max_total_tokens"), max_cost=max_cost)
+ 
+ 
+ class BudgetError(ValueError):
+     """A client Budget field is above the key's default (Req 5.2)."""
+ 
+     def __init__(self, parameter: str, limit: int | Decimal) -> None:
+         super().__init__(f"{parameter} is above the limit {limit}")
+         self.parameter = parameter
+         self.limit = limit
+ 
+diff --color -ruN -U10 -x __pycache__ .superpowers/sdd/snap-ffix/das/client/webhook.py das/client/webhook.py
+--- .superpowers/sdd/snap-ffix/das/client/webhook.py	2026-10-30 10:50:25
++++ das/client/webhook.py	2026-10-30 10:52:06
+@@ -35,21 +35,22 @@
+ 
+ def verify(secret: bytes, timestamp: str, body: bytes, signature: str, now: float, tolerance: int) -> bool:
+     """True iff ``signature`` signs ``body`` at ``timestamp``, and ``timestamp`` is near ``now``.
+ 
+     "Near" means at most ``tolerance`` seconds away. ``timestamp`` is the header text and
+     must be 1 to 19 ASCII digits. The comparison runs in constant time.
+     """
+     if len(timestamp) > MAX_TIMESTAMP_DIGITS or not (timestamp.isascii() and timestamp.isdigit()):
+         return False
+     ts = int(timestamp)
+-    if abs(now - ts) > tolerance:
++    # Written as "not <=" so a NaN ``now`` fails the window check instead of skipping it.
++    if not abs(now - ts) <= tolerance:
+         return False
+     expected = sign(secret, ts, body).encode("ascii")
+     return hmac.compare_digest(expected, signature.encode("utf-8", "surrogatepass"))
+ 
+ 
+ def next_due(now: float, attempts: int, base: float, max_backoff: float, rand: float) -> float:
+     """Next attempt time after ``attempts`` failed attempts (Req 8.6). ``rand`` is in [0, 1]."""
+     if not 0.0 <= rand <= 1.0:
+         raise ValueError(f"rand must be in [0, 1], got {rand}")
+     return now + backoff(attempts, base, max_backoff) * (JITTER_LOW + JITTER_SPAN * rand)
+diff --color -ruN -U10 -x __pycache__ .superpowers/sdd/snap-ffix/tests/fixtures/webhook_vectors.json tests/fixtures/webhook_vectors.json
+--- .superpowers/sdd/snap-ffix/tests/fixtures/webhook_vectors.json	2026-10-30 10:50:25
++++ tests/fixtures/webhook_vectors.json	2026-10-30 10:51:28
+@@ -1,32 +1,52 @@
+ {
+-  "description": "Webhook signature accept vectors and reject cases (Phase 4 Req 8.4, 9.7). Shared by das.client.webhook and das_client tests.",
++  "description": "Webhook signing vectors, header accept cases and reject cases (Phase 4 Req 8.4, 9.7). Shared by das.client.webhook and das_client tests.",
+   "vectors": [
+     {
+       "secret": "whsec_test_0123456789",
+       "timestamp": 1793000000,
+       "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+       "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7"
+     },
+     {
+       "secret": "whsec_test_0123456789",
+       "timestamp": 1793000000,
+       "body": "",
+       "signature": "v1=4de65a69d4ed28cb8f56a4fdec85f30f14bc6d4ff5599e5ba20cb9df88b0ffdd"
+     },
+     {
+       "secret": "another-secret",
+       "timestamp": 1793000000,
+       "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+       "signature": "v1=f36ca3883cb4aa25abbeefd2dd01146187b8eade8349bf51ae10af684724e464"
+     }
+   ],
++  "accept": [
++    {
++      "secret": "whsec_test_0123456789",
++      "timestamp": "01793000000",
++      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
++      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
++      "now": 1793000000.0,
++      "tolerance": 300,
++      "reason": "leading zero"
++    },
++    {
++      "secret": "whsec_test_0123456789",
++      "timestamp": "0000000001793000000",
++      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
++      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
++      "now": 1793000000.0,
++      "tolerance": 300,
++      "reason": "19-digit zero-padded timestamp"
++    }
++  ],
+   "reject": [
+     {
+       "secret": "whsec_test_0123456789",
+       "timestamp": "1793000000",
+       "body": "{\"data\":{\"status\":\"Failed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+       "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+       "now": 1793000000.0,
+       "tolerance": 300,
+       "reason": "tampered body"
+     },
+@@ -43,26 +63,44 @@
+       "secret": "whsec_test_0123456789",
+       "timestamp": "1793000000",
+       "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+       "signature": "8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+       "now": 1793000000.0,
+       "tolerance": 300,
+       "reason": "missing prefix"
+     },
+     {
+       "secret": "whsec_test_0123456789",
+-      "timestamp": "17930000x0",
++      "timestamp": " 1793000000",
+       "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+       "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+       "now": 1793000000.0,
+       "tolerance": 300,
+-      "reason": "malformed timestamp"
++      "reason": "timestamp with leading space"
++    },
++    {
++      "secret": "whsec_test_0123456789",
++      "timestamp": "+1793000000",
++      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
++      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
++      "now": 1793000000.0,
++      "tolerance": 300,
++      "reason": "timestamp with plus sign"
++    },
++    {
++      "secret": "whsec_test_0123456789",
++      "timestamp": "00000000001793000000",
++      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
++      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
++      "now": 1793000000.0,
++      "tolerance": 300,
++      "reason": "zero-padded timestamp over 19 digits"
+     },
+     {
+       "secret": "whsec_test_0123456789",
+       "timestamp": "9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+       "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+       "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+       "now": 1793000000.0,
+       "tolerance": 300,
+       "reason": "over-long timestamp"
+     },
+diff --color -ruN -U10 -x __pycache__ .superpowers/sdd/snap-ffix/tests/unit/test_client_budget.py tests/unit/test_client_budget.py
+--- .superpowers/sdd/snap-ffix/tests/unit/test_client_budget.py	2026-10-30 10:50:25
++++ tests/unit/test_client_budget.py	2026-10-30 10:51:28
+@@ -172,10 +172,27 @@
+     }
+ 
+ 
+ def test_budget_view_without_cost() -> None:
+     b = Budget(max_total_tokens=100)
+     assert budget_view(b, budget_status([record()], b, None)) == {
+         "limits": {"max_total_tokens": 100},
+         "used": {"total_tokens": 15, "cost": None},
+         "exceeded": False,
+     }
++
++
++@pytest.mark.parametrize(
++    "obj",
++    [
++        {"max_cost": "abc"},
++        {"max_cost": 1.5},
++        {"max_cost": "NaN"},
++        {"max_cost": "0"},
++        {"max_total_tokens": "5"},
++        {"max_total_tokens": 1.5},
++        {"max_total_tokens": True},
++    ],
++)
++def test_budget_from_json_rejects_invalid_values(obj: dict[str, object]) -> None:
++    with pytest.raises(ValueError):
++        Budget.from_json_obj(obj)
+diff --color -ruN -U10 -x __pycache__ .superpowers/sdd/snap-ffix/tests/unit/test_client_webhook.py tests/unit/test_client_webhook.py
+--- .superpowers/sdd/snap-ffix/tests/unit/test_client_webhook.py	2026-10-30 10:50:25
++++ tests/unit/test_client_webhook.py	2026-10-30 10:51:28
+@@ -7,20 +7,21 @@
+ 
+ import pytest
+ 
+ from das.client.webhook import next_due, sign, verify, webhook_body
+ 
+ FIXTURE: dict[str, Any] = json.loads(
+     (Path(__file__).resolve().parents[1] / "fixtures" / "webhook_vectors.json").read_text()
+ )
+ VECTORS: list[dict[str, Any]] = FIXTURE["vectors"]
+ REJECT: list[dict[str, Any]] = FIXTURE["reject"]
++ACCEPT: list[dict[str, Any]] = FIXTURE["accept"]
+ SECRET = b"whsec_test_0123456789"
+ TS = 1793000000
+ BODY = b'{"data":{"status":"Completed"},"event_id":"1793000000000-0","request_id":"r1","type":"request.completed"}'
+ 
+ 
+ @pytest.mark.parametrize("v", VECTORS)
+ def test_sign_matches_vectors(v: dict[str, Any]) -> None:
+     assert sign(v["secret"].encode(), v["timestamp"], v["body"].encode()) == v["signature"]
+ 
+ 
+@@ -60,20 +61,32 @@
+     # Float ``now``, as production passes: an int would keep the comparison in int arithmetic.
+     assert not verify(SECRET, ts, BODY, sign(SECRET, TS, BODY), now=float(TS), tolerance=300)
+ 
+ 
+ @pytest.mark.parametrize("v", REJECT, ids=lambda v: v["reason"])
+ def test_verify_rejects_vectors(v: dict[str, Any]) -> None:
+     assert not verify(
+         v["secret"].encode(), v["timestamp"], v["body"].encode(), v["signature"],
+         now=v["now"], tolerance=v["tolerance"],
+     )
++
++
++@pytest.mark.parametrize("v", ACCEPT, ids=lambda v: v["reason"])
++def test_verify_accepts_header_vectors(v: dict[str, Any]) -> None:
++    assert verify(
++        v["secret"].encode(), v["timestamp"], v["body"].encode(), v["signature"],
++        now=v["now"], tolerance=v["tolerance"],
++    )
++
++
++def test_verify_rejects_nan_now() -> None:
++    assert not verify(SECRET, str(TS), BODY, sign(SECRET, TS, BODY), now=float("nan"), tolerance=300)
+ 
+ 
+ def test_verify_handles_non_ascii_signature() -> None:
+     assert not verify(SECRET, str(TS), BODY, "v1=é", now=TS, tolerance=300)
+ 
+ 
+ @pytest.mark.parametrize(("rand", "delay"), [(0.0, 24.0), (0.5, 30.0), (1.0, 36.0)])
+ def test_next_due_jitter(rand: float, delay: float) -> None:
+     assert next_due(1000.0, 1, 30.0, 3600.0, rand) == pytest.approx(1000.0 + delay)
+ 

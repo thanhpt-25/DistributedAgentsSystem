@@ -1,0 +1,775 @@
+# Group 4 Task 1 review package (no git: diff vs pre-task snapshot)
+
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/das/state/__init__.py das/state/__init__.py
+--- /tmp/das_sdd_snaps/snap-g4-1/das/state/__init__.py	2026-10-30 13:23:12
++++ das/state/__init__.py	2026-10-30 13:26:42
+@@ -1,12 +1,13 @@
+ """Redis-backed State_Store with atomic Lua scripts."""
+ 
+ from das.state.store import (
+     CANCEL_REASON,
++    DEFAULT_EVENTS_MAX_LEN,
+     INBOX_JOB_RESULT,
+     INBOX_REPLAY,
+     INBOX_UNACKED_EXHAUSTED,
+     LEASE_KIND_INITIAL,
+     LEASE_KIND_TAKEOVER,
+     PURGE_DELETED,
+     PURGE_KEEP,
+     PURGE_STAMPED,
+@@ -27,16 +28,17 @@
+     Timer,
+     TimerKey,
+     TransitionBatch,
+     WriteResult,
+ )
+ 
+ __all__ = [
+     "CANCEL_REASON",
++    "DEFAULT_EVENTS_MAX_LEN",
+     "INBOX_JOB_RESULT",
+     "INBOX_REPLAY",
+     "INBOX_UNACKED_EXHAUSTED",
+     "LEASE_KIND_INITIAL",
+     "LEASE_KIND_TAKEOVER",
+     "PURGE_DELETED",
+     "PURGE_KEEP",
+     "PURGE_STAMPED",
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/das/state/keys.py das/state/keys.py
+--- /tmp/das_sdd_snaps/snap-g4-1/das/state/keys.py	2026-10-30 13:23:12
++++ das/state/keys.py	2026-10-30 13:26:05
+@@ -1,37 +1,45 @@
+ """Redis key layout shared by the State_Store and the Agent_Registry.
+ 
+ ==============================  ======  ==================================================
+ Key                             Type    Content
+ ==============================  ======  ==================================================
+ ``das:req:{rid}``               hash    status, prompt, created_at, error, final_result,
+-                                        plan, inbox_cursor
++                                        plan, inbox_cursor; Phase 4: client_fp, budget,
++                                        webhook_url, webhook_secret_name, events_max_len
+ ``das:req:{rid}:jobs``          hash    job_id -> JobRecord JSON
+ ``das:req:{rid}:results``       hash    ``{job_id}:{attempt}`` -> JobResultPayload JSON
+ ``das:req:{rid}:inbox``         stream  ingested Job_Results and DLQ events
+ ``das:req:{rid}:timers``        zset    ``{kind}:{job_id}:{attempt}`` scored by due time
+ ``das:req:{rid}:transitions``   list    TransitionEntry JSON, append-only
+ ``das:req:{rid}:usage``         list    UsageRecord JSON, append-only (Phase 2)
+ ``das:req:{rid}:pending_replays`` set   Dead_Letter_IDs replayed but not yet applied
++``das:req:{rid}:events``        stream  Event_Stream of the Request (Phase 4)
++``das:req:{rid}:webhook``       hash    Webhook_Delivery of the Request (Phase 4)
+ ``das:lease:{rid}``             hash    owner, epoch, expires_at, last_owner
+ ``das:leases:expiry``           zset    rid scored by expires_at
+ ``das:requests:pending``        zset    Pending rid scored by creation time
+ ``das:requests:index``          zset    every rid scored by created_at ms
+ ``das:requests:by_status:{s}``  zset    rid in its current status, scored by created_at ms
+ ``das:requests:index:ready``    string  ``1`` once the index backfill completed
+ ``das:requests:index:backfill_lock`` string  ``SET NX PX`` lock of IndexBackfill
+ ``das:requests:finished``       zset    terminal rid scored by finished_at ms
+ ``das:requests:inbox_purge``    zset    terminal rid with an inbox, scored by finished_at ms
+ ``das:dlq:{dlid}``              hash    Dead_Letter_Record fields
+ ``das:dlq:index``               zset    dlid scored by dead_lettered_at ms
+ ``das:dlq:by_status:{s}``       zset    dlid per Record_Status
+ ``das:dlq:by_reason:{r}``       zset    dlid per Dead_Letter_Reason
+ ``das:dlq:terminal``            zset    Replayed/Discarded dlid scored by status_changed_at ms
+ ``das:gateway:cursor_key``      string  random HMAC key of Page_Cursor
++``das:client:{fp}:bucket``      hash    tokens, updated: rate-limit bucket (Phase 4)
++``das:client:{fp}:active``      set     non-terminal rid of the client (Phase 4)
++``das:client:{fp}:idem:{h}``    hash    rid, body_hash of an Idempotency-Key (Phase 4)
++``das:client:{fp}:streams``     zset    open Event_Stream connections (Phase 4)
++``das:webhooks:due``            zset    rid with a Webhook_Delivery, scored by due time
+ ``das:agent:{id}``              hash    AgentRecord fields
+ ``das:agents``                  zset    agent_id scored by last_heartbeat
+ ==============================  ======  ==================================================
+ 
+ Phase 2 supports a single Redis instance only (Req 20.7): scripts touch keys of
+ different Requests and the global indexes in one call.
+ """
+ 
+@@ -48,16 +56,17 @@
+ REQUESTS_INDEX: Final = f"{PREFIX}:requests:index"
+ REQUESTS_INDEX_READY: Final = f"{PREFIX}:requests:index:ready"
+ REQUESTS_INDEX_BACKFILL_LOCK: Final = f"{PREFIX}:requests:index:backfill_lock"
+ REQUESTS_FINISHED: Final = f"{PREFIX}:requests:finished"
+ REQUESTS_INBOX_PURGE: Final = f"{PREFIX}:requests:inbox_purge"
+ DLQ_INDEX: Final = f"{PREFIX}:dlq:index"
+ DLQ_TERMINAL: Final = f"{PREFIX}:dlq:terminal"
+ GATEWAY_CURSOR_KEY: Final = f"{PREFIX}:gateway:cursor_key"
++WEBHOOKS_DUE: Final = f"{PREFIX}:webhooks:due"
+ 
+ # Fields of the request hash.
+ F_STATUS: Final = "status"
+ F_PROMPT: Final = "prompt"
+ F_CREATED_AT: Final = "created_at"
+ F_ERROR: Final = "error"
+ F_FINAL_RESULT: Final = "final_result"
+ F_PLAN: Final = "plan"
+@@ -65,16 +74,22 @@
+ # Phase 2 fields of the request hash.
+ F_TRACE_CONTEXT: Final = "trace_context"  # JSON {"traceparent", "tracestate"?}
+ F_FINISHED_AT: Final = "finished_at"  # epoch ms
+ F_JOB_COUNT: Final = "job_count"
+ F_USAGE_INPUT: Final = "usage_input"
+ F_USAGE_OUTPUT: Final = "usage_output"
+ F_USAGE_TOTAL: Final = "usage_total"
+ F_REPLAY_HISTORY: Final = "replay_history"  # JSON list of ReplayHistoryEntry
++# Phase 4 fields of the request hash.
++F_CLIENT_FP: Final = "client_fp"
++F_BUDGET: Final = "budget"  # Budget JSON
++F_WEBHOOK_URL: Final = "webhook_url"
++F_WEBHOOK_SECRET_NAME: Final = "webhook_secret_name"
++F_EVENTS_MAX_LEN: Final = "events_max_len"
+ 
+ # Phase 2 field of the lease hash: agent of the latest acquire, kept across release.
+ F_LAST_OWNER: Final = "last_owner"
+ 
+ # Fields owned by dedicated scripts; generic request-field updates may not touch them.
+ RESERVED_REQUEST_FIELDS: Final = frozenset(
+     {
+         F_STATUS,
+@@ -85,16 +100,21 @@
+         F_INBOX_CURSOR,
+         F_TRACE_CONTEXT,
+         F_FINISHED_AT,
+         F_JOB_COUNT,
+         F_USAGE_INPUT,
+         F_USAGE_OUTPUT,
+         F_USAGE_TOTAL,
+         F_REPLAY_HISTORY,
++        F_CLIENT_FP,
++        F_BUDGET,
++        F_WEBHOOK_URL,
++        F_WEBHOOK_SECRET_NAME,
++        F_EVENTS_MAX_LEN,
+     }
+ )
+ 
+ 
+ def request(rid: str) -> str:
+     return f"{PREFIX}:req:{rid}"
+ 
+ 
+@@ -121,16 +141,26 @@
+ def usage(rid: str) -> str:
+     return f"{PREFIX}:req:{rid}:usage"
+ 
+ 
+ def pending_replays(rid: str) -> str:
+     return f"{PREFIX}:req:{rid}:pending_replays"
+ 
+ 
++def events(rid: str) -> str:
++    """Event_Stream of one Request (Phase 4 Req 6.1)."""
++    return f"{PREFIX}:req:{rid}:events"
++
++
++def webhook(rid: str) -> str:
++    """Webhook_Delivery hash of one Request (Phase 4 Req 8)."""
++    return f"{PREFIX}:req:{rid}:webhook"
++
++
+ def lease(rid: str) -> str:
+     return f"{PREFIX}:lease:{rid}"
+ 
+ 
+ def requests_by_status(status: str) -> str:
+     """Index zset of the Requests currently in ``status`` (a Request_Status value)."""
+     return f"{PREFIX}:requests:by_status:{status}"
+ 
+@@ -144,16 +174,36 @@
+     return f"{PREFIX}:dlq:by_status:{status}"
+ 
+ 
+ def dlq_by_reason(reason: str) -> str:
+     """Index zset of the Dead_Letter_Records with ``reason`` (a Dead_Letter_Reason)."""
+     return f"{PREFIX}:dlq:by_reason:{reason}"
+ 
+ 
++def client_bucket(fp: str) -> str:
++    """Rate-limit token bucket of one client fingerprint (Phase 4 Req 2.1)."""
++    return f"{PREFIX}:client:{fp}:bucket"
++
++
++def client_active(fp: str) -> str:
++    """Set of the client's non-terminal Request_IDs (Phase 4 Req 3)."""
++    return f"{PREFIX}:client:{fp}:active"
++
++
++def client_idem(fp: str, h: str) -> str:
++    """Idempotency record of one client and Idempotency-Key hash (Phase 4 Req 4)."""
++    return f"{PREFIX}:client:{fp}:idem:{h}"
++
++
++def client_streams(fp: str) -> str:
++    """Open Event_Stream connections of one client (Phase 4 Req 7)."""
++    return f"{PREFIX}:client:{fp}:streams"
++
++
+ def agent(agent_id: str) -> str:
+     return f"{PREFIX}:agent:{agent_id}"
+ 
+ 
+ def result_field(job_id: str, attempt: int) -> str:
+     """Field of the results hash for one ``(job_id, attempt)``."""
+     return f"{job_id}:{attempt}"
+ 
+@@ -182,9 +232,11 @@
+         jobs(rid),
+         results(rid),
+         inbox(rid),
+         timers(rid),
+         transitions(rid),
+         lease(rid),
+         usage(rid),
+         pending_replays(rid),
++        events(rid),
++        webhook(rid),
+     ]
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/das/state/lua/_common.lua das/state/lua/_common.lua
+--- /tmp/das_sdd_snaps/snap-g4-1/das/state/lua/_common.lua	2026-10-30 13:23:12
++++ das/state/lua/_common.lua	2026-10-30 13:26:22
+@@ -176,8 +176,44 @@
+     if tag and tag ~= '' and tag ~= cjson.null then
+       entry.dead_letter_id = tag
+     end
+     redis.call('RPUSH', transitions_key, cjson.encode(entry))
+     return 1
+   end
+   return 0
+ end
++
++-- Phase 4 key names, derived from the request key das:req:{rid} (KEYS[1] of the
++-- per-Request scripts) so callers' KEYS lists stay unchanged. They must match
++-- das/state/keys.py. Building key names inside a script that are not in KEYS is
++-- only safe because DAS runs on a single Redis primary (Phase 1 OD 4.1); it would
++-- break under Redis Cluster.
++local function key_prefix(req_key)
++  local i = string.find(req_key, ':req:', 1, true)
++  if not i then error('key_prefix: not a request key: ' .. tostring(req_key)) end
++  return string.sub(req_key, 1, i - 1)
++end
++
++local function events_key(req_key)
++  return req_key .. ':events'
++end
++
++local function webhook_key(req_key)
++  return req_key .. ':webhook'
++end
++
++local function outbox_key(req_key)
++  return key_prefix(req_key) .. ':webhooks:due'
++end
++
++local function active_key(req_key, fp)
++  return key_prefix(req_key) .. ':client:' .. fp .. ':active'
++end
++
++local function idem_key(req_key, fp, h)
++  return key_prefix(req_key) .. ':client:' .. fp .. ':idem:' .. h
++end
++
++-- Doubles as text that tonumber() and Python float() read back exactly.
++local function fmt_double(x)
++  return string.format('%.17g', x)
++end
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/das/state/lua/purge_request.lua das/state/lua/purge_request.lua
+--- /tmp/das_sdd_snaps/snap-g4-1/das/state/lua/purge_request.lua	2026-10-30 13:23:12
++++ das/state/lua/purge_request.lua	2026-10-30 13:27:00
+@@ -1,45 +1,45 @@
+ -- purge_request: retention of one Request (Req 14.3, 14.4, 14.5, 14.9). Mirrors
+ -- das.ops.retention.retention_decision with the script's own TIME, so the safety
+ -- condition never depends on the caller's clock:
+ --   missing or non-terminal -> KEEP (stale retention candidates are removed)
+ --   terminal without finished_at -> STAMPED (finished_at = now; never deleted now)
+ --   finished_at + ttl > now -> KEEP
+ --   otherwise -> every key of the Request and every index entry is removed: DELETED
+--- KEYS[1..9] request_keys(rid): request, jobs, results, inbox, timers, transitions,
+---   lease, usage, pending_replays
+--- KEYS[10] das:requests:index, KEYS[11..15] das:requests:by_status:{Pending, Running,
+---   Completed, Failed, Cancelled}, KEYS[16] das:requests:finished,
+--- KEYS[17] das:requests:inbox_purge, KEYS[18] das:requests:pending, KEYS[19] das:leases:expiry
++-- KEYS[1..11] request_keys(rid): request, jobs, results, inbox, timers, transitions,
++--   lease, usage, pending_replays, events, webhook (Phase 4)
++-- KEYS[12] das:requests:index, KEYS[13..17] das:requests:by_status:{Pending, Running,
++--   Completed, Failed, Cancelled}, KEYS[18] das:requests:finished,
++-- KEYS[19] das:requests:inbox_purge, KEYS[20] das:requests:pending, KEYS[21] das:leases:expiry
+ -- ARGV[1] request_id, ARGV[2] terminal_request_ttl in ms
+ -- Returns {'DELETED'} | {'KEEP'} | {'STAMPED'}.
+ local rid = ARGV[1]
+ local ttl = tonumber(ARGV[2])
+ if not ttl or ttl < 0 then
+   return redis.error_reply('purge_request: ttl_ms must be a non-negative number')
+ end
+ local _, now = server_time()
+ local v = redis.call('HMGET', KEYS[1], 'status', 'finished_at')
+ local status = v[1]
+ if not is_terminal(status) then
+-  redis.call('ZREM', KEYS[16], rid)
++  redis.call('ZREM', KEYS[18], rid)
+   if not status then
+-    redis.call('ZREM', KEYS[17], rid)
++    redis.call('ZREM', KEYS[19], rid)
+   end
+   return { 'KEEP' }
+ end
+ local finished = tonumber(v[2] or '')
+ if not finished then
+-  mark_finished(KEYS[1], KEYS[16], KEYS[17], rid, now)
++  mark_finished(KEYS[1], KEYS[18], KEYS[19], rid, now)
+   return { 'STAMPED' }
+ end
+ if finished + ttl > now then
+   -- Keep the candidate score in line with finished_at (e.g. after a later re-finish).
+-  redis.call('ZADD', KEYS[16], finished, rid)
++  redis.call('ZADD', KEYS[18], finished, rid)
+   return { 'KEEP' }
+ end
+ redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7],
+-  KEYS[8], KEYS[9])
+-for i = 10, 19 do
++  KEYS[8], KEYS[9], KEYS[10], KEYS[11])
++for i = 12, 21 do
+   redis.call('ZREM', KEYS[i], rid)
+ end
+ return { 'DELETED' }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/das/state/lua/rate_check.lua das/state/lua/rate_check.lua
+--- /tmp/das_sdd_snaps/snap-g4-1/das/state/lua/rate_check.lua	1970-01-01 08:00:00
++++ das/state/lua/rate_check.lua	2026-10-30 13:26:22
+@@ -0,0 +1,46 @@
++-- rate_check: take one token from a client's rate-limit bucket (Phase 4 Req 2.1-2.4).
++-- Mirrors das.client.bucket.take with the script's own TIME, so every Gateway
++-- replica shares one bucket and one clock:
++--   rate == 0 -> limit disabled: OK, nothing read or written
++--   missing hash -> full bucket (burst tokens)
++--   refill: tokens = min(burst, tokens + rate * max(0, now - updated)),
++--           updated = max(now, updated)
++--   tokens >= 1 -> store tokens - 1: OK; otherwise store the refilled tokens: LIMITED
++-- tokens and updated are stored as %.17g text so Python and Lua see the same doubles.
++-- The key expires ceil(burst / rate * 1000) + 60000 ms after each call, longer than a
++-- full refill, so an expired key is equivalent to a full bucket.
++-- KEYS[1] das:client:{fp}:bucket
++-- ARGV[1] rate (tokens per second, %.17g text), ARGV[2] burst (integer >= 1)
++-- Returns {'OK'} | {'LIMITED', retry_after_seconds (%.17g text)}.
++local rate = tonumber(ARGV[1])
++local burst = tonumber(ARGV[2])
++if not rate or rate ~= rate or rate < 0 or rate == math.huge then
++  return redis.error_reply('rate_check: rate must be a finite number >= 0')
++end
++if not burst or burst < 1 or burst ~= math.floor(burst) then
++  return redis.error_reply('rate_check: burst must be an integer >= 1')
++end
++if rate == 0 then
++  return { 'OK' }
++end
++local now = server_time()
++local v = redis.call('HMGET', KEYS[1], 'tokens', 'updated')
++local old_tokens = tonumber(v[1] or '')
++local old_updated = tonumber(v[2] or '')
++local tokens, updated
++if not old_tokens or not old_updated then
++  tokens, updated = burst, now
++else
++  local elapsed = math.max(0, now - old_updated)
++  tokens = math.min(burst, old_tokens + rate * elapsed)
++  updated = math.max(now, old_updated)
++end
++local allowed = tokens >= 1
++local stored = tokens
++if allowed then stored = tokens - 1 end
++redis.call('HSET', KEYS[1], 'tokens', fmt_double(stored), 'updated', fmt_double(updated))
++redis.call('PEXPIRE', KEYS[1], math.ceil(burst / rate * 1000) + 60000)
++if allowed then
++  return { 'OK' }
++end
++return { 'LIMITED', fmt_double((1 - tokens) / rate) }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/das/state/scripts.py das/state/scripts.py
+--- /tmp/das_sdd_snaps/snap-g4-1/das/state/scripts.py	2026-10-30 13:23:12
++++ das/state/scripts.py	2026-10-30 13:26:42
+@@ -21,16 +21,17 @@
+     "discard_dead_letter",
+     "reopen_request",
+     "list_dead_letters",
+     "purge_request",
+     "purge_inbox",
+     "purge_dead_letter",
+     "index_request",
+     "list_index",
++    "rate_check",
+ )
+ 
+ 
+ def _read(name: str) -> str:
+     return resources.files("das.state").joinpath("lua", f"{name}.lua").read_text(encoding="utf-8")
+ 
+ 
+ @cache
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/das/state/store.py das/state/store.py
+--- /tmp/das_sdd_snaps/snap-g4-1/das/state/store.py	2026-10-30 13:23:12
++++ das/state/store.py	2026-10-30 13:27:00
+@@ -49,16 +49,19 @@
+ 
+ INBOX_JOB_RESULT: Final = "job_result"
+ INBOX_UNACKED_EXHAUSTED: Final = "unacked_delivery_exhausted"
+ #: Inbox kind of an accepted Replay; data = {dead_letter_id, job_id, attempt} (design D7).
+ INBOX_REPLAY: Final = "replay"
+ 
+ CANCEL_REASON: Final = "cancelled: request cancelled"
+ 
++# Event_Stream length cap of a Request without a stored events_max_len (Phase 4 Req 6.5).
++DEFAULT_EVENTS_MAX_LEN: Final = 1000
++
+ # Owner-checked PEXPIRE / DEL of a single-key lock (IndexBackfill, Req 15.10).
+ _RENEW_LOCK_LUA: Final = (
+     "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+     "return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end"
+ )
+ _RELEASE_LOCK_LUA: Final = (
+     "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+     "return redis.call('DEL', KEYS[1]) else return 0 end"
+@@ -430,16 +433,29 @@
+         sec, usec = await self._r.time()
+         return int(sec) + int(usec) / 1_000_000
+ 
+     async def server_time_ms(self) -> int:
+         """Redis ``TIME`` in integer epoch ms, computed as the Lua scripts do."""
+         sec, usec = await self._r.time()
+         return int(sec) * 1000 + int(usec) // 1000
+ 
++    async def rate_check(self, fingerprint: str, rate: float, burst: int) -> float | None:
++        """Take one token from the client's rate-limit bucket by Redis time (Phase 4 Req 2.1-2.4).
++
++        Returns ``None`` when the call is allowed, otherwise ``retry_after`` in seconds.
++        ``rate == 0`` disables the limit and never touches the bucket key.
++        """
++        reply = await self._run(
++            "rate_check", [keys.client_bucket(fingerprint)], [f"{rate:.17g}", int(burst)]
++        )
++        if _s(reply[0]) == "OK":
++            return None
++        return float(_s(reply[1]))
++
+     async def claimable_request_ids(self, limit: int = 100) -> list[str]:
+         """Pending Requests plus Requests whose lease expiry has passed (for ClaimLoop)."""
+         now = await self.server_time()
+         pending = await self._r.zrange(keys.REQUESTS_PENDING, 0, limit - 1)
+         expired = await self._r.zrangebyscore(keys.LEASES_EXPIRY, "-inf", now, start=0, num=limit)
+         seen: dict[str, None] = {}
+         for rid in [*pending, *expired]:
+             seen.setdefault(_s(rid), None)
+@@ -1408,16 +1424,17 @@
+         written = int(_s(reply[2])) if len(reply) > 2 else 0
+         return WriteResult(status, at=at, transitions_written=written)
+     detail = _s(reply[1]) if len(reply) > 1 else None
+     return WriteResult(status, detail=detail)
+ 
+ 
+ __all__ = [
+     "CANCEL_REASON",
++    "DEFAULT_EVENTS_MAX_LEN",
+     "INBOX_JOB_RESULT",
+     "INBOX_REPLAY",
+     "INBOX_UNACKED_EXHAUSTED",
+     "LEASE_KIND_INITIAL",
+     "LEASE_KIND_TAKEOVER",
+     "PURGE_DELETED",
+     "PURGE_KEEP",
+     "PURGE_STAMPED",
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/tests/property/test_rate_limit_bucket.py tests/property/test_rate_limit_bucket.py
+--- /tmp/das_sdd_snaps/snap-g4-1/tests/property/test_rate_limit_bucket.py	1970-01-01 08:00:00
++++ tests/property/test_rate_limit_bucket.py	2026-10-30 13:27:51
+@@ -0,0 +1,91 @@
++# Feature: das-client-api, Property 1: Token bucket bound
++"""Property 1: Token bucket bound.
++
++For any ``rate`` (0 or 0.001-1000 tokens/s), ``burst`` (1-50) and non-decreasing
++sequence of call times:
++
++- ``rate_check.lua`` makes the same allow/deny decision as the pure
++  ``das.client.bucket.take`` at every call;
++- for every window ``[t_i, t_j]`` of calls the number admitted is at most
++  ``floor(burst + rate * (t_j - t_i))`` (Phase 4 Req 2.3);
++- two ``StateStore`` instances on one Redis (two Gateway replicas), called
++  alternately, decide exactly as a single bucket would (Phase 4 Req 2.4).
++
++Runs the real Lua script on a fresh in-process fakeredis server per example, with
++Redis ``TIME`` driven by :class:`FakeRedisTime`. Times are drawn as integer
++microseconds so Redis ``TIME`` and the model see identical values.
++
++**Validates: Requirements 2.3, 2.4**
++"""
++
++from __future__ import annotations
++
++import asyncio
++import math
++
++from fakeredis import FakeServer
++from fakeredis.aioredis import FakeRedis
++from hypothesis import given
++from hypothesis import strategies as st
++
++from das.client.bucket import BucketState, take
++from das.state import StateStore
++from tests.fixtures.redis_time import FakeRedisTime
++
++START_US = 1_700_000_000_000_000
++FP = "cbabecbd"
++
++rates = st.one_of(st.just(0.0), st.floats(0.001, 1000, allow_nan=False, allow_infinity=False))
++bursts = st.integers(1, 50)
++# Gaps up to 3 s, with zero gaps common so bursts of simultaneous calls occur.
++gaps = st.lists(st.one_of(st.just(0), st.integers(0, 3_000_000)), min_size=1, max_size=40)
++
++
++def _times(gap_list: list[int]) -> list[int]:
++    out, t = [], START_US
++    for g in gap_list:
++        t += g
++        out.append(t)
++    return out
++
++
++async def _check(rate: float, burst: int, times_us: list[int]) -> None:
++    server = FakeServer()
++    clients = [FakeRedis(server=server, decode_responses=True) for _ in range(2)]
++    try:
++        stores = [StateStore(c) for c in clients]
++        model: BucketState | None = None
++        admitted: list[bool] = []
++        with FakeRedisTime() as rt:
++            for i, us in enumerate(times_us):
++                sec, usec = divmod(us, 1_000_000)
++                rt.set(us / 1_000_000)
++                assert await clients[0].time() == (sec, usec)
++                now = sec + usec / 1_000_000  # server_time() in _common.lua
++                got = await stores[i % 2].rate_check(FP, rate, burst)
++                expected = take(model, now, rate, burst)
++                model = expected.state
++                assert (got is None) is expected.allowed, (i, us, got, expected)
++                if got is not None:
++                    assert math.isclose(got, expected.retry_after, rel_tol=1e-12, abs_tol=1e-12)
++                admitted.append(got is None)
++        if rate == 0:
++            assert all(admitted)
++            return
++        # Req 2.3: no window admits more than burst + rate * width calls. The 1e-9
++        # slack absorbs float rounding of the refill sum.
++        for i in range(len(times_us)):
++            count = 0
++            for j in range(i, len(times_us)):
++                count += admitted[j]
++                width = (times_us[j] - times_us[i]) / 1_000_000
++                assert count <= math.floor(burst + rate * width + 1e-9), (i, j, count)
++    finally:
++        for c in clients:
++            await c.aclose()
++
++
++@given(rates, bursts, gaps)
++def test_token_bucket_bound(rate: float, burst: int, gap_list: list[int]) -> None:
++    """**Validates: Requirements 2.3, 2.4**"""
++    asyncio.run(_check(rate, burst, _times(gap_list)))
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/tests/property/test_retention_safety.py tests/property/test_retention_safety.py
+--- /tmp/das_sdd_snaps/snap-g4-1/tests/property/test_retention_safety.py	2026-10-30 13:23:12
++++ tests/property/test_retention_safety.py	2026-10-30 13:27:13
+@@ -415,17 +415,18 @@
+         assert got == ("DELETED" if eligible else "KEEP"), (dlid, rec, self.now_ms, got)
+         if got == "DELETED":
+             del self.dls[dlid]
+             self.dl_deleted.add(dlid)
+         return got
+ 
+     async def assert_request_gone(self, rid: str) -> None:
+         names = purge_request_keys(rid)
+-        per_request, zsets = names[:9], names[9:]
++        n = len(keys.request_keys(rid))
++        per_request, zsets = names[:n], names[n:]
+         assert await self.r.exists(*per_request) == 0, rid
+         for z in zsets:
+             assert await self.r.zscore(z, rid) is None, (rid, z)
+ 
+     # ------------------------------------------------------------------ rules
+     @rule(op=ops)
+     def operate(self, op: tuple[str, int]) -> None:
+         event(f"op:{self.run(self.op(*op))}")
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/tests/unit/test_state_phase2_keys.py tests/unit/test_state_phase2_keys.py
+--- /tmp/das_sdd_snaps/snap-g4-1/tests/unit/test_state_phase2_keys.py	2026-10-30 13:23:12
++++ tests/unit/test_state_phase2_keys.py	2026-10-30 13:27:13
+@@ -39,17 +39,17 @@
+     assert keys.dlq_by_reason("malformed") == "das:dlq:by_reason:malformed"
+     assert keys.DLQ_TERMINAL == "das:dlq:terminal"
+     assert keys.GATEWAY_CURSOR_KEY == "das:gateway:cursor_key"
+ 
+ 
+ def test_request_keys_include_usage_and_pending_replays():
+     ks = keys.request_keys("r")
+     assert keys.usage("r") in ks and keys.pending_replays("r") in ks
+-    assert len(ks) == len(set(ks)) == 9
++    assert len(ks) == len(set(ks)) == 11  # + Phase 4 events, webhook
+ 
+ 
+ def test_phase2_request_fields_are_reserved():
+     for f in (keys.F_TRACE_CONTEXT, keys.F_FINISHED_AT, keys.F_JOB_COUNT, keys.F_USAGE_TOTAL,
+               keys.F_REPLAY_HISTORY):
+         assert f in keys.RESERVED_REQUEST_FIELDS
+ 
+ 
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-1/tests/unit/test_state_phase4_keys.py tests/unit/test_state_phase4_keys.py
+--- /tmp/das_sdd_snaps/snap-g4-1/tests/unit/test_state_phase4_keys.py	1970-01-01 08:00:00
++++ tests/unit/test_state_phase4_keys.py	2026-10-30 13:25:25
+@@ -0,0 +1,121 @@
++"""Unit tests for Phase 4 State_Store keys, Lua helpers and ``rate_check``
++(das-client-api tasks 4.1, Phase 4 Req 2.1-2.4)."""
++
++from __future__ import annotations
++
++import math
++
++import pytest
++
++from das.state import StateStore, keys
++from das.state.scripts import _read
++
++START = 1000.0
++
++
++def _helper_script(client, body: str):
++    """Register a test-only script that runs ``body`` after the shared helpers."""
++    return client.register_script(_read("_common") + "\n" + body)
++
++
++# ------------------------------------------------------------------ keys
++
++
++def test_phase4_key_builders():
++    assert keys.client_bucket("fp") == "das:client:fp:bucket"
++    assert keys.client_active("fp") == "das:client:fp:active"
++    assert keys.client_idem("fp", "h") == "das:client:fp:idem:h"
++    assert keys.client_streams("fp") == "das:client:fp:streams"
++    assert keys.events("r") == "das:req:r:events"
++    assert keys.webhook("r") == "das:req:r:webhook"
++    assert keys.WEBHOOKS_DUE == "das:webhooks:due"
++
++
++def test_request_keys_end_with_events_and_webhook():
++    ks = keys.request_keys("r")
++    assert ks[-2:] == ["das:req:r:events", "das:req:r:webhook"]
++    assert len(ks) == len(set(ks)) == 11
++
++
++def test_phase4_request_fields_are_reserved():
++    fields = (keys.F_CLIENT_FP, keys.F_BUDGET, keys.F_WEBHOOK_URL, keys.F_WEBHOOK_SECRET_NAME,
++              keys.F_EVENTS_MAX_LEN)
++    assert fields == ("client_fp", "budget", "webhook_url", "webhook_secret_name", "events_max_len")
++    for f in fields:
++        assert f in keys.RESERVED_REQUEST_FIELDS
++
++
++def test_default_events_max_len():
++    from das.state import DEFAULT_EVENTS_MAX_LEN
++
++    assert DEFAULT_EVENTS_MAX_LEN == 1000
++
++
++# ------------------------------------------------------------------ Lua helpers
++
++
++@pytest.mark.parametrize(
++    ("expr", "expected"),
++    [
++        ("key_prefix('das:req:r1')", "das"),
++        ("events_key('das:req:r1')", "das:req:r1:events"),
++        ("webhook_key('das:req:r1')", "das:req:r1:webhook"),
++        ("outbox_key('das:req:r1')", "das:webhooks:due"),
++        ("active_key('das:req:r1', 'cbabecbd')", "das:client:cbabecbd:active"),
++        ("idem_key('das:req:r1', 'cbabecbd', 'h1')", "das:client:cbabecbd:idem:h1"),
++        ("fmt_double(0.1 + 0.2)", "0.30000000000000004"),
++    ],
++)
++async def test_lua_key_helpers(fake_redis, expr, expected):
++    assert await _helper_script(fake_redis, f"return {expr}")(keys=[], args=[]) == expected
++
++
++async def test_lua_key_helpers_match_python(fake_redis):
++    req = keys.request("r1")
++    script = _helper_script(
++        fake_redis,
++        "return {events_key(KEYS[1]), webhook_key(KEYS[1]), outbox_key(KEYS[1]),"
++        " active_key(KEYS[1], 'f'), idem_key(KEYS[1], 'f', 'h')}",
++    )
++    assert await script(keys=[req], args=[]) == [
++        keys.events("r1"), keys.webhook("r1"), keys.WEBHOOKS_DUE,
++        keys.client_active("f"), keys.client_idem("f", "h"),
++    ]
++
++
++# ------------------------------------------------------------------ rate_check
++
++
++async def test_rate_check_bucket_sequence(state_store: StateStore, fake_redis_time):
++    fake_redis_time.set(START)
++    assert await state_store.rate_check("fp", 1.0, 2) is None
++    assert await state_store.rate_check("fp", 1.0, 2) is None
++    assert await state_store.rate_check("fp", 1.0, 2) == pytest.approx(1.0)
++    fake_redis_time.advance(0.5)
++    assert await state_store.rate_check("fp", 1.0, 2) == pytest.approx(0.5)
++    fake_redis_time.advance(0.5)
++    assert await state_store.rate_check("fp", 1.0, 2) is None
++
++
++async def test_rate_check_zero_rate_never_touches_the_bucket(state_store: StateStore, fake_redis_time):
++    fake_redis_time.set(START)
++    for _ in range(1000):
++        assert await state_store.rate_check("fp", 0.0, 1) is None
++    assert await state_store.client.exists(keys.client_bucket("fp")) == 0
++
++
++async def test_rate_check_bucket_ttl(state_store: StateStore, fake_redis_time):
++    fake_redis_time.set(START)
++    assert await state_store.rate_check("fp", 1.0, 2) is None
++    pttl = await state_store.client.pttl(keys.client_bucket("fp"))
++    assert 0 < pttl <= math.ceil(2 / 1 * 1000) + 60_000
++
++
++async def test_rate_check_rejects_bad_arguments(fake_redis):
++    from das.state.scripts import script_source
++
++    script = fake_redis.register_script(script_source("rate_check"))
++    for args in (["x", "2"], ["-1", "2"], ["1", "0"], ["1", "1.5"]):
++        with pytest.raises(Exception, match="rate_check"):
++            await script(keys=["das:client:fp:bucket"], args=args)
++    assert await fake_redis.exists("das:client:fp:bucket") == 0
+diff --color -ruN -U2 /tmp/das_sdd_snaps/snap-g4-1/das-client-api/tasks.md .kiro/specs/das-client-api/tasks.md
+--- /tmp/das_sdd_snaps/snap-g4-1/das-client-api/tasks.md	2026-10-30 13:23:12
++++ .kiro/specs/das-client-api/tasks.md	2026-10-30 13:32:31
+@@ -40,15 +40,16 @@
+ 
+ - [ ] 4. State_Store: Lua scripts
+-  - [ ] 4.1 Add Lua helpers and the rate-limit script
+-    - `_common.lua`: `append_event`, `active_remove`, `webhook_enqueue`
++  - [x] 4.1 Add Lua helpers and the rate-limit script
++    - `_common.lua`: key-name helpers derived from the request key (`key_prefix`, `events_key`, `webhook_key`, `outbox_key`, `active_key`, `idem_key`) and `fmt_double`
+     - `rate_check.lua` matching `bucket.take`; bucket key TTL `ceil(burst/rate)+60`
+     - `das/state/keys.py`: new key builders; `das/state/scripts.py`: register new scripts
+     - _Requirements: 2.1, 2.4, 6.5_
+-  - [ ] 4.2 Write property test for the token bucket
++  - [x] 4.2 Write property test for the token bucket
+     - **Property 1: Token bucket bound**
+     - **Validates: Requirements 2.3, 2.4**
+   - [ ] 4.3 Extend `create_request.lua` and `StateStore.create_request`
+     - Idempotency check → quota check → writes (`client_fp`, `budget`, webhook target, `SADD` active, idem record with TTL, `request.created` event); returns `OK` / `REPLAYED` / `IDEM_CONFLICT` / `QUOTA_EXCEEDED`
+-    - `CreateResult` dataclass in `das/state/store.py`; old callers (no fingerprint) keep working
++    - `_common.lua`: `append_event`
++    - `ClientRequestSpec`, `CreateResult` and `StateStore.submit_request` in `das/state/store.py`; `create_request(prompt)` callers keep working
+     - _Requirements: 3.1, 3.2, 4.2, 4.3, 4.4, 4.5, 5.4, 6.1, 8.1_
+   - [ ] 4.4 Write property test for idempotent create
+@@ -56,6 +57,7 @@
+     - **Validates: Requirements 4.2, 4.3, 4.4, 4.6, 4.7**
+   - [ ] 4.5 Add events, quota release and webhook enqueue to state-changing scripts
+-    - `commit_plan.lua` (`request.planned`), `apply_transition.lua` (one `job.transition` per entry, same order), `reopen_request.lua` (`SADD` active, `request.reopened`), `finalize.lua` and `cancel_request.lua` (`active_remove`, Terminal_Event from ARGV, `webhook_enqueue`), `purge_request.lua` (delete events stream and webhook hash, `ZREM` outbox, `active_remove`)
+-    - Update the matching `StateStore` methods and key lists; callers pass `terminal_event_data`
++    - `commit_plan.lua` (`request.planned`), `apply_transition.lua` (one `job.transition` per entry, same order), `reopen_request.lua` (`request.reopened`), `replay_dead_letter.lua` (`client_active_add` when it reopens a Failed Request), `finalize.lua` and `cancel_request.lua` (`client_active_remove`, `terminal_event` with budget view from ARGV, which also enqueues the webhook), `purge_request.lua` (`ZREM` outbox, `client_active_remove`)
++    - `_common.lua`: `client_active_add`, `client_active_remove`, `terminal_event`; `put_job` appends `job.transition`
++    - Update the matching `StateStore` methods (`commit_plan`, `finalize`, `cancel_request` budget view, `delete_request`, `get_webhook`)
+     - _Requirements: 3.3, 3.4, 3.5, 6.1, 6.3, 6.4, 6.6, 8.2_
+   - [ ] 4.6 Write property test for Active_Set accounting

@@ -1,0 +1,1233 @@
+# Group 5 Task 1 review package (no git: diff vs pre-task snapshot)
+
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-1/das/manager/machine.py das/manager/machine.py
+--- /tmp/das_sdd_snaps/snap-g5-1/das/manager/machine.py	2026-10-30 16:17:57
++++ das/manager/machine.py	2026-10-30 16:31:54
+@@ -41,36 +41,40 @@
+   Job in ``Failed`` awaiting a retry keeps ``Failed`` when its Request is cancelled.
+ """
+ from __future__ import annotations
+ 
+ from collections.abc import Iterable, Mapping
+ from dataclasses import dataclass, field
+ from typing import Final
+ 
++from das.client.budget import Budget, ExceededKind, budget_status
+ from das.manager.backoff import backoff
+ from das.manager.final_result import build_final_result, skip_reason
+ from das.manager.routing import choose_routing_capability, jobs_destination
+ from das.models import (
+     TERMINAL_JOB,
+     AgentRecord,
+     FinalResult,
+     JobDispatchPayload,
+     JobPlan,
+     JobRecord,
+     JobResultPayload,
+     JobState,
+     RequestStatus,
+ )
+ from das.models.usage import UsageRecord
++from das.ops.cost import PriceTable
+ from das.ops.replay import skipped_to_reset
+ from das.plan.dag import CycleError, topo_order
+ from das.state.store import Timer, TimerKey, TransitionBatch
+ 
+ __all__ = [
++    "BUDGET_EXCEEDED",
++    "BUDGET_UNENFORCEABLE",
+     "MAX_PUBLISH_ATTEMPTS",
+     "REASON_DISPATCH_FAILURE",
+     "REASON_NO_CAPABLE_WORKER",
+     "REASON_UNACKED_DELIVERY",
+     "TIMER_CAPABILITY_WAIT",
+     "TIMER_PUBLISH",
+     "TIMER_RETRY",
+     "CancelObserved",
+@@ -93,16 +97,17 @@
+     "StateChange",
+     "StepContext",
+     "Tick",
+     "TimerFired",
+     "UnackedDeliveryExhausted",
+     "UNKNOWN_LLM",
+     "apply_decision",
+     "attempt_limit",
++    "budget_exceeded",
+     "is_settled",
+     "resume",
+     "step",
+ ]
+ 
+ # Timer kinds (must not contain ':' — see das.state.keys.timer_member).
+ TIMER_RETRY: Final = "retry"
+ TIMER_PUBLISH: Final = "publish"
+@@ -113,16 +118,21 @@
+ 
+ REASON_NO_CAPABLE_WORKER: Final = "no capable worker"
+ REASON_DISPATCH_FAILURE: Final = (
+     f"dispatch failure: publish not confirmed after {MAX_PUBLISH_ATTEMPTS} attempts"
+ )
+ REASON_UNACKED_DELIVERY: Final = "repeated unacknowledged delivery"
+ NO_SUCCESS_ERROR: Final = "no job succeeded"
+ 
++# Budget stop (Phase 4 Req 5.6, 5.7): Job reason and Request error, and the error of an
++# ``unenforceable`` stop.
++BUDGET_EXCEEDED: Final = "budget_exceeded"
++BUDGET_UNENFORCEABLE: Final = "budget_unenforceable"
++
+ # Provider/model recorded when a Job_Result carries no LLM headers (Worker v1, D2).
+ UNKNOWN_LLM: Final = "unknown"
+ 
+ 
+ def cancelled_dependency_reason(dependency_id: str) -> str:
+     return f"skipped: dependency {dependency_id} cancelled"
+ 
+ 
+@@ -155,50 +165,58 @@
+             base_backoff=float(limits.base_backoff),  # type: ignore[attr-defined]
+             max_backoff=float(limits.max_backoff),  # type: ignore[attr-defined]
+             capability_wait=float(limits.capability_wait),  # type: ignore[attr-defined]
+         )
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class StepContext:
+-    """Time (Redis server time, seconds), limits, and the registry's agents."""
++    """Time (Redis server time, seconds), limits, the registry's agents, and the
++    Price_Table used to price Budget_Used (Phase 4 Req 5.6)."""
+ 
+     now: float
+     config: MachineConfig = field(default_factory=MachineConfig)
+     agents: tuple[AgentRecord, ...] = ()
++    price_table: PriceTable | None = None
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class RequestSnapshot:
+     """The persisted state of one Request that the reducer needs."""
+ 
+     request_id: str
+     status: RequestStatus
+     prompt: str
+     plan: JobPlan | None
+     jobs: Mapping[str, JobRecord]
+     results: Mapping[tuple[str, int], JobResultPayload] = field(default_factory=dict)
+     timers: tuple[Timer, ...] = ()
+-    # Store-side state the reducer never reads; kept so ``apply_decision`` can model
+-    # ``apply_transition.lua`` (Usage_Records list and the ``pending_replays`` set).
++    # Every persisted Usage_Record: Budget_Used of a budgeted Request (Phase 4 Req 5.7);
++    # ``apply_decision`` appends to it like ``apply_transition.lua`` does.
+     usage: tuple[UsageRecord, ...] = ()
++    # Store-side state the reducer never reads, kept so ``apply_decision`` can model
++    # ``apply_transition.lua``.
+     pending_replays: frozenset[str] = frozenset()
++    # Effective_Budget (Phase 4 Req 5.4); None means no budget enforcement.
++    budget: Budget | None = None
+ 
+     @classmethod
+     def from_stored(cls, stored: object) -> RequestSnapshot:
+         """Build from a ``das.state.store.StoredRequest``."""
+         return cls(
+             request_id=stored.request_id,  # type: ignore[attr-defined]
+             status=stored.status,  # type: ignore[attr-defined]
+             prompt=stored.prompt,  # type: ignore[attr-defined]
+             plan=stored.plan,  # type: ignore[attr-defined]
+             jobs=dict(stored.jobs),  # type: ignore[attr-defined]
+             results=dict(stored.results),  # type: ignore[attr-defined]
+             timers=tuple(stored.timers),  # type: ignore[attr-defined]
++            usage=tuple(stored.usage or ()),  # type: ignore[attr-defined]
++            budget=stored.budget,  # type: ignore[attr-defined]
+         )
+ 
+     def timer_keys(self) -> frozenset[TimerKey]:
+         return frozenset(t.key for t in self.timers)
+ 
+ 
+ # --------------------------------------------------------------------------- events
+ 
+@@ -354,19 +372,25 @@
+     """
+ 
+     prompt: str
+     succeeded: Mapping[str, str]  # Job_ID -> content
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class FinalizeFailed:
+-    """Every Job is terminal and none Succeeded: store this and fail the Request (7.3)."""
++    """Every Job is terminal and none Succeeded: store this and fail the Request (7.3).
+ 
++    Also emitted for a budget stop once no Job is in flight (Phase 4 Req 5.7); then
++    ``budget_kind`` is set and ``final_result.error`` is ``budget_exceeded`` or
++    ``budget_unenforceable``.
++    """
++
+     final_result: FinalResult
++    budget_kind: ExceededKind | None = None
+ 
+ 
+ Effect = (
+     PublishDispatch
+     | PublishDeadLetter
+     | SendCancel
+     | ScheduleTimer
+     | RunSummarizer
+@@ -423,16 +447,23 @@
+ 
+ 
+ def _awaiting_retry(record: JobRecord, timers: Iterable[TimerKey]) -> bool:
+     return record.state in (JobState.FAILED, JobState.TIMED_OUT) and (
+         TimerKey(TIMER_RETRY, record.job.job_id, record.attempt) in timers
+     )
+ 
+ 
++def budget_exceeded(snapshot: RequestSnapshot, ctx: StepContext) -> ExceededKind | None:
++    """Exceeded kind of the snapshot's persisted Budget_Used, or None (Phase 4 Req 5.6, 5.7)."""
++    if snapshot.budget is None:
++        return None
++    return budget_status(snapshot.usage, snapshot.budget, ctx.price_table).exceeded
++
++
+ def is_settled(record: JobRecord, timers: Iterable[TimerKey]) -> bool:
+     """Terminal for scheduling purposes: in ``TERMINAL_JOB`` and not awaiting a retry."""
+     keys = timers if isinstance(timers, (set, frozenset, dict)) else set(timers)
+     return record.state in TERMINAL_JOB and not _awaiting_retry(record, keys)
+ 
+ 
+ def _plan_order(plan: JobPlan) -> list[str]:
+     try:
+@@ -484,16 +515,30 @@
+         self.tag: str | None = None
+         self.replays_applied: list[str] = []
+         self.dead_letter_reverts: list[str] = []
+         self.warnings: list[str] = []
+         # Skipped Jobs reset to Waiting by a replay in this step; failure propagation
+         # leaves them alone so each Job changes state at most once per step.
+         self.reset_jobs: set[str] = set()
+ 
++    # -- budget
++
++    def budget_kind(self) -> ExceededKind | None:
++        """Exceeded kind of Budget_Used including usage accepted earlier in this step.
++
++        Not None means budget-stop mode (Phase 4 Req 5.7). Recomputed from persisted usage
++        on every step, so a new lease owner reaches the same decision (v1 Req 2.5).
++        """
++        budget = self.snap.budget
++        if budget is None:
++            return None
++        usage = (*self.snap.usage, *self.new_usage)
++        return budget_status(usage, budget, self.ctx.price_table).exceeded
++
+     # -- jobs
+ 
+     def put(self, record: JobRecord) -> None:
+         job_id = record.job.job_id
+         original = self.snap.jobs.get(job_id)
+         current = self.jobs.get(job_id)
+         if (
+             original is not None
+@@ -669,17 +714,21 @@
+         w.update(
+             job_id,
+             state=JobState.CANCELLED,
+             worker_id=result.worker_id,
+             reason=result.error or "cancelled",
+         )
+     else:  # Failed or TimedOut
+         reason = result.error or f"job {result.status}"
+-        if result.attempt >= attempt_limit(record, w.cfg):
++        if w.budget_kind() is not None:
++            # Phase 4 Req 5.7: in budget-stop mode (this result's usage included) a failed
++            # Job is neither retried nor dead-lettered.
++            w.update(job_id, state=JobState.FAILED, worker_id=result.worker_id, reason=BUDGET_EXCEEDED)
++        elif result.attempt >= attempt_limit(record, w.cfg):
+             # Req 6.3: final attempt exhausted (limit raised by a Replay, Req 13.4).
+             w.update(job_id, state=JobState.FAILED, worker_id=result.worker_id, reason=reason)
+             w.effects.append(
+                 PublishDeadLetter(
+                     request_id=w.snap.request_id,
+                     job_id=job_id,
+                     attempts=result.attempt,
+                     last_error=reason,
+@@ -713,16 +762,21 @@
+     w.update(event.job_id, state=JobState.DISPATCHED, publish_failures=0)
+     w.remove_job_timers(event.job_id)
+ 
+ 
+ def _on_publish_failed(w: _Work, event: PublishFailed) -> None:
+     record = w.jobs.get(event.job_id)
+     if record is None or record.attempt != event.attempt or not _publish_outstanding(w, record):
+         return
++    if w.budget_kind() is not None:
++        # Phase 4 Req 5.7: never re-published, so not in flight any more.
++        w.update(event.job_id, state=JobState.SKIPPED, reason=BUDGET_EXCEEDED)
++        w.remove_job_timers(event.job_id)
++        return
+     failures = record.publish_failures + 1
+     if failures >= MAX_PUBLISH_ATTEMPTS:
+         w.update(event.job_id, publish_failures=failures)
+         w.fail(event.job_id, REASON_DISPATCH_FAILURE)
+         return
+     w.update(event.job_id, publish_failures=failures)
+     w.add_timer(TIMER_PUBLISH, event.job_id, record.attempt, w.now + w.cfg.publish_retry_delay)
+ 
+@@ -732,16 +786,22 @@
+     record = w.jobs.get(event.job_id)
+     if key not in w.timers or record is None:
+         return
+     if event.kind == TIMER_CAPABILITY_WAIT:
+         return  # evaluated by the capability-wait pass in _settle
+     w.remove_timer(key)
+     if record.attempt != event.attempt:
+         return
++    if w.budget_kind() is not None:
++        # Phase 4 Req 5.7: no re-dispatch. A retry ends the Job; a Ready Job whose publish
++        # timer fired is Skipped by _settle.
++        if event.kind == TIMER_RETRY and record.state in (JobState.FAILED, JobState.TIMED_OUT):
++            w.update(event.job_id, state=JobState.FAILED, reason=BUDGET_EXCEEDED)
++        return
+     if event.kind == TIMER_RETRY and record.state in (JobState.FAILED, JobState.TIMED_OUT):
+         w.enter_ready(event.job_id, record.attempt + 1)
+     elif event.kind == TIMER_PUBLISH and record.state is JobState.READY:
+         if not w.try_dispatch(event.job_id):
+             w.start_capability_wait(event.job_id)
+ 
+ 
+ def _replay_violation(w: _Work, event: ReplayRequested) -> str | None:
+@@ -762,18 +822,21 @@
+     w.dead_letter_reverts.append(event.dead_letter_id)
+     w.replays_applied.append(event.dead_letter_id)
+     w.warnings.append(
+         f"replay {event.dead_letter_id} of job {event.job_id} not applied: {violation}"
+     )
+ 
+ 
+ def _on_replay(w: _Work, event: ReplayRequested) -> None:
+-    """Apply an accepted Replay (Req 13.4) or revert its record to Pending (13.15)."""
+-    violation = _replay_violation(w, event)
++    """Apply an accepted Replay (Req 13.4) or revert its record to Pending (13.15).
++
++    In budget-stop mode every Replay is reverted (Phase 4 Req 5.7).
++    """
++    violation = "budget exceeded" if w.budget_kind() is not None else _replay_violation(w, event)
+     if violation is not None:
+         _revert_replay(w, event, violation)
+         return
+     plan = w.snap.plan
+     assert plan is not None
+     record = w.jobs[event.job_id]
+     # Computed while the replayed Job is still Failed.
+     to_reset = skipped_to_reset(plan, w.jobs, event.job_id)
+@@ -802,16 +865,21 @@
+ 
+ def _settle(w: _Work) -> None:
+     """Re-evaluate the Request after an event: capability wait, failure propagation,
+     readiness, and the summarization trigger."""
+     plan = w.snap.plan
+     assert plan is not None
+     order = [j for j in _plan_order(plan) if j in w.jobs]
+ 
++    kind = w.budget_kind()
++    if kind is not None:
++        _settle_budget_stop(w, plan, order, kind)
++        return
++
+     # Ready Jobs waiting for a routing Capability (Req 4.6).
+     for job_id in order:
+         record = w.jobs[job_id]
+         if record.state is not JobState.READY or job_id in w.dispatched:
+             continue
+         key = TimerKey(TIMER_CAPABILITY_WAIT, job_id, record.attempt)
+         if key not in w.timers:
+             continue
+@@ -863,16 +931,51 @@
+         }
+         if any(w.jobs[j].state is JobState.SUCCEEDED for j in order):
+             w.effects.append(RunSummarizer(prompt=w.snap.prompt, succeeded=succeeded))
+         else:
+             final = build_final_result(plan, w.jobs, w.results, None, NO_SUCCESS_ERROR)
+             w.effects.append(FinalizeFailed(final_result=final))
+ 
+ 
++def _never_published(w: _Work, record: JobRecord) -> bool:
++    """A Ready Job whose current attempt has (or had at the start of this step) a pending
++    ``publish`` or ``capwait`` timer: not an In_Flight_Job (Phase 4 Req 5.7)."""
++    keys = (
++        TimerKey(TIMER_PUBLISH, record.job.job_id, record.attempt),
++        TimerKey(TIMER_CAPABILITY_WAIT, record.job.job_id, record.attempt),
++    )
++    return record.state is JobState.READY and any(
++        k in w.timers or k in w._snap_timer_keys for k in keys
++    )
++
++
++def _settle_budget_stop(w: _Work, plan: JobPlan, order: list[str], kind: ExceededKind) -> None:
++    """Budget-stop mode (Phase 4 Req 5.7): replaces capability wait, failure propagation
++    and readiness. Nothing is dispatched; every Job that is not in flight ends with reason
++    ``budget_exceeded``; once no Job is in flight the Request fails without the Summarizer.
++    """
++    for job_id in order:
++        record = w.jobs[job_id]
++        if record.state is JobState.WAITING:
++            w.update(job_id, state=JobState.SKIPPED, reason=BUDGET_EXCEEDED)
++        elif _never_published(w, record):
++            w.update(job_id, state=JobState.SKIPPED, reason=BUDGET_EXCEEDED)
++            w.remove_job_timers(job_id)
++        elif _awaiting_retry(record, w.timers.keys()):
++            w.update(job_id, state=JobState.FAILED, reason=BUDGET_EXCEEDED)
++            w.remove_timer(TimerKey(TIMER_RETRY, job_id, record.attempt))
++
++    timer_keys = w.timers.keys()
++    if order and all(is_settled(w.jobs[j], timer_keys) for j in order):
++        error = BUDGET_UNENFORCEABLE if kind == "unenforceable" else BUDGET_EXCEEDED
++        final = build_final_result(plan, w.jobs, w.results, None, error)
++        w.effects.append(FinalizeFailed(final_result=final, budget_kind=kind))
++
++
+ def _in_flight(record: JobRecord, results: Mapping[tuple[str, int], JobResultPayload]) -> bool:
+     return (
+         record.state in (JobState.READY, JobState.DISPATCHED)
+         and record.attempt >= 1
+         and (record.job.job_id, record.attempt) not in results
+     )
+ 
+ 
+@@ -995,9 +1098,10 @@
+         status=snapshot.status,
+         prompt=snapshot.prompt,
+         plan=snapshot.plan,
+         jobs=jobs,
+         results=results,
+         timers=tuple(sorted(timers.values(), key=lambda t: (t.due, t.key.member))),
+         usage=tuple(usage),
+         pending_replays=snapshot.pending_replays - frozenset(u.replays_applied),
++        budget=snapshot.budget,
+     )
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-1/das/state/store.py das/state/store.py
+--- /tmp/das_sdd_snaps/snap-g5-1/das/state/store.py	2026-10-30 16:17:57
++++ das/state/store.py	2026-10-30 16:31:54
+@@ -405,16 +405,19 @@
+     trace_context: TraceContext | None = None  # persisted by the Gateway (Req 6.1)
+     finished_at: int | None = None  # epoch ms, set when the Request became terminal (Req 14.2)
+     job_count: int | None = None
+     usage_totals: TokenUsage = field(default_factory=TokenUsage)
+     replay_history: list[ReplayHistoryEntry] = field(default_factory=list)
+     # Request-level entries of the transitions list; only when transitions are requested.
+     request_transitions: list[RequestTransitionEntry] | None = None
+     usage: list[UsageRecord] | None = None  # UsageRecords, only when requested
++    # Phase 4 fields (absent on Requests created without a client, Phase 4 Req 5.4).
++    budget: Budget | None = None  # Effective_Budget
++    client_fp: str | None = None
+ 
+ 
+ def _s(value: Any) -> str:
+     return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+ 
+ 
+ def _opt(value: Any) -> str | None:
+     return None if value is None else _s(value)
+@@ -1466,16 +1469,18 @@
+             transitions=transitions,
+             trace_context=_decode_trace_context(req.get(keys.F_TRACE_CONTEXT)),
+             finished_at=_opt_int(req.get(keys.F_FINISHED_AT)),
+             job_count=_opt_int(req.get(keys.F_JOB_COUNT)),
+             usage_totals=usage_totals,
+             replay_history=replay_history,
+             request_transitions=request_transitions,
+             usage=usage,
++            budget=Budget.from_json_obj(json.loads(budget_raw)) if (budget_raw := req.get(keys.F_BUDGET)) else None,
++            client_fp=req.get(keys.F_CLIENT_FP) or None,
+         )
+ 
+ 
+ def _lease_from_hash(rid: str, raw: Mapping[Any, Any]) -> Lease | None:
+     h = {_s(k): _s(v) for k, v in raw.items()}
+     if not h.get("owner") or not h.get("expires_at"):
+         return None
+     return Lease(
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-1/tests/property/test_budget_stop.py tests/property/test_budget_stop.py
+--- /tmp/das_sdd_snaps/snap-g5-1/tests/property/test_budget_stop.py	1970-01-01 08:00:00
++++ tests/property/test_budget_stop.py	2026-10-30 16:34:11
+@@ -0,0 +1,284 @@
++# Feature: das-client-api, Property 5: Budget stop
++"""Property test for budget-stop mode in the reducer (das-client-api task 5.2).
++
++A random Job_Plan, Budget and optional planning usage are driven through ``step`` /
++``apply_decision`` by a model Worker: results with random status and token usage for
++In_Flight_Jobs, ``PublishConfirmed`` / ``PublishFailed``, firing due timers, and
++``Tick``. The model records the step at which ``budget_exceeded`` first reports a kind
++(the stop step), Budget_Used then, and the In_Flight_Jobs then (glossary definition:
++Ready or Dispatched with attempt >= 1 and no result for that attempt, excluding a Ready
++Job with a pending ``publish`` or ``capwait`` timer). It checks:
++
++- from the stop step on, no decision contains ``PublishDispatch`` or schedules a timer
++  (in particular no ``retry`` timer);
++- every Usage_Record added after the stop step belongs to the current attempt of a Job
++  that was in flight at the stop step (one per Job), so final Budget_Used minus
++  Budget_Used at the stop step is at most the usage of those Jobs' results;
++- ``FinalizeFailed`` with ``budget_kind`` is emitted exactly on the steps after which no
++  Job is in flight, with the matching error; ``RunSummarizer`` is never emitted;
++- before the stop step, every decision (and so every ``PublishDispatch``) equals the one
++  the same events produce with ``budget=None``.
++
++**Validates: Requirements 5.6, 5.7, 5.8**
++"""
++
++from __future__ import annotations
++
++import dataclasses
++from decimal import Decimal
++
++from hypothesis import event as hevent
++from hypothesis import given
++from hypothesis import strategies as st
++
++from das.client.budget import Budget
++from das.manager.machine import (
++    BUDGET_EXCEEDED,
++    BUDGET_UNENFORCEABLE,
++    TIMER_CAPABILITY_WAIT,
++    TIMER_PUBLISH,
++    FinalizeFailed,
++    JobResultReceived,
++    MachineConfig,
++    PlanCommitted,
++    PublishConfirmed,
++    PublishDispatch,
++    PublishFailed,
++    RequestSnapshot,
++    RunSummarizer,
++    ScheduleTimer,
++    StepContext,
++    Tick,
++    TimerFired,
++    apply_decision,
++    budget_exceeded,
++    step,
++)
++from das.models import (
++    AgentRecord,
++    JobPlan,
++    JobRecord,
++    JobResultPayload,
++    JobState,
++    RequestStatus,
++    TokenUsage,
++)
++from das.models.usage import UsageRecord
++from das.ops.cost import PriceEntry, PriceTable
++from das.state import TimerKey
++from tests.strategies import job_plans
++
++S = JobState
++RID = "r1"
++CFG = MachineConfig(max_attempts=3, base_backoff=2, max_backoff=60, capability_wait=60)
++META = {"provider": "openai", "model": "gpt-x"}
++# 1,000 per million tokens: each token costs 0.001.
++PRICES = PriceTable(
++    currency="USD",
++    models=[
++        PriceEntry(
++            provider="openai",
++            model="gpt-x",
++            input_per_million=Decimal("1000"),
++            output_per_million=Decimal("1000"),
++        )
++    ],
++)
++MAX_EVENTS = 40
++
++
++def _worker(caps: frozenset[str]) -> AgentRecord:
++    return AgentRecord(
++        agent_id="w1",
++        role="worker",
++        host="h",
++        capabilities=caps,
++        status="Available",
++        last_heartbeat=0.0,
++    )
++
++
++@st.composite
++def budgets(draw: st.DrawFn) -> tuple[Budget, PriceTable | None]:
++    if draw(st.booleans()):
++        return Budget(max_total_tokens=draw(st.integers(min_value=1, max_value=300))), None
++    cost = Decimal(draw(st.integers(min_value=1, max_value=300))) / 1000
++    table = draw(st.sampled_from([PRICES, PRICES, None]))
++    return Budget(max_cost=cost), table
++
++
++def _in_flight(snap: RequestSnapshot) -> set[str]:
++    """In_Flight_Jobs (Phase 4 glossary)."""
++    keys = snap.timer_keys()
++    out = set()
++    for job_id, rec in snap.jobs.items():
++        if rec.state not in (S.READY, S.DISPATCHED) or rec.attempt < 1:
++            continue
++        if (job_id, rec.attempt) in snap.results:
++            continue
++        if rec.state is S.READY and (
++            TimerKey(TIMER_PUBLISH, job_id, rec.attempt) in keys
++            or TimerKey(TIMER_CAPABILITY_WAIT, job_id, rec.attempt) in keys
++        ):
++            continue
++        out.add(job_id)
++    return out
++
++
++def _publish_outstanding(snap: RequestSnapshot) -> list[str]:
++    """Ready Jobs with a publish awaiting confirmation (no publish/capwait timer)."""
++    return sorted(j for j in _in_flight(snap) if snap.jobs[j].state is S.READY)
++
++
++def _tokens(snap: RequestSnapshot) -> int:
++    return sum(r.usage.total_tokens for r in snap.usage)
++
++
++def _result(job_id: str, attempt: int, status: str, tokens_in: int, tokens_out: int) -> JobResultPayload:
++    return JobResultPayload(
++        request_id=RID,
++        job_id=job_id,
++        attempt=attempt,
++        worker_id="w1",
++        status=status,  # type: ignore[arg-type]
++        content=f"out {job_id}@{attempt}",
++        error=None if status == "Succeeded" else "boom",
++        usage=TokenUsage(input_tokens=tokens_in, output_tokens=tokens_out, total_tokens=tokens_in + tokens_out),
++        duration_ms=1,
++    )
++
++
++@given(plan=job_plans(max_jobs=6), budget=budgets(), data=st.data())
++def test_budget_stop(plan: JobPlan, budget: tuple[Budget, PriceTable | None], data: st.DataObject):
++    """**Validates: Requirements 5.6, 5.7, 5.8**"""
++    limit, prices = budget
++    caps = frozenset(c for j in plan.jobs for c in j.capabilities)
++    planning = data.draw(st.integers(min_value=0, max_value=200), label="planning tokens")
++    usage: tuple[UsageRecord, ...] = ()
++    if planning:
++        usage = (
++            UsageRecord(
++                operation="plan",
++                provider="openai",
++                model="gpt-x",
++                usage=TokenUsage(input_tokens=planning, output_tokens=0, total_tokens=planning),
++            ),
++        )
++    snapshot = RequestSnapshot(
++        request_id=RID,
++        status=RequestStatus.RUNNING,
++        prompt="the prompt",
++        plan=plan,
++        jobs={j.job_id: JobRecord(job=j, state=S.WAITING, attempt=0) for j in plan.jobs},
++        usage=usage,
++        budget=limit,
++    )
++    unbudgeted = dataclasses.replace(snapshot, budget=None)
++
++    now = 100.0
++    stop_step: int | None = None
++    tokens_at_stop = 0
++    in_flight_at_stop: dict[str, int] = {}  # Job_ID -> attempt at the stop step
++    usage_len_at_stop = 0
++
++    event: object = PlanCommitted()
++    for index in range(MAX_EVENTS + 1):
++        # Workers for every Capability most of the time; none sometimes (capwait timers).
++        agents = (_worker(caps),) if data.draw(st.integers(0, 4), label="workers") else ()
++        ctx = StepContext(now=now, config=CFG, agents=agents, price_table=prices)
++        decision = step(snapshot, event, ctx)
++        post = apply_decision(snapshot, decision)
++        final = [e for e in decision.effects if isinstance(e, FinalizeFailed)]
++        budget_final = [e for e in final if e.budget_kind is not None]
++
++        if stop_step is None:
++            reference = step(unbudgeted, event, ctx)
++            unbudgeted = apply_decision(unbudgeted, reference)
++            kind = budget_exceeded(post, ctx)
++            if kind is None:
++                # Before the stop: exactly today's behaviour.
++                assert [e for e in decision.effects if isinstance(e, PublishDispatch)] == [
++                    e for e in reference.effects if isinstance(e, PublishDispatch)
++                ]
++                assert decision == reference
++                assert not budget_final
++                if final or any(isinstance(e, RunSummarizer) for e in decision.effects):
++                    hevent("finished within budget")
++                    return
++            else:
++                stop_step = index
++                hevent(f"stop: {kind}")
++                tokens_at_stop = _tokens(post)
++                usage_len_at_stop = len(post.usage)
++                in_flight_at_stop = {j: post.jobs[j].attempt for j in _in_flight(post)}
++
++        if stop_step is not None:
++            kind = budget_exceeded(post, ctx)
++            assert kind is not None  # usage only grows
++            assert not any(isinstance(e, PublishDispatch) for e in decision.effects)
++            assert not any(isinstance(e, ScheduleTimer) for e in decision.effects)
++            assert decision.updates.timers_add == ()
++            assert not any(isinstance(e, RunSummarizer) for e in decision.effects)
++            # Only Jobs in flight at the stop step add usage, once, for that attempt.
++            later = post.usage[usage_len_at_stop:]
++            owners = [(r.job_id, r.attempt) for r in later]
++            assert len(owners) == len(set(j for j, _ in owners))
++            for job_id, attempt in owners:
++                assert job_id in in_flight_at_stop and attempt == in_flight_at_stop[job_id]
++            carried = sum(
++                post.results[(j, a)].usage.total_tokens
++                for j, a in in_flight_at_stop.items()
++                if (j, a) in post.results
++            )
++            assert _tokens(post) - tokens_at_stop <= carried
++            # Finalized exactly when nothing is in flight any more.
++            in_flight = _in_flight(post)
++            assert in_flight <= set(in_flight_at_stop)
++            assert final == budget_final
++            assert bool(budget_final) == (not in_flight)
++            if budget_final:
++                [effect] = budget_final
++                assert effect.budget_kind == kind
++                expected = BUDGET_UNENFORCEABLE if kind == "unenforceable" else BUDGET_EXCEEDED
++                assert effect.final_result.error == expected
++                for rec in post.jobs.values():
++                    assert rec.state in (S.SUCCEEDED, S.FAILED, S.SKIPPED, S.CANCELLED, S.TIMED_OUT)
++                hevent("budget finalize" + (" after in-flight finished" if index > stop_step else " at stop step"))
++                return
++
++        snapshot = post
++        if index == MAX_EVENTS:
++            hevent("event budget used up" + (" in stop mode" if stop_step is not None else ""))
++            break
++
++        # Next event from the model Worker.
++        now += data.draw(st.floats(min_value=0.0, max_value=5.0), label="dt")
++        running = sorted(_in_flight(snapshot))
++        outstanding = _publish_outstanding(snapshot)
++        timers = sorted(snapshot.timers, key=lambda t: (t.due, t.key.member))
++        choices = ["tick"]
++        if running:
++            choices += ["result", "result", "result"]
++        if outstanding:
++            choices += ["confirm", "publish_failed"]
++        if timers:
++            choices += ["timer"]
++        kind_ = data.draw(st.sampled_from(choices), label="event")
++        if kind_ == "tick":
++            event = Tick()
++        elif kind_ == "result":
++            j = data.draw(st.sampled_from(running), label="job")
++            status = data.draw(st.sampled_from(["Succeeded", "Succeeded", "Failed", "TimedOut"]))
++            tin = data.draw(st.integers(min_value=0, max_value=40), label="input tokens")
++            tout = data.draw(st.integers(min_value=0, max_value=40), label="output tokens")
++            event = JobResultReceived(_result(j, snapshot.jobs[j].attempt, status, tin, tout), META)
++        elif kind_ == "confirm":
++            j = data.draw(st.sampled_from(outstanding), label="job")
++            event = PublishConfirmed(job_id=j, attempt=snapshot.jobs[j].attempt)
++        elif kind_ == "publish_failed":
++            j = data.draw(st.sampled_from(outstanding), label="job")
++            event = PublishFailed(job_id=j, attempt=snapshot.jobs[j].attempt)
++        else:
++            t = data.draw(st.sampled_from(timers), label="timer")
++            now = max(now, t.due)
++            event = TimerFired(kind=t.kind, job_id=t.job_id, attempt=t.attempt)
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-1/tests/unit/test_manager_machine_budget.py tests/unit/test_manager_machine_budget.py
+--- /tmp/das_sdd_snaps/snap-g5-1/tests/unit/test_manager_machine_budget.py	1970-01-01 08:00:00
++++ tests/unit/test_manager_machine_budget.py	2026-10-30 16:30:38
+@@ -0,0 +1,477 @@
++"""Unit tests for budget-stop mode in the RequestMachine (das-client-api task 5.1,
++Phase 4 Req 5.6, 5.7, 5.8)."""
++from __future__ import annotations
++
++from decimal import Decimal
++
++from das.client.budget import Budget
++from das.manager.machine import (
++    BUDGET_EXCEEDED,
++    BUDGET_UNENFORCEABLE,
++    TIMER_CAPABILITY_WAIT,
++    TIMER_PUBLISH,
++    TIMER_RETRY,
++    FinalizeFailed,
++    JobResultReceived,
++    MachineConfig,
++    PlanCommitted,
++    PublishConfirmed,
++    PublishDeadLetter,
++    PublishDispatch,
++    PublishFailed,
++    ReplayRequested,
++    RequestSnapshot,
++    RunSummarizer,
++    ScheduleTimer,
++    StepContext,
++    Tick,
++    TimerFired,
++    apply_decision,
++    budget_exceeded,
++    step,
++)
++from das.models import (
++    AgentRecord,
++    JobPlan,
++    JobRecord,
++    JobResultPayload,
++    JobState,
++    PlannedJob,
++    RequestStatus,
++    TokenUsage,
++)
++from das.models.usage import UsageRecord
++from das.ops.cost import PriceEntry, PriceTable
++from das.state import ClientRequestSpec, StateStore, Timer
++from das.state.store import StoredRequest
++
++S = JobState
++RID = "r1"
++DLID = "ab" * 16
++CFG = MachineConfig(max_attempts=3, base_backoff=2, max_backoff=60, capability_wait=60)
++WORKERS = (
++    AgentRecord(
++        agent_id="w1",
++        role="worker",
++        host="h",
++        capabilities=frozenset({"research"}),
++        status="Available",
++        last_heartbeat=0.0,
++    ),
++)
++META = {"provider": "openai", "model": "gpt-x"}
++# 1 per million input and output tokens: 2,000 tokens cost 0.002.
++PRICES = PriceTable(
++    currency="USD",
++    models=[
++        PriceEntry(
++            provider="openai",
++            model="gpt-x",
++            input_per_million=Decimal("1"),
++            output_per_million=Decimal("1"),
++        )
++    ],
++)
++OTHER_PRICES = PriceTable(
++    currency="USD",
++    models=[
++        PriceEntry(
++            provider="anthropic",
++            model="m",
++            input_per_million=Decimal("1"),
++            output_per_million=Decimal("1"),
++        )
++    ],
++)
++
++
++def ctx(now: float = 100.0, agents=WORKERS, price_table: PriceTable | None = None) -> StepContext:
++    return StepContext(now=now, config=CFG, agents=tuple(agents), price_table=price_table)
++
++
++def make_plan(**deps: list[str]) -> JobPlan:
++    return JobPlan(
++        jobs=[
++            PlannedJob(job_id=j, instruction=f"do {j}", capabilities=["research"], depends_on=d)
++            for j, d in deps.items()
++        ]
++    )
++
++
++def res(job_id: str, attempt: int = 1, status: str = "Succeeded", tokens: int = 0) -> JobResultPayload:
++    """A Job_Result carrying ``tokens`` input and ``tokens`` output tokens."""
++    return JobResultPayload(
++        request_id=RID,
++        job_id=job_id,
++        attempt=attempt,
++        worker_id=f"w-{job_id}",
++        status=status,  # type: ignore[arg-type]
++        content=f"out {job_id}@{attempt}",
++        error=None if status == "Succeeded" else "boom",
++        usage=TokenUsage(input_tokens=tokens, output_tokens=tokens, total_tokens=2 * tokens),
++        duration_ms=1,
++    )
++
++
++def usage_record(total: int) -> UsageRecord:
++    """A planning Usage_Record of ``total`` tokens."""
++    return UsageRecord(
++        operation="plan",
++        provider="openai",
++        model="gpt-x",
++        usage=TokenUsage(input_tokens=total, output_tokens=0, total_tokens=total),
++    )
++
++
++def snap(
++    plan: JobPlan,
++    states: dict[str, JobState] | None = None,
++    attempts: dict[str, int] | None = None,
++    results=(),
++    timers=(),
++    usage: tuple[UsageRecord, ...] = (),
++    budget: Budget | None = None,
++) -> RequestSnapshot:
++    states = states or {}
++    attempts = attempts or {}
++    jobs = {
++        j.job_id: JobRecord(
++            job=j,
++            state=states.get(j.job_id, S.WAITING),
++            attempt=attempts.get(j.job_id, 0 if states.get(j.job_id, S.WAITING) is S.WAITING else 1),
++        )
++        for j in plan.jobs
++    }
++    return RequestSnapshot(
++        request_id=RID,
++        status=RequestStatus.RUNNING,
++        prompt="p",
++        plan=plan,
++        jobs=jobs,
++        results={(r.job_id, r.attempt): r for r in results},
++        timers=tuple(timers),
++        usage=usage,
++        budget=budget,
++    )
++
++
++def dispatched(decision) -> list[tuple[str, int]]:
++    return [(e.job_id, e.attempt) for e in decision.effects if isinstance(e, PublishDispatch)]
++
++
++def of_type(decision, cls) -> list:
++    return [e for e in decision.effects if isinstance(e, cls)]
++
++
++def run(s: RequestSnapshot, event, c: StepContext | None = None):
++    d = step(s, event, c or ctx())
++    return d, apply_decision(s, d)
++
++
++# --------------------------------------------------------------------------- no budget
++
++
++def test_no_budget_chain_runs_to_summarizer() -> None:
++    plan = make_plan(a=[], b=["a"])
++    s = snap(plan, usage=(usage_record(10_000),))
++    d, s = run(s, PlanCommitted())
++    assert dispatched(d) == [("a", 1)]
++    d, s = run(s, PublishConfirmed("a", 1))
++    d, s = run(s, JobResultReceived(res("a", tokens=10_000), META))
++    assert dispatched(d) == [("b", 1)]
++    d, s = run(s, PublishConfirmed("b", 1))
++    d, s = run(s, JobResultReceived(res("b", tokens=10_000), META))
++    assert len(of_type(d, RunSummarizer)) == 1
++    assert of_type(d, FinalizeFailed) == []
++    assert budget_exceeded(s, ctx()) is None
++
++
++# --------------------------------------------------------------------------- budget stop
++
++
++def test_planning_usage_alone_exceeds_budget() -> None:
++    plan = make_plan(a=[], b=["a"], c=[])
++    s = snap(plan, usage=(usage_record(100),), budget=Budget(max_total_tokens=50))
++    assert budget_exceeded(s, ctx()) == "tokens"
++    d, after = run(s, PlanCommitted())
++    assert dispatched(d) == []
++    for job_id in ("a", "b", "c"):
++        assert after.jobs[job_id].state is S.SKIPPED
++        assert after.jobs[job_id].reason == BUDGET_EXCEEDED
++    [final] = of_type(d, FinalizeFailed)
++    assert final.budget_kind == "tokens"
++    assert final.final_result.error == BUDGET_EXCEEDED
++    assert of_type(d, RunSummarizer) == []
++    assert after.budget == Budget(max_total_tokens=50)
++
++
++def test_mid_run_stop_lets_in_flight_job_finish() -> None:
++    plan = make_plan(a=[], b=[], c=["a", "b"])
++    s = snap(plan, budget=Budget(max_total_tokens=50))
++    d, s = run(s, PlanCommitted())
++    assert sorted(dispatched(d)) == [("a", 1), ("b", 1)]
++    _, s = run(s, PublishConfirmed("a", 1))
++    _, s = run(s, PublishConfirmed("b", 1))
++
++    d, s = run(s, JobResultReceived(res("a", tokens=30), META))  # 60 tokens >= 50
++    assert dispatched(d) == []
++    assert s.jobs["a"].state is S.SUCCEEDED
++    assert s.jobs["b"].state is S.DISPATCHED
++    assert s.jobs["c"].state is S.SKIPPED and s.jobs["c"].reason == BUDGET_EXCEEDED
++    assert of_type(d, FinalizeFailed) == []
++    assert of_type(d, RunSummarizer) == []
++
++    d, s = run(s, Tick())
++    assert d.is_empty
++
++    d, s = run(s, JobResultReceived(res("b", tokens=5), META))
++    assert s.jobs["b"].state is S.SUCCEEDED
++    [final] = of_type(d, FinalizeFailed)
++    assert final.budget_kind == "tokens"
++    assert final.final_result.error == BUDGET_EXCEEDED
++    assert of_type(d, RunSummarizer) == []
++    assert dispatched(d) == []
++
++
++def test_failed_result_crossing_limit_is_not_retried() -> None:
++    plan = make_plan(a=[], b=[])
++    for status in ("Failed", "TimedOut"):
++        s = snap(plan, {"a": S.DISPATCHED, "b": S.DISPATCHED}, budget=Budget(max_total_tokens=10))
++        d, after = run(s, JobResultReceived(res("a", 1, status, tokens=5), META))
++        assert after.jobs["a"].state is S.FAILED
++        assert after.jobs["a"].reason == BUDGET_EXCEEDED
++        assert of_type(d, ScheduleTimer) == []
++        assert of_type(d, PublishDeadLetter) == []
++        assert d.updates.timers_add == ()
++        assert len(d.updates.usage) == 1
++        assert of_type(d, FinalizeFailed) == []  # b is still in flight
++
++
++def test_failed_result_on_final_attempt_is_not_dead_lettered() -> None:
++    plan = make_plan(a=[])
++    s = snap(plan, {"a": S.DISPATCHED}, attempts={"a": 3}, budget=Budget(max_total_tokens=10))
++    d, after = run(s, JobResultReceived(res("a", 3, "Failed", tokens=5), META))
++    assert after.jobs["a"].state is S.FAILED and after.jobs["a"].reason == BUDGET_EXCEEDED
++    assert of_type(d, PublishDeadLetter) == []
++    [final] = of_type(d, FinalizeFailed)
++    assert final.budget_kind == "tokens"
++
++
++def test_retry_pending_when_stop_starts() -> None:
++    plan = make_plan(a=[], b=[])
++    for state in (S.FAILED, S.TIMED_OUT):
++        retry = Timer(TIMER_RETRY, "a", 1, 150.0)
++        s = snap(
++            plan,
++            {"a": state, "b": S.DISPATCHED},
++            results=[res("a", 1, "Failed" if state is S.FAILED else "TimedOut")],
++            timers=[retry],
++            usage=(usage_record(100),),
++            budget=Budget(max_total_tokens=50),
++        )
++        d, after = run(s, Tick())
++        assert after.jobs["a"].state is S.FAILED
++        assert after.jobs["a"].reason == BUDGET_EXCEEDED
++        assert retry.key in d.updates.timers_remove
++        assert after.timers == ()
++        assert dispatched(d) == []
++        assert of_type(d, FinalizeFailed) == []  # b in flight
++
++
++def test_retry_timer_firing_during_stop_does_not_redispatch() -> None:
++    plan = make_plan(a=[])
++    retry = Timer(TIMER_RETRY, "a", 1, 150.0)
++    s = snap(
++        plan,
++        {"a": S.TIMED_OUT},
++        results=[res("a", 1, "TimedOut")],
++        timers=[retry],
++        usage=(usage_record(100),),
++        budget=Budget(max_total_tokens=50),
++    )
++    d, after = run(s, TimerFired(TIMER_RETRY, "a", 1), ctx(now=150.0))
++    assert after.jobs["a"].state is S.FAILED and after.jobs["a"].reason == BUDGET_EXCEEDED
++    assert retry.key in d.updates.timers_remove
++    assert dispatched(d) == []
++    assert [c.job_id for c in d.changes] == ["a"]
++    assert of_type(d, FinalizeFailed)[0].budget_kind == "tokens"
++
++
++def test_result_crossing_limit_stops_pending_retry_of_other_job() -> None:
++    plan = make_plan(a=[], b=[])
++    retry = Timer(TIMER_RETRY, "a", 1, 150.0)
++    s = snap(
++        plan,
++        {"a": S.FAILED, "b": S.DISPATCHED},
++        results=[res("a", 1, "Failed")],
++        timers=[retry],
++        budget=Budget(max_total_tokens=50),
++    )
++    d, after = run(s, JobResultReceived(res("b", tokens=30), META))
++    assert after.jobs["a"].state is S.FAILED and after.jobs["a"].reason == BUDGET_EXCEEDED
++    assert retry.key in d.updates.timers_remove
++    [final] = of_type(d, FinalizeFailed)
++    assert final.budget_kind == "tokens"
++
++
++def test_ready_job_with_capwait_timer_is_skipped() -> None:
++    plan = make_plan(a=[], b=[])
++    capwait = Timer(TIMER_CAPABILITY_WAIT, "a", 1, 160.0)
++    s = snap(
++        plan,
++        {"a": S.READY, "b": S.DISPATCHED},
++        timers=[capwait],
++        usage=(usage_record(100),),
++        budget=Budget(max_total_tokens=50),
++    )
++    d, after = run(s, Tick())
++    assert after.jobs["a"].state is S.SKIPPED and after.jobs["a"].reason == BUDGET_EXCEEDED
++    assert capwait.key in d.updates.timers_remove
++    assert after.jobs["b"].state is S.DISPATCHED
++    assert dispatched(d) == []
++
++
++def test_publish_timer_firing_during_stop_skips_job() -> None:
++    plan = make_plan(a=[])
++    publish = Timer(TIMER_PUBLISH, "a", 1, 101.0)
++    s = snap(plan, {"a": S.READY}, timers=[publish], usage=(usage_record(100),),
++             budget=Budget(max_total_tokens=50))
++    d, after = run(s, TimerFired(TIMER_PUBLISH, "a", 1), ctx(now=101.0))
++    assert dispatched(d) == []
++    assert after.jobs["a"].state is S.SKIPPED and after.jobs["a"].reason == BUDGET_EXCEEDED
++    assert publish.key in d.updates.timers_remove
++    assert of_type(d, FinalizeFailed)[0].budget_kind == "tokens"
++
++
++def test_publish_failure_during_stop_skips_job() -> None:
++    plan = make_plan(a=[], b=[])
++    s = snap(plan, {"a": S.READY, "b": S.DISPATCHED}, usage=(usage_record(100),),
++             budget=Budget(max_total_tokens=50))
++    d, after = run(s, PublishFailed("a", 1, n=1))
++    assert after.jobs["a"].state is S.SKIPPED and after.jobs["a"].reason == BUDGET_EXCEEDED
++    assert d.updates.timers_add == ()
++    assert of_type(d, ScheduleTimer) == []
++    assert dispatched(d) == []
++
++
++def test_replay_during_stop_is_reverted() -> None:
++    plan = make_plan(a=[], b=["a"])
++    s = snap(
++        plan,
++        {"a": S.FAILED, "b": S.SKIPPED},
++        attempts={"a": 3},
++        results=[res("a", 3, "Failed")],
++        usage=(usage_record(100),),
++        budget=Budget(max_total_tokens=50),
++    )
++    d, after = run(s, ReplayRequested(DLID, "a", 3))
++    assert list(d.updates.dead_letter_reverts) == [DLID]
++    assert list(d.updates.replays_applied) == [DLID]
++    assert any("budget exceeded" in w for w in d.warnings)
++    assert after.jobs["a"].state is S.FAILED and after.jobs["a"].attempt == 3
++    assert dispatched(d) == []
++    assert d.updates.tag is None
++
++
++# --------------------------------------------------------------------------- cost
++
++
++def test_max_cost_without_price_table_is_unenforceable() -> None:
++    plan = make_plan(a=[])
++    s = snap(plan, budget=Budget(max_cost=Decimal("1")))
++    assert budget_exceeded(s, ctx()) == "unenforceable"
++    d, after = run(s, PlanCommitted())
++    assert dispatched(d) == []
++    assert after.jobs["a"].state is S.SKIPPED
++    [final] = of_type(d, FinalizeFailed)
++    assert final.budget_kind == "unenforceable"
++    assert final.final_result.error == BUDGET_UNENFORCEABLE
++
++
++def test_max_cost_with_unpriced_result_is_unenforceable() -> None:
++    plan = make_plan(a=[], b=["a"])
++    c = ctx(price_table=OTHER_PRICES)
++    s = snap(plan, budget=Budget(max_cost=Decimal("1")))
++    d, s = run(s, PlanCommitted(), c)
++    assert dispatched(d) == [("a", 1)]
++    d, s = run(s, JobResultReceived(res("a", tokens=1), META), c)
++    assert dispatched(d) == []
++    assert s.jobs["b"].state is S.SKIPPED
++    [final] = of_type(d, FinalizeFailed)
++    assert final.budget_kind == "unenforceable"
++    assert final.final_result.error == BUDGET_UNENFORCEABLE
++
++
++def test_cost_within_budget_runs_normally() -> None:
++    plan = make_plan(a=[], b=["a"])
++    c = ctx(price_table=PRICES)
++    s = snap(plan, budget=Budget(max_cost=Decimal("1")))
++    d, s = run(s, PlanCommitted(), c)
++    assert dispatched(d) == [("a", 1)]
++    d, s = run(s, JobResultReceived(res("a", tokens=1000), META), c)
++    assert dispatched(d) == [("b", 1)]
++    d, s = run(s, JobResultReceived(res("b", tokens=1000), META), c)
++    assert len(of_type(d, RunSummarizer)) == 1
++    assert of_type(d, FinalizeFailed) == []
++    assert budget_exceeded(s, c) is None
++
++
++def test_cost_reaching_limit_stops() -> None:
++    plan = make_plan(a=[], b=["a"])
++    c = ctx(price_table=PRICES)
++    s = snap(plan, budget=Budget(max_cost=Decimal("0.002")))
++    _, s = run(s, PlanCommitted(), c)
++    d, s = run(s, JobResultReceived(res("a", tokens=1000), META), c)  # 2,000 tokens cost 0.002
++    assert dispatched(d) == []
++    [final] = of_type(d, FinalizeFailed)
++    assert final.budget_kind == "cost"
++    assert final.final_result.error == BUDGET_EXCEEDED
++
++
++# --------------------------------------------------------------------------- snapshots
++
++
++def _stored(plan: JobPlan, **extra) -> StoredRequest:
++    return StoredRequest(
++        request_id=RID,
++        status=RequestStatus.RUNNING,
++        prompt="p",
++        created_at=0.0,
++        error=None,
++        final_result=None,
++        plan=plan,
++        jobs={"a": JobRecord(job=plan.jobs[0], state=S.WAITING, attempt=0)},
++        results={},
++        timers=[],
++        inbox_cursor="0-0",
++        lease=None,
++        **extra,
++    )
++
++
++def test_from_stored_copies_budget_and_usage() -> None:
++    plan = make_plan(a=[])
++    usage = [usage_record(7)]
++    s = RequestSnapshot.from_stored(
++        _stored(plan, usage=usage, budget=Budget(max_total_tokens=5), client_fp="fp")
++    )
++    assert s.budget == Budget(max_total_tokens=5)
++    assert s.usage == tuple(usage)
++    bare = RequestSnapshot.from_stored(_stored(plan))
++    assert bare.budget is None and bare.usage == ()
++
++
++async def test_load_snapshot_reads_budget_and_client_fp(state_store: StateStore) -> None:
++    created = await state_store.submit_request(
++        "p", ClientRequestSpec(fingerprint="cbabecbd", budget=Budget(max_total_tokens=5))
++    )
++    assert created.request_id is not None
++    stored = await state_store.load_snapshot(created.request_id)
++    assert stored is not None
++    assert stored.budget == Budget(max_total_tokens=5)
++    assert stored.client_fp == "cbabecbd"
++
++    rid = await state_store.create_request("p")
++    plain = await state_store.load_snapshot(rid)
++    assert plain is not None
++    assert plain.budget is None and plain.client_fp is None
+diff --color -ruN -U2 /tmp/das_sdd_snaps/snap-g5-1/das-client-api/tasks.md .kiro/specs/das-client-api/tasks.md
+--- /tmp/das_sdd_snaps/snap-g5-1/das-client-api/tasks.md	2026-10-30 16:17:57
++++ .kiro/specs/das-client-api/tasks.md	2026-10-30 16:38:32
+@@ -75,9 +75,9 @@
+ 
+ - [ ] 5. Manager budget enforcement
+-  - [ ] 5.1 Enforce budgets in the reducer
++  - [x] 5.1 Enforce budgets in the reducer
+     - `RequestSnapshot.budget`, `StepContext.price_table`; budget-stop mode per design §4 (no dispatch, skip non-in-flight Jobs with reason `budget_exceeded`, no retries, `FinalizeFailed` with `budget_exceeded` / `budget_unenforceable` when nothing is in flight, never `RunSummarizer`)
+     - `load_snapshot` reads `budget` (and `client_fp`), so the Manager and Gateway share one consistent read
+     - _Requirements: 5.6, 5.7, 5.8_
+-  - [ ] 5.2 Write property test for budget stop
++  - [x] 5.2 Write property test for budget stop
+     - **Property 5: Budget stop**
+     - **Validates: Requirements 5.6, 5.7, 5.8**

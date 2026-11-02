@@ -1,0 +1,1506 @@
+# Group 4 Task 4 review package (no git: diff vs pre-task snapshot; design.md signature fix is the controller's)
+
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/das/state/__init__.py das/state/__init__.py
+--- /tmp/das_sdd_snaps/snap-g4-4/das/state/__init__.py	2026-10-30 13:57:31
++++ das/state/__init__.py	2026-10-30 14:05:39
+@@ -25,16 +25,17 @@
+     RequestPage,
+     StateStore,
+     StoredRequest,
+     StoreError,
+     StoreStatus,
+     Timer,
+     TimerKey,
+     TransitionBatch,
++    WebhookState,
+     WriteResult,
+ )
+ 
+ __all__ = [
+     "CANCEL_REASON",
+     "DEFAULT_EVENTS_MAX_LEN",
+     "INBOX_JOB_RESULT",
+     "INBOX_REPLAY",
+@@ -58,10 +59,11 @@
+     "RequestPage",
+     "StateStore",
+     "StoreError",
+     "StoreStatus",
+     "StoredRequest",
+     "Timer",
+     "TimerKey",
+     "TransitionBatch",
++    "WebhookState",
+     "WriteResult",
+ ]
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/_common.lua das/state/lua/_common.lua
+--- /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/_common.lua	2026-10-30 13:57:31
++++ das/state/lua/_common.lua	2026-10-30 14:06:29
+@@ -148,45 +148,16 @@
+   if v[2] and v[2] ~= '' and v[2] ~= rid then return 0 end
+   redis.call('HSET', record_key, 'status', 'Pending', 'status_changed_at', tostring(ms))
+   redis.call('ZREM', replayed_idx, dlid)
+   redis.call('ZREM', terminal_idx, dlid)
+   redis.call('ZADD', pending_idx, tonumber(v[3]) or ms, dlid)
+   return 1
+ end
+ 
+--- Write one JobRecord JSON and, when its state changed, append a transition entry.
+--- Record JSON is stored verbatim; it is only decoded to read state/attempt/worker_id.
+--- tag (optional Dead_Letter_ID) is written as dead_letter_id on the entry (Req 13.4).
+-local function put_job(jobs_key, transitions_key, job_id, new_json, at_iso, tag)
+-  local old_json = redis.call('HGET', jobs_key, job_id)
+-  local new_rec = cjson.decode(new_json)
+-  local from_state = cjson.null
+-  if old_json then
+-    from_state = cjson.decode(old_json).state
+-  end
+-  redis.call('HSET', jobs_key, job_id, new_json)
+-  if from_state ~= new_rec.state then
+-    local entry = {
+-      job_id = job_id,
+-      from_state = from_state,
+-      to_state = new_rec.state,
+-      attempt = new_rec.attempt or 0,
+-      worker_id = new_rec.worker_id or cjson.null,
+-      at = at_iso,
+-    }
+-    if tag and tag ~= '' and tag ~= cjson.null then
+-      entry.dead_letter_id = tag
+-    end
+-    redis.call('RPUSH', transitions_key, cjson.encode(entry))
+-    return 1
+-  end
+-  return 0
+-end
+-
+ -- Phase 4 key names, derived from the request key das:req:{rid} (KEYS[1] of the
+ -- per-Request scripts) so callers' KEYS lists stay unchanged. They must match
+ -- das/state/keys.py. Building key names inside a script that are not in KEYS is
+ -- only safe because DAS runs on a single Redis primary (Phase 1 OD 4.1); it would
+ -- break under Redis Cluster.
+ local function key_prefix(req_key)
+   local i = string.find(req_key, ':req:', 1, true)
+   if not i then error('key_prefix: not a request key: ' .. tostring(req_key)) end
+@@ -232,9 +203,97 @@
+ local function client_active_add(req_key, rid)
+   local fp = redis.call('HGET', req_key, 'client_fp')
+   if fp and fp ~= '' then redis.call('SADD', active_key(req_key, fp), rid) end
+ end
+ 
+ local function client_active_remove(req_key, rid)
+   local fp = redis.call('HGET', req_key, 'client_fp')
+   if fp and fp ~= '' then redis.call('SREM', active_key(req_key, fp), rid) end
++end
++
++-- Write one JobRecord JSON and, when its state changed, append a transition entry and
++-- the matching job.transition Event (Phase 4 Req 6.1, 6.3), built from the same entry.
++-- Record JSON is stored verbatim; it is only decoded to read state/attempt/worker_id.
++-- tag (optional Dead_Letter_ID) is written as dead_letter_id on the entry (Req 13.4).
++-- req_key is the request hash (KEYS[1] of every caller); it locates the Event_Stream.
++local function put_job(jobs_key, transitions_key, job_id, new_json, at_iso, tag, req_key)
++  local old_json = redis.call('HGET', jobs_key, job_id)
++  local new_rec = cjson.decode(new_json)
++  local from_state = cjson.null
++  if old_json then
++    from_state = cjson.decode(old_json).state
++  end
++  redis.call('HSET', jobs_key, job_id, new_json)
++  if from_state ~= new_rec.state then
++    local entry = {
++      job_id = job_id,
++      from_state = from_state,
++      to_state = new_rec.state,
++      attempt = new_rec.attempt or 0,
++      worker_id = new_rec.worker_id or cjson.null,
++      at = at_iso,
++    }
++    if tag and tag ~= '' and tag ~= cjson.null then
++      entry.dead_letter_id = tag
++    end
++    redis.call('RPUSH', transitions_key, cjson.encode(entry))
++    -- Same shape as das.client.events.transition_event_data(entry).
++    append_event(req_key, 'job.transition', cjson.encode({
++      job_id = entry.job_id,
++      ['from'] = entry.from_state,
++      to = entry.to_state,
++      attempt = entry.attempt,
++      worker_id = entry.worker_id,
++      at = entry.at,
++    }))
++    return 1
++  end
++  return 0
++end
++
++-- Decode and check an optional budget view JSON object before any write ('' or nil
++-- means none). Raises on malformed input.
++local function check_budget_view(budget_json)
++  if not budget_json or budget_json == '' then return end
++  if type(cjson.decode(budget_json)) ~= 'table' then
++    error('budget view must be a JSON object')
++  end
++end
++
++local function int_text(v)
++  if v and string.match(v, '^%-?%d+$') then return v end
++  return '0'
++end
++
++-- Append the Terminal_Event of a Request that just reached status (Completed, Failed
++-- or Cancelled) and, when it has a webhook target, (re)start its Webhook_Delivery
++-- (Phase 4 Req 6.1, 6.4, 8.2). Data is built as text, equal to
++-- das.client.events.terminal_event_data: {status, error|null, usage totals of the
++-- request hash}, plus "budget":<budget_json> (verbatim) when budget_json is not ''.
++-- The delivery hash is replaced (DEL, then HSET) and rid is put on the outbox scored
++-- by ms in Redis seconds. Returns the Terminal_Event's stream ID.
++local function terminal_event(req_key, rid, status, error_or_nil, budget_json, ms)
++  local v = redis.call('HMGET', req_key, 'usage_input', 'usage_output', 'usage_total',
++    'webhook_url', 'webhook_secret_name')
++  local err = 'null'
++  if error_or_nil and error_or_nil ~= '' then err = cjson.encode(error_or_nil) end
++  local data = '{"status":' .. cjson.encode(status)
++    .. ',"error":' .. err
++    .. ',"usage":{"input_tokens":' .. int_text(v[1])
++    .. ',"output_tokens":' .. int_text(v[2])
++    .. ',"total_tokens":' .. int_text(v[3]) .. '}'
++  if budget_json and budget_json ~= '' then
++    data = data .. ',"budget":' .. budget_json
++  end
++  data = data .. '}'
++  local event_type = 'request.' .. string.lower(status)
++  local id = append_event(req_key, event_type, data)
++  if v[4] and v[4] ~= '' then
++    local wk = webhook_key(req_key)
++    redis.call('DEL', wk)
++    redis.call('HSET', wk, 'url', v[4], 'secret_name', v[5] or '', 'state', 'pending',
++      'attempts', '0', 'last_status', '', 'claim', '0', 'event_id', id,
++      'type', event_type, 'data', data)
++    redis.call('ZADD', outbox_key(req_key), fmt_double(ms / 1000), rid)
++  end
++  return id
+ end
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/apply_transition.lua das/state/lua/apply_transition.lua
+--- /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/apply_transition.lua	2026-10-30 13:57:31
++++ das/state/lua/apply_transition.lua	2026-10-30 14:07:00
+@@ -1,10 +1,11 @@
+ -- apply_transition: atomically apply one RequestMachine decision (Req 1.7, 2.7, 13.7;
+--- Phase 2: 9.2, 9.5, 13.4, 13.15).
++-- Phase 2: 9.2, 9.5, 13.4, 13.15; Phase 4 Req 6.1, 6.3: one job.transition Event per
++-- transition entry, in the same write).
+ -- KEYS[1] request hash, KEYS[2] lease hash, KEYS[3] jobs hash, KEYS[4] results hash,
+ -- KEYS[5] transitions list, KEYS[6] timers zset, KEYS[7] usage list,
+ -- KEYS[8] pending_replays set, KEYS[9] das:dlq:by_status:Pending,
+ -- KEYS[10] das:dlq:by_status:Replayed, KEYS[11] das:dlq:terminal,
+ -- KEYS[12..] das:dlq:{dlid} for each dead_letter_reverts entry, in order
+ -- ARGV[1] request_id, ARGV[2] manager_id, ARGV[3] epoch, ARGV[4] batch JSON:
+ --   { jobs = [[job_id, record_json]...], results = [[field, result_json]...],
+ --     timers_add = [[member, score]...], timers_remove = [member...],
+@@ -78,17 +79,17 @@
+ if job_count ~= nil and not tonumber(job_count) then
+   error('apply_transition: job_count must be a number')
+ end
+ 
+ local rid = ARGV[1]
+ local at = iso_ms(ms)
+ local written = 0
+ for _, pair in ipairs(jobs) do
+-  written = written + put_job(KEYS[3], KEYS[5], pair[1], pair[2], at, tag)
++  written = written + put_job(KEYS[3], KEYS[5], pair[1], pair[2], at, tag, KEYS[1])
+ end
+ local stored = {}
+ for _, pair in ipairs(results) do
+   if redis.call('HSETNX', KEYS[4], pair[1], pair[2]) == 1 then
+     stored[pair[1]] = true
+   end
+ end
+ local accepted = {}
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/cancel_request.lua das/state/lua/cancel_request.lua
+--- /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/cancel_request.lua	2026-10-30 13:57:31
++++ das/state/lua/cancel_request.lua	2026-10-30 14:07:00
+@@ -1,18 +1,21 @@
+ -- cancel_request: Gateway cancellation (Req 1.6, 1.8; Phase 2: 2.3, 13.15, 14.2, 15.11;
+--- Phase 4 Req 3.3: leaves the client's Active_Set).
++-- Phase 4 Req 3.3: leaves the client's Active_Set; Phase 4 Req 6.1, 6.3, 6.4, 8.2:
++-- job.transition Events, then the Terminal_Event and, with a webhook target, the
++-- Webhook_Delivery, after the writes above).
+ -- KEYS[1] request hash, KEYS[2] jobs hash, KEYS[3] transitions list, KEYS[4] das:requests:pending,
+ -- KEYS[5] pending_replays set, KEYS[6] das:requests:index, KEYS[7] das:requests:finished,
+ -- KEYS[8] das:requests:inbox_purge, KEYS[9] das:requests:by_status:Pending,
+ -- KEYS[10] das:requests:by_status:Running, KEYS[11] das:requests:by_status:Cancelled,
+ -- KEYS[12] das:dlq:by_status:Pending, KEYS[13] das:dlq:by_status:Replayed,
+ -- KEYS[14] das:dlq:terminal, KEYS[15..] das:dlq:{dlid} for each dlid of ARGV[2], in order
+ -- ARGV[1] request_id, ARGV[2] JSON array of the Dead_Letter_IDs read from pending_replays,
+--- ARGV[3..] triples: job_id, expected current JobRecord JSON, new JobRecord JSON
++-- ARGV[3] budget view JSON spliced into the Terminal_Event ('' for none),
++-- ARGV[4..] triples: job_id, expected current JobRecord JSON, new JobRecord JSON
+ -- The caller computes the Cancelled records; this script applies them only if every
+ -- listed Job still has the expected JSON, no other Job is non-terminal-and-unlisted,
+ -- and pending_replays holds exactly the listed Dead_Letter_IDs (compare-and-set).
+ -- Otherwise it returns {'CONFLICT'} and the caller re-reads and retries.
+ -- Replays accepted but never applied are returned to Pending and the set is deleted.
+ -- Returns {'OK', at, finished_at_ms, created_at_ms} | {'TERMINAL', status} | {'NOT_FOUND'}
+ --   | {'CONFLICT'}.
+ local status = redis.call('HGET', KEYS[1], 'status')
+@@ -24,30 +27,31 @@
+ end
+ local dlids = cjson.decode(ARGV[2] or '[]')
+ if type(dlids) ~= 'table' then
+   return redis.error_reply('cancel_request: ARGV[2] must be a JSON array')
+ end
+ if #KEYS ~= 14 + #dlids then
+   return redis.error_reply('cancel_request: one dlq record key per Dead_Letter_ID')
+ end
+-if (#ARGV - 2) % 3 ~= 0 then
++check_budget_view(ARGV[3])
++if (#ARGV - 3) % 3 ~= 0 then
+   return redis.error_reply('cancel_request: job triples are incomplete')
+ end
+ local expected = {}
+ for _, dlid in ipairs(dlids) do expected[dlid] = true end
+ local members = redis.call('SMEMBERS', KEYS[5])
+ if #members ~= #dlids then
+   return { 'CONFLICT' }
+ end
+ for _, m in ipairs(members) do
+   if not expected[m] then return { 'CONFLICT' } end
+ end
+ local listed = {}
+-for i = 3, #ARGV, 3 do
++for i = 4, #ARGV, 3 do
+   if redis.call('HGET', KEYS[2], ARGV[i]) ~= ARGV[i + 1] then
+     return { 'CONFLICT' }
+   end
+   cjson.decode(ARGV[i + 2])
+   listed[ARGV[i]] = true
+ end
+ local TERMINAL_JOB = { Succeeded = true, Failed = true, Skipped = true, Cancelled = true }
+ local all = redis.call('HGETALL', KEYS[2])
+@@ -55,23 +59,24 @@
+   if not listed[all[i]] and not TERMINAL_JOB[cjson.decode(all[i + 1]).state] then
+     return { 'CONFLICT' }
+   end
+ end
+ local rid = ARGV[1]
+ local _, ms = server_time()
+ local at = iso_ms(ms)
+ local created = created_ms(KEYS[1], KEYS[6], rid)
+-for i = 3, #ARGV, 3 do
+-  put_job(KEYS[2], KEYS[3], ARGV[i], ARGV[i + 2], at)
++for i = 4, #ARGV, 3 do
++  put_job(KEYS[2], KEYS[3], ARGV[i], ARGV[i + 2], at, nil, KEYS[1])
+ end
+ redis.call('HSET', KEYS[1], 'status', 'Cancelled')
+ client_active_remove(KEYS[1], rid)  -- Phase 4 Req 3.3
+ mark_finished(KEYS[1], KEYS[7], KEYS[8], rid, ms)
+ local from_key = KEYS[10]
+ if status == 'Pending' then from_key = KEYS[9] end
+ index_move(rid, from_key, KEYS[11], created)
+ redis.call('ZREM', KEYS[4], rid)
+ for i, dlid in ipairs(dlids) do
+   dlq_revert(KEYS[14 + i], KEYS[12], KEYS[13], KEYS[14], dlid, rid, ms)
+ end
+ redis.call('DEL', KEYS[5])
++terminal_event(KEYS[1], rid, 'Cancelled', nil, ARGV[3], ms)
+ return { 'OK', at, tostring(ms), tostring(created) }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/commit_plan.lua das/state/lua/commit_plan.lua
+--- /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/commit_plan.lua	2026-10-30 13:57:31
++++ das/state/lua/commit_plan.lua	2026-10-30 14:07:00
+@@ -1,44 +1,53 @@
+ -- commit_plan: persist the Job_Plan, all Jobs as Waiting, their transitions, the
+ -- planning Usage_Records, and status Pending -> Running in one atomic update
+--- (Req 3.9, 3.12, 13.7; Phase 2: 9.1, 15.3, 15.11).
++-- (Req 3.9, 3.12, 13.7; Phase 2: 9.1, 15.3, 15.11), with the request.planned Event and
++-- one job.transition Event per Job in the same write (Phase 4 Req 6.1, 6.3).
+ -- KEYS[1] request hash, KEYS[2] lease hash, KEYS[3] jobs hash, KEYS[4] transitions list,
+ -- KEYS[5] das:requests:pending, KEYS[6] usage list, KEYS[7] das:requests:index,
+ -- KEYS[8] das:requests:by_status:Pending, KEYS[9] das:requests:by_status:Running
+ -- ARGV[1] request_id, ARGV[2] manager_id, ARGV[3] epoch, ARGV[4] plan JSON,
+ -- ARGV[5] JSON array of planning UsageRecords ('' or '[]' for none),
+--- ARGV[6..] alternating job_id, JobRecord JSON
++-- ARGV[6] request.planned Event data JSON ('' for none: no event),
++-- ARGV[7..] alternating job_id, JobRecord JSON
+ -- Returns {'OK', at} | {'LEASE_LOST'} | {'REQUEST_TERMINAL'} | {'INVALID_STATE', status}.
+ local now, ms = server_time()
+ if not lease_ok(KEYS[2], ARGV[2], ARGV[3], now) then
+   return { 'LEASE_LOST' }
+ end
+ local status = redis.call('HGET', KEYS[1], 'status')
+ if is_terminal(status) then
+   return { 'REQUEST_TERMINAL' }
+ end
+ if status ~= 'Pending' then
+   return { 'INVALID_STATE', status or '' }
+ end
+ -- Redis does not roll back a script on a runtime error, so decode every input
+ -- before the first write: malformed input aborts with nothing written.
+-if (#ARGV - 5) % 2 ~= 0 then
++if (#ARGV - 6) % 2 ~= 0 then
+   return redis.error_reply('commit_plan: job_id without a record')
+ end
+-for i = 7, #ARGV, 2 do
++for i = 8, #ARGV, 2 do
+   cjson.decode(ARGV[i])
+ end
++if ARGV[6] ~= '' and type(cjson.decode(ARGV[6])) ~= 'table' then
++  error('commit_plan: planned event must be a JSON object')
++end
+ check_usage(ARGV[5])
+ local rid = ARGV[1]
+ local score = created_ms(KEYS[1], KEYS[7], rid)
+ local at = iso_ms(ms)
+ redis.call('DEL', KEYS[3])
++if ARGV[6] ~= '' then
++  -- Stored verbatim: Python builds it, so an empty depends_on stays [] (Phase 4 Req 6.2).
++  append_event(KEYS[1], 'request.planned', ARGV[6])
++end
+ local job_count = 0
+-for i = 6, #ARGV, 2 do
+-  put_job(KEYS[3], KEYS[4], ARGV[i], ARGV[i + 1], at)
++for i = 7, #ARGV, 2 do
++  put_job(KEYS[3], KEYS[4], ARGV[i], ARGV[i + 1], at, nil, KEYS[1])
+   job_count = job_count + 1
+ end
+ redis.call('HSET', KEYS[1], 'plan', ARGV[4], 'status', 'Running', 'job_count', tostring(job_count))
+ redis.call('ZREM', KEYS[5], rid)
+ index_move(rid, KEYS[8], KEYS[9], score)
+ append_usage(KEYS[6], KEYS[1], ARGV[5])
+ return { 'OK', at }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/finalize.lua das/state/lua/finalize.lua
+--- /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/finalize.lua	2026-10-30 13:57:31
++++ das/state/lua/finalize.lua	2026-10-30 14:07:00
+@@ -1,19 +1,22 @@
+ -- finalize: write the Final_Result and Usage_Records, then the terminal status, then
+ -- release the lease, all in one script (Req 3.6, 3.10, 3.11, 7.3, 7.4, 7.6;
+--- Phase 2: 2.2, 9.1, 9.3, 14.2, 15.11; Phase 4 Req 3.3: leaves the client's Active_Set).
++-- Phase 2: 2.2, 9.1, 9.3, 14.2, 15.11; Phase 4 Req 3.3: leaves the client's Active_Set;
++-- Phase 4 Req 6.1, 6.4, 8.2: appends the Terminal_Event and enqueues the Webhook_Delivery
++-- when the Request has a webhook target, after the writes above).
+ -- KEYS[1] request hash, KEYS[2] lease hash, KEYS[3] das:leases:expiry, KEYS[4] das:requests:pending,
+ -- KEYS[5] usage list, KEYS[6] pending_replays set, KEYS[7] das:requests:index,
+ -- KEYS[8] das:requests:finished, KEYS[9] das:requests:inbox_purge,
+ -- KEYS[10] das:requests:by_status:Pending, KEYS[11] das:requests:by_status:Running,
+ -- KEYS[12] das:requests:by_status:{target}
+ -- ARGV[1] request_id, ARGV[2] manager_id, ARGV[3] epoch, ARGV[4] status (Completed|Failed),
+ -- ARGV[5] Final_Result JSON ('' for none), ARGV[6] error ('' for none),
+--- ARGV[7] JSON array of UsageRecords (summarize and/or planning; '' for none)
++-- ARGV[7] JSON array of UsageRecords (summarize and/or planning; '' for none),
++-- ARGV[8] optional budget view JSON spliced into the Terminal_Event ('' or absent: none)
+ -- Completed requires status Running and a non-empty Final_Result. A Replay accepted
+ -- but not yet applied by the owner (pending_replays non-empty) blocks finalization.
+ -- Returns {'OK', finished_at_ms, created_at_ms} | {'LEASE_LOST'} | {'REQUEST_TERMINAL'}
+ --   | {'INVALID_STATE', status} | {'REPLAY_PENDING'}.
+ local now, ms = server_time()
+ if not lease_ok(KEYS[2], ARGV[2], ARGV[3], now) then
+   return { 'LEASE_LOST' }
+ end
+@@ -28,16 +31,18 @@
+ if target == 'Completed' and (status ~= 'Running' or ARGV[5] == '') then
+   return { 'INVALID_STATE', status or '' }
+ end
+ if redis.call('SCARD', KEYS[6]) > 0 then
+   return { 'REPLAY_PENDING' }
+ end
+ -- Decode every input before the first write (no rollback on runtime errors).
+ check_usage(ARGV[7])
++local budget_json = ARGV[8] or ''
++check_budget_view(budget_json)
+ local rid = ARGV[1]
+ local created = created_ms(KEYS[1], KEYS[7], rid)
+ if ARGV[5] ~= '' then
+   redis.call('HSET', KEYS[1], 'final_result', ARGV[5])
+ end
+ if ARGV[6] ~= '' then
+   redis.call('HSET', KEYS[1], 'error', ARGV[6])
+ end
+@@ -46,9 +51,12 @@
+ client_active_remove(KEYS[1], rid)  -- Phase 4 Req 3.3
+ mark_finished(KEYS[1], KEYS[8], KEYS[9], rid, ms)
+ local from_key = KEYS[11]
+ if status == 'Pending' then from_key = KEYS[10] end
+ index_move(rid, from_key, KEYS[12], created)
+ redis.call('HDEL', KEYS[2], 'owner', 'expires_at')
+ redis.call('ZREM', KEYS[3], rid)
+ redis.call('ZREM', KEYS[4], rid)
++local err = nil
++if ARGV[6] ~= '' then err = ARGV[6] end
++terminal_event(KEYS[1], rid, target, err, budget_json, ms)
+ return { 'OK', tostring(ms), tostring(created) }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/purge_request.lua das/state/lua/purge_request.lua
+--- /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/purge_request.lua	2026-10-30 13:57:31
++++ das/state/lua/purge_request.lua	2026-10-30 14:07:00
+@@ -1,16 +1,16 @@
+ -- purge_request: retention of one Request (Req 14.3, 14.4, 14.5, 14.9). Mirrors
+ -- das.ops.retention.retention_decision with the script's own TIME, so the safety
+ -- condition never depends on the caller's clock:
+ --   missing or non-terminal -> KEEP (stale retention candidates are removed)
+ --   terminal without finished_at -> STAMPED (finished_at = now; never deleted now)
+ --   finished_at + ttl > now -> KEEP
+ --   otherwise -> every key of the Request and every index entry is removed: DELETED
+---   (including its Active_Set member, Phase 4 Req 3.5)
++--   (including its Active_Set member, Phase 4 Req 3.5, and its outbox entry, Req 8.2)
+ -- KEYS[1..11] request_keys(rid): request, jobs, results, inbox, timers, transitions,
+ --   lease, usage, pending_replays, events, webhook (Phase 4)
+ -- KEYS[12] das:requests:index, KEYS[13..17] das:requests:by_status:{Pending, Running,
+ --   Completed, Failed, Cancelled}, KEYS[18] das:requests:finished,
+ -- KEYS[19] das:requests:inbox_purge, KEYS[20] das:requests:pending, KEYS[21] das:leases:expiry
+ -- ARGV[1] request_id, ARGV[2] terminal_request_ttl in ms
+ -- Returns {'DELETED'} | {'KEEP'} | {'STAMPED'}.
+ local rid = ARGV[1]
+@@ -40,9 +40,10 @@
+ end
+ -- Read client_fp before the DEL removes the request hash (Phase 4 Req 3.5).
+ client_active_remove(KEYS[1], rid)
+ redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7],
+   KEYS[8], KEYS[9], KEYS[10], KEYS[11])
+ for i = 12, 21 do
+   redis.call('ZREM', KEYS[i], rid)
+ end
++redis.call('ZREM', outbox_key(KEYS[1]), rid)
+ return { 'DELETED' }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/reopen_request.lua das/state/lua/reopen_request.lua
+--- /tmp/das_sdd_snaps/snap-g4-4/das/state/lua/reopen_request.lua	2026-10-30 13:57:31
++++ das/state/lua/reopen_request.lua	2026-10-30 14:07:00
+@@ -1,11 +1,11 @@
+ -- reopen_request: the Lease owner resumes a Request reopened by a Replay (design D7):
+ -- a Pending Request that already has a Job_Plan goes Pending -> Running without
+--- planning again (Req 13.2, 13.4).
++-- planning again (Req 13.2, 13.4), and appends request.reopened (Phase 4 Req 6.1).
+ -- KEYS[1] request hash, KEYS[2] lease hash, KEYS[3] transitions list,
+ -- KEYS[4] das:requests:pending, KEYS[5] das:requests:index,
+ -- KEYS[6] das:requests:by_status:Pending, KEYS[7] das:requests:by_status:Running
+ -- ARGV[1] request_id, ARGV[2] manager_id, ARGV[3] epoch
+ -- Returns {'OK', at} | {'LEASE_LOST'} | {'INVALID_STATE', status}.
+ local now, ms = server_time()
+ if not lease_ok(KEYS[2], ARGV[2], ARGV[3], now) then
+   return { 'LEASE_LOST' }
+@@ -19,9 +19,10 @@
+ local at = iso_ms(ms)
+ local created = created_ms(KEYS[1], KEYS[5], rid)
+ redis.call('HSET', KEYS[1], 'status', 'Running')
+ redis.call('RPUSH', KEYS[3], cjson.encode({
+   scope = 'request', from_status = 'Pending', to_status = 'Running', at = at,
+ }))
+ redis.call('ZREM', KEYS[4], rid)
+ index_move(rid, KEYS[6], KEYS[7], created)
++append_event(KEYS[1], 'request.reopened', '{"status":"Running"}')
+ return { 'OK', at }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/das/state/store.py das/state/store.py
+--- /tmp/das_sdd_snaps/snap-g4-4/das/state/store.py	2026-10-30 13:57:31
++++ das/state/store.py	2026-10-30 14:07:26
+@@ -14,16 +14,17 @@
+ import uuid
+ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+ from dataclasses import dataclass, field
+ from datetime import UTC, datetime, timedelta
+ from enum import StrEnum
+ from typing import Any, Final, Literal
+ 
+ from das.client.budget import Budget
++from das.client.events import planned_event_data
+ from das.models import (
+     TERMINAL_JOB,
+     TERMINAL_REQUEST,
+     FinalResult,
+     JobPlan,
+     JobRecord,
+     JobResultPayload,
+     JobState,
+@@ -96,16 +97,28 @@
+ class CreateResult:
+     """Outcome of :meth:`StateStore.submit_request` (Phase 4 Req 3.2, 4.2-4.5)."""
+ 
+     outcome: CreateOutcome
+     request_id: str | None = None  # created / replayed
+     limit: int | None = None  # quota_exceeded
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class WebhookState:
++    """Delivery state of a Request's Webhook_Delivery (Phase 4 Req 8.2, 9.7).
++
++    ``last_status`` is ``None`` until a delivery attempt recorded one.
++    """
++
++    state: str
++    attempts: int
++    last_status: str | None
++
++
+ class StoreStatus(StrEnum):
+     OK = "OK"
+     LEASE_LOST = "LEASE_LOST"
+     REQUEST_TERMINAL = "REQUEST_TERMINAL"  # Manager write on a Completed/Failed/Cancelled Request
+     TERMINAL = "TERMINAL"  # Gateway cancel on a terminal Request (Req 1.8)
+     NOT_FOUND = "NOT_FOUND"
+     HELD = "HELD"  # acquire: another Manager holds an unexpired Lease
+     INVALID_STATE = "INVALID_STATE"  # e.g. commit_plan on a Running Request
+@@ -593,28 +606,34 @@
+             replies = await pipe.execute()
+         if replies[0] is None:
+             return None, None
+         status = RequestStatus(_s(replies[0]))
+         raw_job = replies[1] if job_id is not None else None
+         job = None if raw_job is None else JobRecord.model_validate_json(raw_job)
+         return status, job
+ 
+-    async def cancel_request(self, rid: str, max_retries: int = 16) -> CancelResult:
++    async def cancel_request(
++        self, rid: str, max_retries: int = 16, budget_view: Mapping[str, Any] | None = None
++    ) -> CancelResult:
+         """Cancel a Pending/Running Request and its non-terminal Jobs (Req 1.6, 1.8).
+ 
+         Sets ``finished_at``, moves the Request to ``by_status:Cancelled`` and returns
+-        unapplied Replays to Pending (Req 2.3, 13.15, 14.2, 15.11).
++        unapplied Replays to Pending (Req 2.3, 13.15, 14.2, 15.11). Appends one
++        ``job.transition`` per cancelled Job and ``request.cancelled`` (with
++        ``budget_view`` when given), and enqueues the Webhook_Delivery when the Request
++        has a webhook target (Phase 4 Req 6.1, 6.4, 8.2).
+         """
++        budget_json = _budget_view_json(budget_view)
+         for _ in range(max_retries):
+             raw = await self._r.hgetall(keys.jobs(rid))
+             # Replays accepted but not yet applied go back to Pending (Req 13.15); the
+             # script re-checks the set's content (compare-and-set).
+             dlids = sorted(_s(m) for m in await self._r.smembers(keys.pending_replays(rid)))
+-            args: list[str] = [rid, json.dumps(dlids)]
++            args: list[str] = [rid, json.dumps(dlids), budget_json]
+             for job_id, current in raw.items():
+                 record = JobRecord.model_validate_json(current)
+                 if record.state in TERMINAL_JOB:
+                     continue
+                 cancelled = record.model_copy(
+                     update={"state": JobState.CANCELLED, "reason": CANCEL_REASON}
+                 )
+                 args += [_s(job_id), _s(current), cancelled.model_dump_json()]
+@@ -678,25 +697,28 @@
+     # ------------------------------------------------------------------ guarded writes
+ 
+     async def commit_plan(
+         self, lease: Lease, plan: JobPlan, usage: Sequence[UsageRecord] = ()
+     ) -> WriteResult:
+         """Persist the plan with every Job Waiting and status Running atomically (Req 3.9).
+ 
+         ``usage`` (the planning attempts' UsageRecords, Req 9.1) and ``job_count`` are
+-        written in the same script; the Request moves to ``by_status:Running``.
++        written in the same script; the Request moves to ``by_status:Running``. The
++        Event_Stream gets ``request.planned`` and one ``job.transition`` per Job
++        (Phase 4 Req 6.1).
+         """
+         rid = lease.request_id
+         args: list[Any] = [
+             rid,
+             lease.owner,
+             lease.epoch,
+             plan.model_dump_json(),
+             _usage_array(usage),
++            json.dumps(planned_event_data(plan), ensure_ascii=False),
+         ]
+         for job in plan.jobs:
+             args += [job.job_id, JobRecord(job=job, state=JobState.WAITING).model_dump_json()]
+         reply = await self._run("commit_plan", commit_plan_keys(rid), args)
+         return _write_result(reply)
+ 
+     async def apply_transition(self, lease: Lease, batch: TransitionBatch) -> WriteResult:
+         """Apply Job updates, results, timers, inbox cursor, and transitions atomically."""
+@@ -745,39 +767,43 @@
+ 
+     async def finalize(
+         self,
+         lease: Lease,
+         final_result: FinalResult | None,
+         status: RequestStatus = RequestStatus.COMPLETED,
+         error: str | None = None,
+         usage: Sequence[UsageRecord] = (),
++        budget_view: Mapping[str, Any] | None = None,
+     ) -> WriteResult:
+         """Write the Final_Result, then the terminal status, then release the lease (Req 7.4).
+ 
+         ``Completed`` is only accepted for a Running Request with a Final_Result.
+         ``usage`` holds the Summarizer (and, on a planning failure, Planner) UsageRecords
+         written in the same script (Req 9.1, 9.3). ``REPLAY_PENDING`` is returned while a
+         Replay waits to be applied. On OK the result carries ``finished_at_ms`` and
+-        ``created_at_ms`` (Req 2.2, 14.2).
++        ``created_at_ms`` (Req 2.2, 14.2). The same script appends the Terminal_Event
++        (with ``budget_view`` when given) and enqueues the Webhook_Delivery when the
++        Request has a webhook target (Phase 4 Req 6.1, 6.4, 8.2).
+         """
+         if status not in (RequestStatus.COMPLETED, RequestStatus.FAILED):
+             raise ValueError("finalize status must be Completed or Failed")
+         rid = lease.request_id
+         reply = await self._run(
+             "finalize",
+             finalize_keys(rid, status),
+             [
+                 rid,
+                 lease.owner,
+                 lease.epoch,
+                 status.value,
+                 final_result.model_dump_json() if final_result is not None else "",
+                 error or "",
+                 _usage_array(usage),
++                _budget_view_json(budget_view),
+             ],
+         )
+         status_ = _status(reply)
+         if status_ is StoreStatus.OK:
+             return WriteResult(
+                 status_,
+                 finished_at_ms=int(_s(reply[1])) if len(reply) > 1 else None,
+                 created_at_ms=int(_s(reply[2])) if len(reply) > 2 else None,
+@@ -785,21 +811,24 @@
+         return _write_result(reply)
+ 
+     async def fail_request(
+         self,
+         lease: Lease,
+         error: str,
+         final_result: FinalResult | None = None,
+         usage: Sequence[UsageRecord] = (),
++        budget_view: Mapping[str, Any] | None = None,
+     ) -> WriteResult:
+         """Set the Request Failed with ``error`` (and optional Final_Result); release the lease."""
+         if not error:
+             raise ValueError("fail_request requires an error message")
+-        return await self.finalize(lease, final_result, RequestStatus.FAILED, error, usage)
++        return await self.finalize(
++            lease, final_result, RequestStatus.FAILED, error, usage, budget_view=budget_view
++        )
+ 
+     # ------------------------------------------------------------------ inbox
+ 
+     async def record_result_inbox(
+         self,
+         rid: str,
+         result: JobResultPayload,
+         meta: str | Mapping[str, Any] | None = None,
+@@ -1233,16 +1262,25 @@
+         raw = await self._r.lrange(keys.transitions(rid), 0, -1)
+         return _split_transitions(raw)[0]
+ 
+     async def get_request_transitions(self, rid: str) -> list[RequestTransitionEntry]:
+         """Request-level transition entries (e.g. ``Failed -> Pending`` on Replay)."""
+         raw = await self._r.lrange(keys.transitions(rid), 0, -1)
+         return _split_transitions(raw)[1]
+ 
++    async def get_webhook(self, rid: str) -> WebhookState | None:
++        """Webhook_Delivery state of a Request, or ``None`` when it has none (Phase 4 Req 8.2)."""
++        raw = await self._r.hmget(keys.webhook(rid), "state", "attempts", "last_status")
++        if raw[0] is None:
++            return None
++        return WebhookState(
++            state=_s(raw[0]), attempts=_opt_int(_opt(raw[1])) or 0, last_status=_opt(raw[2]) or None
++        )
++
+     async def load_usage(self, rid: str) -> list[UsageRecord]:
+         """Every committed UsageRecord of the Request, in append order (Req 9.8).
+ 
+         A single LRANGE: the Gateway wraps it in ``_bounded()`` so a slow or failed
+         read becomes 503 rather than a summary of partial records (Req 9.12). A stored
+         record that does not parse raises, for the same reason.
+         """
+         raw = await self._r.lrange(keys.usage(rid), 0, -1)
+@@ -1331,16 +1369,21 @@
+         request_id=rid, owner=h["owner"], epoch=int(h["epoch"]), expires_at=float(h["expires_at"])
+     )
+ 
+ 
+ def _json_text(data: str | Mapping[str, Any]) -> str:
+     return data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, sort_keys=True)
+ 
+ 
++def _budget_view_json(view: Mapping[str, Any] | None) -> str:
++    """Budget view spliced into the Terminal_Event by the scripts; ``''`` for none."""
++    return "" if view is None else json.dumps(view, ensure_ascii=False)
++
++
+ def _usage_json(record: UsageRecord) -> str:
+     return record.model_dump_json(exclude_none=True)
+ 
+ 
+ def _usage_array(records: Sequence[UsageRecord]) -> str:
+     """ARGV form of UsageRecords: a JSON array of UsageRecord JSON strings ('' for none)."""
+     if not records:
+         return ""
+@@ -1545,16 +1588,17 @@
+     "RequestPage",
+     "StateStore",
+     "StoreError",
+     "StoreStatus",
+     "StoredRequest",
+     "Timer",
+     "TimerKey",
+     "TransitionBatch",
++    "WebhookState",
+     "WriteResult",
+     "apply_transition_keys",
+     "cancel_request_keys",
+     "commit_plan_keys",
+     "finalize_keys",
+     "index_request_keys",
+     "purge_request_keys",
+     "replay_dead_letter_keys",
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/tests/property/test_event_stream.py tests/property/test_event_stream.py
+--- /tmp/das_sdd_snaps/snap-g4-4/tests/property/test_event_stream.py	1970-01-01 08:00:00
++++ tests/property/test_event_stream.py	2026-10-30 14:10:20
+@@ -0,0 +1,240 @@
++# Feature: das-client-api, Property 6: Event_Stream mirrors persisted changes
++"""Property 6: Event_Stream mirrors persisted changes.
++
++For any Job_Plan (``job_plans(max_jobs=5)``) and any sequence of store operations on
++one Request (real ``das/state/lua`` scripts through ``StateStore`` on a fresh fakeredis
++server per example, ``TIME`` from :class:`FakeRedisTime`): create, commit plan,
++transition batches moving random Jobs to random states, an optional stale-lease batch,
++finalize (Completed or Failed) or cancel, a batch after the terminal write, and
++optionally a Replay of the Failed Request followed by ``reopen_request`` and a second
++finalize:
++
++- the Event_Stream holds one ``request.created``, then one ``request.planned`` per
++  commit (equal to ``planned_event_data``), one ``job.transition`` per transition-log
++  entry in the same order and with equal data (``transition_event_data``), one
++  ``request.reopened`` per reopen, and exactly one Terminal_Event after each terminal
++  write (equal to ``terminal_event_data``), which is the last event while the Request
++  is terminal;
++- operations answered ``LEASE_LOST`` or ``REQUEST_TERMINAL`` add nothing;
++- no event ``data`` contains the prompt or a Job instruction.
++
++**Validates: Requirements 6.1, 6.2, 6.3, 6.4**
++"""
++
++from __future__ import annotations
++
++import asyncio
++import json
++from dataclasses import dataclass
++from typing import Any
++
++from fakeredis import FakeServer
++from fakeredis.aioredis import FakeRedis
++from hypothesis import given
++from hypothesis import strategies as st
++
++from das.client.events import (
++    TERMINAL_EVENT_TYPES,
++    planned_event_data,
++    reopened_event_data,
++    terminal_event_data,
++    terminal_event_type,
++    transition_event_data,
++)
++from das.models import FinalResult, JobPlan, JobState, Lease, RequestStatus
++from das.state import ClientRequestSpec, StateStore, StoreStatus, TransitionBatch, keys
++from tests.fixtures.redis_time import FakeRedisTime
++from tests.strategies import job_plans
++from tests.unit.test_state_phase2_dlq import fields
++
++PROMPT = "PROMPT-SECRET-c41d9e"
++DLID = "d" * 32
++FINAL = FinalResult(summary="done", jobs=[])
++
++# One batch: (job index, new state, attempt, worker_id) per Job it touches.
++batches = st.lists(
++    st.lists(
++        st.tuples(
++            st.integers(0, 4),
++            st.sampled_from(list(JobState)),
++            st.integers(0, 3),
++            st.sampled_from([None, "w1", "w2"]),
++        ),
++        max_size=4,
++    ),
++    max_size=4,
++)
++
++
++@dataclass(frozen=True)
++class Scenario:
++    plan: JobPlan
++    webhook: bool
++    batches: list[list[tuple[int, JobState, int, str | None]]]
++    stale_batch: bool
++    end: str  # "Completed" | "Failed" | "Cancelled"
++    replay: bool  # only with end == "Failed"
++
++
++@st.composite
++def scenarios(draw: st.DrawFn) -> Scenario:
++    plan = draw(job_plans(max_jobs=5))
++    # Distinctive instructions, so their absence from event data is meaningful.
++    plan = JobPlan(jobs=[
++        j.model_copy(update={"instruction": f"INSTR-SECRET-{i}-{j.job_id}"}) for i, j in enumerate(plan.jobs)
++    ])
++    end = draw(st.sampled_from(["Completed", "Failed", "Cancelled"]))
++    return Scenario(
++        plan=plan,
++        webhook=draw(st.booleans()),
++        batches=draw(batches),
++        stale_batch=draw(st.booleans()),
++        end=end,
++        replay=end == "Failed" and draw(st.booleans()),
++    )
++
++
++class Run:
++    def __init__(self, store: StateStore, sc: Scenario) -> None:
++        self.store, self.sc = store, sc
++        self.expected: list[tuple[str, dict[str, Any]]] = []
++        self.log_seen = 0
++        self.rid = ""
++
++    async def stream(self) -> list[tuple[str, str, dict[str, Any]]]:
++        return [
++            (sid, f["type"], json.loads(f["data"]))
++            for sid, f in await self.store.client.xrange(keys.events(self.rid))
++        ]
++
++    async def expect_transitions(self) -> None:
++        log = await self.store.get_transitions(self.rid)
++        for entry in log[self.log_seen:]:
++            self.expected.append(("job.transition", transition_event_data(entry)))
++        self.log_seen = len(log)
++
++    async def expect_terminal(self, status: RequestStatus, error: str | None) -> None:
++        usage = await self.store.load_usage(self.rid)
++        self.expected.append(
++            (terminal_event_type(status), terminal_event_data(status, error, usage, None, None))
++        )
++
++    async def check(self) -> None:
++        got = await self.stream()
++        assert [(t, d) for _, t, d in got] == self.expected
++        status = await self.store.get_status(self.rid)
++        if status in (RequestStatus.COMPLETED, RequestStatus.FAILED, RequestStatus.CANCELLED):
++            assert got[-1][1] == terminal_event_type(status)
++            if self.sc.webhook:
++                hook = await self.store.client.hgetall(keys.webhook(self.rid))
++                assert hook["event_id"] == got[-1][0] and hook["state"] == "pending"
++
++    async def batch(self, lease: Lease, items: list[tuple[int, JobState, int, str | None]]) -> StoreStatus:
++        snap = await self.store.load_snapshot(self.rid)
++        recs = list(snap.jobs.values())
++        jobs = {}
++        for idx, state, attempt, worker in items:
++            rec = recs[idx % len(recs)]
++            jobs[rec.job.job_id] = rec.model_copy(update={"state": state, "attempt": attempt, "worker_id": worker})
++        return (await self.store.apply_transition(lease, TransitionBatch(jobs=jobs))).status
++
++    async def unchanged_after(self, status: StoreStatus, *expected: StoreStatus) -> None:
++        assert status in expected
++        await self.check()  # nothing appended
++
++    async def go(self) -> None:
++        sc, store = self.sc, self.store
++        spec = ClientRequestSpec(
++            fingerprint="aaaaaaaa",
++            webhook_url="https://hooks.example.test/x" if sc.webhook else None,
++            webhook_secret_name="s" if sc.webhook else None,
++        )
++        res = await store.submit_request(PROMPT, spec)
++        assert res.request_id is not None
++        self.rid = res.request_id
++        self.expected.append(("request.created", {"status": "Pending"}))
++        await self.check()
++
++        lease = (await store.acquire_lease(self.rid, "m1", 300)).lease
++        assert lease is not None
++        assert (await store.commit_plan(lease, sc.plan)).ok
++        self.expected.append(("request.planned", planned_event_data(sc.plan)))
++        await self.expect_transitions()
++        await self.check()
++
++        for items in sc.batches:
++            assert await self.batch(lease, items) is StoreStatus.OK
++            await self.expect_transitions()
++            await self.check()
++
++        if sc.stale_batch:
++            stale = lease.model_copy(update={"epoch": lease.epoch + 1})
++            items = [(i, JobState.READY, 1, None) for i in range(len(sc.plan.jobs))]
++            await self.unchanged_after(await self.batch(stale, items), StoreStatus.LEASE_LOST)
++
++        if sc.end == "Cancelled":
++            assert (await store.cancel_request(self.rid)).ok
++            await self.expect_transitions()
++            await self.expect_terminal(RequestStatus.CANCELLED, None)
++        else:
++            if sc.replay:
++                # Job 0 Failed with attempt >= 1, so its dead letter can be replayed.
++                assert await self.batch(lease, [(0, JobState.FAILED, 1, "w1")]) is StoreStatus.OK
++                await self.expect_transitions()
++            status = RequestStatus(sc.end)
++            if status is RequestStatus.COMPLETED:
++                assert (await store.finalize(lease, FINAL)).ok
++                await self.expect_terminal(status, None)
++            else:
++                assert (await store.fail_request(lease, "boom")).ok
++                await self.expect_terminal(status, "boom")
++        await self.check()
++
++        # A Manager write on the terminal Request adds nothing: REQUEST_TERMINAL after a
++        # cancel (the Lease survives), LEASE_LOST after finalize (which releases it).
++        await self.unchanged_after(await self.batch(lease, [(0, JobState.READY, 1, None)]),
++                                   StoreStatus.REQUEST_TERMINAL, StoreStatus.LEASE_LOST)
++
++        if sc.replay:
++            first_job = sc.plan.jobs[0].job_id
++            assert (await store.create_dead_letter(fields(DLID, self.rid, job_id=first_job))).created
++            assert (await store.replay_dead_letter(DLID)).outcome == "accepted"
++            await self.check()  # the Replay itself appends no Event
++            lease2 = (await store.acquire_lease(self.rid, "m2", 300)).lease
++            assert lease2 is not None
++            assert (await store.reopen_request(lease2)).ok
++            self.expected.append(("request.reopened", reopened_event_data()))
++            await self.check()
++            snap = await store.load_snapshot(self.rid)
++            ready = snap.jobs[first_job].model_copy(update={"state": JobState.READY})
++            batch = TransitionBatch(jobs={first_job: ready}, tag=DLID, replays_applied=[DLID])
++            assert (await store.apply_transition(lease2, batch)).ok
++            await self.expect_transitions()
++            await self.check()
++            assert (await store.finalize(lease2, FINAL)).ok
++            await self.expect_terminal(RequestStatus.COMPLETED, None)
++            await self.check()
++
++        got = await self.stream()
++        terminals = sum(t in TERMINAL_EVENT_TYPES for _, t, _ in got)
++        assert terminals == (2 if sc.replay else 1)
++        secrets = [PROMPT, *(j.instruction for j in sc.plan.jobs)]
++        raw = [f["data"] for _, f in await store.client.xrange(keys.events(self.rid))]
++        for text in raw:
++            for secret in secrets:
++                assert secret not in text
++
++
++async def _check(sc: Scenario) -> None:
++    client = FakeRedis(server=FakeServer(), decode_responses=True)
++    try:
++        with FakeRedisTime():
++            await Run(StateStore(client), sc).go()
++    finally:
++        await client.aclose()
++
++
++@given(scenarios())
++def test_event_stream_mirrors_persisted_changes(sc: Scenario) -> None:
++    """**Validates: Requirements 6.1, 6.2, 6.3, 6.4**"""
++    asyncio.run(_check(sc))
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/tests/unit/test_state_atomic.py tests/unit/test_state_atomic.py
+--- /tmp/das_sdd_snaps/snap-g4-4/tests/unit/test_state_atomic.py	2026-10-30 13:57:31
++++ tests/unit/test_state_atomic.py	2026-10-30 14:08:28
+@@ -9,20 +9,22 @@
+ byte-for-byte unchanged, and the write order is such that a failure at any write never
+ exposes Running without the plan, or Completed without the Final_Result. Faults are
+ injected by prefixing the real script with a shim that wraps ``redis.call``.
+ """
+ 
+ from __future__ import annotations
+ 
+ import asyncio
++import json
+ 
+ import pytest
+ from redis.exceptions import ResponseError
+ 
++from das.client.events import planned_event_data
+ from das.models import (
+     FinalResult,
+     JobPlan,
+     JobRecord,
+     JobReport,
+     JobState,
+     Lease,
+     PlannedJob,
+@@ -78,17 +80,17 @@
+         "lease": await r.hgetall(keys.lease(rid)),
+         "pending": await r.zrange(keys.REQUESTS_PENDING, 0, -1, withscores=True),
+         "expiry": await r.zrange(keys.LEASES_EXPIRY, 0, -1, withscores=True),
+     }
+ 
+ 
+ def commit_args(lease: Lease, plan: JobPlan) -> tuple[list[str], list]:
+     rid = lease.request_id
+-    args: list = [rid, lease.owner, lease.epoch, plan.model_dump_json(), ""]
++    args: list = [rid, lease.owner, lease.epoch, plan.model_dump_json(), "", json.dumps(planned_event_data(plan))]
+     for job in plan.jobs:
+         args += [job.job_id, JobRecord(job=job, state=JobState.WAITING).model_dump_json()]
+     return commit_plan_keys(rid), args
+ 
+ 
+ def finalize_args(lease: Lease, final: FinalResult) -> tuple[list[str], list]:
+     rid = lease.request_id
+     keys_ = finalize_keys(rid, RequestStatus.COMPLETED)
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/tests/unit/test_state_phase2_keys.py tests/unit/test_state_phase2_keys.py
+--- /tmp/das_sdd_snaps/snap-g4-4/tests/unit/test_state_phase2_keys.py	2026-10-30 13:57:31
++++ tests/unit/test_state_phase2_keys.py	2026-10-30 14:13:51
+@@ -191,21 +191,21 @@
+     snap = await state_store.load_snapshot(rid)
+     assert snap.usage_totals == TokenUsage(input_tokens=4, output_tokens=6, total_tokens=10)
+     assert snap.job_count == 2 and snap.finished_at == 1234
+ 
+ 
+ @pytest.mark.parametrize("tag", ["", "a" * 32])
+ async def test_put_job_tag_sets_dead_letter_id(fake_redis, tag: str):
+     script = _helper_script(
+-        fake_redis, "return put_job(KEYS[1], KEYS[2], ARGV[1], ARGV[2], ARGV[3], ARGV[4])"
++        fake_redis, "return put_job(KEYS[1], KEYS[2], ARGV[1], ARGV[2], ARGV[3], ARGV[4], KEYS[3])"
+     )
+     rec = json.dumps({"job": {"job_id": "a"}, "state": "Waiting", "attempt": 0})
+     written = await script(
+-        keys=[keys.jobs("r"), keys.transitions("r")],
++        keys=[keys.jobs("r"), keys.transitions("r"), keys.request("r")],
+         args=["a", rec, "2024-01-01T00:00:00.000Z", tag],
+     )
+     assert written == 1
+     [entry] = await fake_redis.lrange(keys.transitions("r"), 0, -1)
+     data = json.loads(entry)
+     assert data.get("dead_letter_id") == (tag or None)
+     assert ("dead_letter_id" in data) == bool(tag)
+ 
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/tests/unit/test_state_phase2_writes.py tests/unit/test_state_phase2_writes.py
+--- /tmp/das_sdd_snaps/snap-g4-4/tests/unit/test_state_phase2_writes.py	2026-10-30 13:57:31
++++ tests/unit/test_state_phase2_writes.py	2026-10-30 14:08:28
+@@ -101,17 +101,17 @@
+     assert snap.status is RequestStatus.RUNNING and snap.usage is None
+ 
+ 
+ async def test_commit_plan_malformed_usage_writes_nothing(state_store: StateStore):
+     from das.state.store import commit_plan_keys
+ 
+     rid, lease = await pending(state_store)
+     script = state_store.client.register_script(script_source("commit_plan"))
+-    args = [rid, lease.owner, lease.epoch, PLAN.model_dump_json(), '["{bad json"]']
++    args = [rid, lease.owner, lease.epoch, PLAN.model_dump_json(), '["{bad json"]', ""]
+     for job in PLAN.jobs:
+         args += [job.job_id, json.dumps({"job": job.model_dump(), "state": "Waiting"})]
+     before = await dump(state_store, rid)
+     with pytest.raises(Exception):  # noqa: B017
+         await script(keys=commit_plan_keys(rid), args=args)
+     assert await dump(state_store, rid) == before
+ 
+ 
+@@ -304,17 +304,17 @@
+     assert not await r.exists(keys.pending_replays(rid))
+ 
+ 
+ async def test_cancel_conflicts_when_pending_replays_changed(state_store: StateStore):
+     rid, _ = await running(state_store)
+     await state_store.client.sadd(keys.pending_replays(rid), DL1, DL2)
+     script = state_store.client.register_script(script_source("cancel_request"))
+     snap = await state_store.load_snapshot(rid)
+-    args = [rid, json.dumps([DL1])]
++    args = [rid, json.dumps([DL1]), ""]
+     for jid, rec in snap.jobs.items():
+         new = rec.model_copy(update={"state": JobState.CANCELLED})
+         args += [jid, rec.model_dump_json(), new.model_dump_json()]
+     reply = await script(keys=cancel_request_keys(rid, [DL1]), args=args)
+     assert list(reply) == ["CONFLICT"]
+     assert (await state_store.get_status(rid)) is RequestStatus.RUNNING
+ 
+ 
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-4/tests/unit/test_state_phase4_events.py tests/unit/test_state_phase4_events.py
+--- /tmp/das_sdd_snaps/snap-g4-4/tests/unit/test_state_phase4_events.py	1970-01-01 08:00:00
++++ tests/unit/test_state_phase4_events.py	2026-10-30 14:07:55
+@@ -0,0 +1,376 @@
++"""Unit tests for the Event_Stream and Webhook_Delivery enqueue written by the
++state-changing scripts (das-client-api tasks 4.5, 4.7; Phase 4 Req 6.1-6.5, 8.2)."""
++
++from __future__ import annotations
++
++import json
++from typing import Any
++
++import pytest
++
++from das.client.events import planned_event_data, terminal_event_data, transition_event_data
++from das.models import (
++    FinalResult,
++    JobPlan,
++    JobRecord,
++    JobReport,
++    JobState,
++    Lease,
++    PlannedJob,
++    RequestStatus,
++    TokenUsage,
++)
++from das.models.usage import UsageRecord
++from das.state import (
++    ClientRequestSpec,
++    StateStore,
++    StoreStatus,
++    TransitionBatch,
++    WebhookState,
++    keys,
++)
++from tests.unit.test_state_phase2_dlq import fields
++
++PROMPT = "PROMPT-SECRET-7f3a"
++INSTR_A = "INSTR-SECRET-alpha"
++INSTR_B = "INSTR-SECRET-beta"
++PLAN = JobPlan(
++    jobs=[
++        PlannedJob(job_id="a", instruction=INSTR_A, capabilities=["research"]),
++        PlannedJob(job_id="b", instruction=INSTR_B, capabilities=["summarize"], depends_on=["a"]),
++    ]
++)
++FINAL = FinalResult(summary="done", jobs=[JobReport(job_id="a", state=JobState.SUCCEEDED)])
++FP = "cbabecbd"
++DLID = "e" * 32
++URL = "https://hooks.example.test/das"
++SECRET_NAME = "hook-secret"
++
++
++def usage_rec(i: int, o: int) -> UsageRecord:
++    return UsageRecord(
++        operation="summarize", provider="openai", model="gpt",
++        usage=TokenUsage(input_tokens=i, output_tokens=o, total_tokens=i + o),
++    )
++
++
++async def events(store: StateStore, rid: str) -> list[tuple[str, str, dict[str, Any]]]:
++    out = []
++    for sid, f in await store.client.xrange(keys.events(rid)):
++        out.append((sid, f["type"], json.loads(f["data"])))
++    return out
++
++
++async def types(store: StateStore, rid: str) -> list[str]:
++    return [t for _, t, _ in await events(store, rid)]
++
++
++async def submitted(store: StateStore, webhook: bool = False, events_max_len: int = 1000) -> str:
++    spec = ClientRequestSpec(
++        fingerprint=FP,
++        webhook_url=URL if webhook else None,
++        webhook_secret_name=SECRET_NAME if webhook else None,
++        events_max_len=events_max_len,
++    )
++    res = await store.submit_request(PROMPT, spec)
++    assert res.request_id is not None
++    return res.request_id
++
++
++async def leased(store: StateStore, rid: str) -> Lease:
++    lease = (await store.acquire_lease(rid, "m1", 30)).lease
++    assert lease is not None
++    return lease
++
++
++async def running(store: StateStore, webhook: bool = False, events_max_len: int = 1000):
++    rid = await submitted(store, webhook, events_max_len)
++    lease = await leased(store, rid)
++    assert (await store.commit_plan(lease, PLAN)).ok
++    return rid, lease
++
++
++async def job_entries(store: StateStore, rid: str):
++    snap = await store.load_snapshot(rid, include_transitions=True)
++    assert snap is not None and snap.transitions is not None
++    return snap.transitions
++
++
++async def assert_transitions_mirror_log(store: StateStore, rid: str) -> None:
++    evs = [d for _, t, d in await events(store, rid) if t == "job.transition"]
++    assert evs == [transition_event_data(e) for e in await job_entries(store, rid)]
++
++
++# ------------------------------------------------------------------ commit_plan
++
++
++async def test_commit_plan_appends_planned_then_one_transition_per_job(state_store: StateStore):
++    rid, _ = await running(state_store)
++    evs = await events(state_store, rid)
++    assert [t for _, t, _ in evs] == ["request.created", "request.planned", "job.transition", "job.transition"]
++    assert evs[1][2] == planned_event_data(PLAN)
++    entries = await job_entries(state_store, rid)
++    assert [d for _, _, d in evs[2:]] == [transition_event_data(e) for e in entries]
++    assert all(d["from"] is None and d["to"] == "Waiting" for _, _, d in evs[2:])
++    assert evs[2][2]["worker_id"] is None
++
++
++# ------------------------------------------------------------------ apply_transition
++
++
++async def test_apply_transition_appends_one_event_per_state_change(state_store: StateStore):
++    rid, lease = await running(state_store)
++    snap = await state_store.load_snapshot(rid)
++    jobs = {
++        "a": snap.jobs["a"].model_copy(update={"state": JobState.DISPATCHED, "attempt": 1, "worker_id": "w1"}),
++        "b": snap.jobs["b"].model_copy(update={"state": JobState.SKIPPED}),
++    }
++    before = len(await events(state_store, rid))
++    assert (await state_store.apply_transition(lease, TransitionBatch(jobs=jobs))).ok
++    evs = await events(state_store, rid)
++    assert [t for _, t, _ in evs[before:]] == ["job.transition", "job.transition"]
++    assert evs[before][2]["worker_id"] == "w1" and evs[before][2]["from"] == "Waiting"
++    await assert_transitions_mirror_log(state_store, rid)
++
++    # Same states again: no transition entry, no event.
++    count = len(evs)
++    assert (await state_store.apply_transition(lease, TransitionBatch(jobs=jobs))).ok
++    assert len(await events(state_store, rid)) == count
++
++
++async def test_lease_lost_batch_appends_nothing(state_store: StateStore):
++    rid, lease = await running(state_store)
++    snap = await state_store.load_snapshot(rid)
++    jobs = {"a": snap.jobs["a"].model_copy(update={"state": JobState.READY})}
++    stale = lease.model_copy(update={"epoch": lease.epoch + 1})
++    before = await events(state_store, rid)
++    res = await state_store.apply_transition(stale, TransitionBatch(jobs=jobs))
++    assert res.status is StoreStatus.LEASE_LOST
++    assert await events(state_store, rid) == before
++
++
++# ------------------------------------------------------------------ finalize
++
++
++async def test_finalize_completed_appends_terminal_event(state_store: StateStore):
++    rid, lease = await running(state_store)
++    assert (await state_store.finalize(lease, FINAL, usage=[usage_rec(3, 4), usage_rec(1, 1)])).ok
++    evs = await events(state_store, rid)
++    assert evs[-1][1] == "request.completed"
++    records = await state_store.load_usage(rid)
++    assert evs[-1][2] == terminal_event_data(RequestStatus.COMPLETED, None, records, None, None)
++    assert evs[-1][2]["usage"] == {"input_tokens": 4, "output_tokens": 5, "total_tokens": 9}
++    assert "budget" not in evs[-1][2]
++
++
++async def test_finalize_with_budget_view_splices_it(state_store: StateStore):
++    rid, lease = await running(state_store)
++    view = {"limits": {"max_total_tokens": 100}, "used": {"total_tokens": 7, "cost": None}, "exceeded": False}
++    assert (await state_store.finalize(lease, FINAL, usage=[usage_rec(3, 4)], budget_view=view)).ok
++    _, t, data = (await events(state_store, rid))[-1]
++    assert t == "request.completed" and data["budget"] == view
++
++
++async def test_finalize_failed_carries_error(state_store: StateStore):
++    rid, lease = await running(state_store)
++    assert (await state_store.fail_request(lease, "budget_exceeded")).ok
++    _, t, data = (await events(state_store, rid))[-1]
++    assert t == "request.failed"
++    assert data == terminal_event_data(RequestStatus.FAILED, "budget_exceeded", [], None, None)
++
++
++async def test_finalize_rejects_malformed_budget_json_before_writing(state_store: StateStore):
++    from das.state.scripts import script_source
++    from das.state.store import finalize_keys
++
++    rid, lease = await running(state_store)
++    script = state_store.client.register_script(script_source("finalize"))
++    before = await state_store.load_snapshot(rid, include_transitions=True)
++    before_events = await events(state_store, rid)
++    args = [rid, lease.owner, lease.epoch, "Completed", FINAL.model_dump_json(), "", "", "{bad"]
++    with pytest.raises(Exception):  # noqa: B017
++        await script(keys=finalize_keys(rid, RequestStatus.COMPLETED), args=args)
++    assert await state_store.load_snapshot(rid, include_transitions=True) == before
++    assert await events(state_store, rid) == before_events
++
++
++# ------------------------------------------------------------------ cancel
++
++
++async def test_cancel_appends_transitions_then_cancelled(state_store: StateStore):
++    rid, _ = await running(state_store)
++    before = len(await events(state_store, rid))
++    view = {"limits": {"max_total_tokens": 5}, "used": {"total_tokens": 0, "cost": None}, "exceeded": False}
++    assert (await state_store.cancel_request(rid, budget_view=view)).ok
++    evs = await events(state_store, rid)
++    assert [t for _, t, _ in evs[before:]] == ["job.transition", "job.transition", "request.cancelled"]
++    assert all(d["to"] == "Cancelled" for _, _, d in evs[before:-1])
++    assert evs[-1][2] == {**terminal_event_data(RequestStatus.CANCELLED, None, [], None, None), "budget": view}
++    await assert_transitions_mirror_log(state_store, rid)
++
++
++async def test_cancel_pending_request_without_budget(state_store: StateStore):
++    rid = await submitted(state_store)
++    assert (await state_store.cancel_request(rid)).ok
++    evs = await events(state_store, rid)
++    assert [t for _, t, _ in evs] == ["request.created", "request.cancelled"]
++    assert "budget" not in evs[-1][2]
++
++
++async def test_cancel_rejects_malformed_budget_json_before_writing(state_store: StateStore):
++    from das.state.scripts import script_source
++    from das.state.store import cancel_request_keys
++
++    rid, _ = await running(state_store)
++    snap = await state_store.load_snapshot(rid)
++    args = [rid, "[]", "{bad"]
++    for jid, rec in snap.jobs.items():
++        args += [jid, rec.model_dump_json(), rec.model_copy(update={"state": JobState.CANCELLED}).model_dump_json()]
++    script = state_store.client.register_script(script_source("cancel_request"))
++    before_events = await events(state_store, rid)
++    with pytest.raises(Exception):  # noqa: B017
++        await script(keys=cancel_request_keys(rid), args=args)
++    assert await state_store.get_status(rid) is RequestStatus.RUNNING
++    assert await events(state_store, rid) == before_events
++
++
++# ------------------------------------------------------------------ replay + reopen
++
++
++async def failed_with_dead_letter(store: StateStore, webhook: bool = False) -> tuple[str, Lease]:
++    rid, lease = await running(store, webhook)
++    failed = JobRecord(job=PLAN.jobs[0], state=JobState.FAILED, attempt=1, reason="x")
++    skipped = JobRecord(job=PLAN.jobs[1], state=JobState.SKIPPED, reason="dep failed")
++    assert (await store.apply_transition(lease, TransitionBatch(jobs={"a": failed, "b": skipped}))).ok
++    assert (await store.fail_request(lease, "job a failed")).ok
++    await store.client.delete(keys.lease(rid))
++    assert (await store.create_dead_letter(fields(DLID, rid))).created
++    return rid, lease
++
++
++async def apply_replay(store: StateStore, rid: str, lease: Lease) -> None:
++    """The owner applies the accepted Replay: Job a Failed -> Ready, pending_replays cleared."""
++    snap = await store.load_snapshot(rid)
++    ready = snap.jobs["a"].model_copy(update={"state": JobState.READY})
++    batch = TransitionBatch(jobs={"a": ready}, tag=DLID, replays_applied=[DLID])
++    assert (await store.apply_transition(lease, batch)).ok
++
++
++async def reopen_and_finish(store: StateStore, rid: str) -> None:
++    assert (await store.replay_dead_letter(DLID)).outcome == "accepted"
++    lease = await leased(store, rid)
++    assert (await store.reopen_request(lease)).ok
++    await apply_replay(store, rid, lease)
++    assert (await store.finalize(lease, FINAL)).ok
++
++
++async def test_reopen_appends_reopened_and_second_finalize_adds_terminal(state_store: StateStore):
++    rid, _ = await failed_with_dead_letter(state_store)
++    assert (await state_store.replay_dead_letter(DLID)).outcome == "accepted"
++    lease = await leased(state_store, rid)
++    assert (await state_store.reopen_request(lease)).ok
++    evs = await events(state_store, rid)
++    assert [t for _, t, _ in evs[-2:]] == ["request.failed", "request.reopened"]
++    assert evs[-1][2] == {"status": "Running"}
++    await apply_replay(state_store, rid, lease)
++    assert (await state_store.finalize(lease, FINAL)).ok
++    ts = await types(state_store, rid)
++    assert ts[-4:] == ["request.failed", "request.reopened", "job.transition", "request.completed"]
++    await assert_transitions_mirror_log(state_store, rid)
++    assert sum(t in ("request.failed", "request.completed") for t in ts) == 2
++
++
++async def test_event_data_never_contains_prompt_or_instructions(state_store: StateStore):
++    rid, _ = await failed_with_dead_letter(state_store, webhook=True)
++    await reopen_and_finish(state_store, rid)
++    raw = [f["data"] for _, f in await state_store.client.xrange(keys.events(rid))]
++    hook = await state_store.client.hget(keys.webhook(rid), "data")
++    for text in [*raw, hook]:
++        for secret in (PROMPT, INSTR_A, INSTR_B):
++            assert secret not in text
++
++
++# ------------------------------------------------------------------ webhook
++
++
++async def test_finalize_with_webhook_target_enqueues_delivery(fake_redis_time, state_store: StateStore):
++    fake_redis_time.set_ms(1_700_000_000_000)
++    rid, lease = await running(state_store, webhook=True)
++    fake_redis_time.set_ms(1_700_000_012_345)
++    assert (await state_store.finalize(lease, FINAL)).ok
++    assert await state_store.get_webhook(rid) == WebhookState("pending", 0, None)
++    score = await state_store.client.zscore(keys.WEBHOOKS_DUE, rid)
++    assert score == pytest.approx(1_700_000_012.345)
++    h = await state_store.client.hgetall(keys.webhook(rid))
++    last_id, last_type, last_data = (await events(state_store, rid))[-1]
++    assert h["event_id"] == last_id
++    assert h["type"] == last_type == "request.completed"
++    assert json.loads(h["data"]) == last_data
++    assert (h["url"], h["secret_name"], h["claim"], h["last_status"]) == (URL, SECRET_NAME, "0", "")
++
++
++async def test_cancel_with_webhook_target_enqueues_delivery(state_store: StateStore):
++    rid, _ = await running(state_store, webhook=True)
++    assert (await state_store.cancel_request(rid)).ok
++    h = await state_store.client.hgetall(keys.webhook(rid))
++    assert h["type"] == "request.cancelled" and h["state"] == "pending"
++    assert await state_store.client.zscore(keys.WEBHOOKS_DUE, rid) is not None
++
++
++async def test_no_webhook_target_writes_no_delivery(state_store: StateStore):
++    rid, lease = await running(state_store)
++    assert (await state_store.finalize(lease, FINAL)).ok
++    assert await state_store.get_webhook(rid) is None
++    assert not await state_store.client.exists(keys.webhook(rid))
++    assert await state_store.client.zscore(keys.WEBHOOKS_DUE, rid) is None
++    legacy = await state_store.create_request("p")
++    assert (await state_store.cancel_request(legacy)).ok
++    assert await state_store.get_webhook(legacy) is None
++    assert await state_store.client.zcard(keys.WEBHOOKS_DUE) == 0
++
++
++async def test_finalizing_reopened_request_resets_delivery(state_store: StateStore):
++    rid, _ = await failed_with_dead_letter(state_store, webhook=True)
++    r = state_store.client
++    await r.hset(keys.webhook(rid), mapping={"state": "delivered", "attempts": 3, "last_status": "200",
++                                             "claim": 2, "stale_field": "x"})
++    await r.zrem(keys.WEBHOOKS_DUE, rid)
++    await reopen_and_finish(state_store, rid)
++    assert await state_store.get_webhook(rid) == WebhookState("pending", 0, None)
++    h = await r.hgetall(keys.webhook(rid))
++    assert "stale_field" not in h and h["claim"] == "0" and h["type"] == "request.completed"
++    assert h["event_id"] == (await events(state_store, rid))[-1][0]
++    assert await r.zscore(keys.WEBHOOKS_DUE, rid) is not None
++
++
++async def test_get_webhook_maps_last_status(state_store: StateStore):
++    rid, lease = await running(state_store, webhook=True)
++    assert (await state_store.finalize(lease, FINAL)).ok
++    await state_store.client.hset(keys.webhook(rid), mapping={"state": "failed", "attempts": 5, "last_status": "503"})
++    assert await state_store.get_webhook(rid) == WebhookState("failed", 5, "503")
++
++
++async def test_purge_removes_outbox_entry(fake_redis_time, state_store: StateStore):
++    fake_redis_time.set_ms(1_700_000_000_000)
++    rid, lease = await running(state_store, webhook=True)
++    assert (await state_store.finalize(lease, FINAL)).ok
++    assert await state_store.client.zscore(keys.WEBHOOKS_DUE, rid) is not None
++    fake_redis_time.advance(120)
++    assert await state_store.purge_request(rid, 60_000) == "DELETED"
++    assert await state_store.client.zscore(keys.WEBHOOKS_DUE, rid) is None
++    assert not await state_store.client.exists(keys.webhook(rid), keys.events(rid))
++
++
++# ------------------------------------------------------------------ trimming
++
++
++async def test_stream_is_trimmed_to_events_max_len(state_store: StateStore):
++    rid, lease = await running(state_store, events_max_len=100)  # 4 events so far
++    snap = await state_store.load_snapshot(rid)
++    rec = snap.jobs["a"]
++    states = [JobState.READY, JobState.WAITING]
++    for i in range(146):
++        rec = rec.model_copy(update={"state": states[i % 2]})
++        assert (await state_store.apply_transition(lease, TransitionBatch(jobs={"a": rec}))).ok
++    assert len(await state_store.get_transitions(rid)) == 148  # 150 events appended
++    assert await state_store.client.xlen(keys.events(rid)) == 100
+diff --color -ruN -U2 /tmp/das_sdd_snaps/snap-g4-4/das-client-api/design.md .kiro/specs/das-client-api/design.md
+--- /tmp/das_sdd_snaps/snap-g4-4/das-client-api/design.md	2026-10-30 13:57:31
++++ .kiro/specs/das-client-api/design.md	2026-10-30 14:21:43
+@@ -233,5 +233,5 @@
+ append_event(req_key, type, data_json)   -- XADD MAXLEN <stored events_max_len or 1000> * type .. data ..
+ client_active_add / client_active_remove(req_key, rid)   -- uses the stored client_fp; no-op without one
+-terminal_event(req_key, rid, status, budget_json, now)
++terminal_event(req_key, rid, status, error_or_nil, budget_json, ms)
+     -- builds {status, error, usage} from the request hash, splices "budget":<budget_json> when given,
+     -- appends the Terminal_Event and, when webhook_url is stored, writes the Webhook_Delivery and ZADDs the outbox
+diff --color -ruN -U2 /tmp/das_sdd_snaps/snap-g4-4/das-client-api/tasks.md .kiro/specs/das-client-api/tasks.md
+--- /tmp/das_sdd_snaps/snap-g4-4/das-client-api/tasks.md	2026-10-30 13:57:31
++++ .kiro/specs/das-client-api/tasks.md	2026-10-30 14:20:28
+@@ -56,5 +56,5 @@
+     - **Property 2: Idempotent create**
+     - **Validates: Requirements 4.2, 4.3, 4.4, 4.6, 4.7**
+-  - [ ] 4.5 Add events, quota release and webhook enqueue to state-changing scripts
++  - [x] 4.5 Add events, quota release and webhook enqueue to state-changing scripts
+     - `commit_plan.lua` (`request.planned`), `apply_transition.lua` (one `job.transition` per entry, same order), `reopen_request.lua` (`request.reopened`), `replay_dead_letter.lua` (`client_active_add` when it reopens a Failed Request), `finalize.lua` and `cancel_request.lua` (`client_active_remove`, `terminal_event` with budget view from ARGV, which also enqueues the webhook), `purge_request.lua` (`ZREM` outbox, `client_active_remove`)
+     - `_common.lua`: `client_active_add`, `client_active_remove`, `terminal_event`; `put_job` appends `job.transition`
+@@ -64,5 +64,5 @@
+     - **Property 3: Active_Set equals non-terminal Requests**
+     - **Validates: Requirements 3.1, 3.3, 3.4, 3.5, 3.6, 3.7**
+-  - [ ] 4.7 Write property test for the Event_Stream
++  - [x] 4.7 Write property test for the Event_Stream
+     - **Property 6: Event_Stream mirrors persisted changes**
+     - **Validates: Requirements 6.1, 6.2, 6.3, 6.4**

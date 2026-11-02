@@ -1,0 +1,117 @@
+{
+  "description": "Webhook signing vectors, header accept cases and reject cases (Phase 4 Req 8.4, 9.7). Shared by das.client.webhook and das_client tests.",
+  "vectors": [
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": 1793000000,
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7"
+    },
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": 1793000000,
+      "body": "",
+      "signature": "v1=4de65a69d4ed28cb8f56a4fdec85f30f14bc6d4ff5599e5ba20cb9df88b0ffdd"
+    },
+    {
+      "secret": "another-secret",
+      "timestamp": 1793000000,
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=f36ca3883cb4aa25abbeefd2dd01146187b8eade8349bf51ae10af684724e464"
+    }
+  ],
+  "accept": [
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": "01793000000",
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+      "now": 1793000000.0,
+      "tolerance": 300,
+      "reason": "leading zero"
+    },
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": "0000000001793000000",
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+      "now": 1793000000.0,
+      "tolerance": 300,
+      "reason": "19-digit zero-padded timestamp"
+    }
+  ],
+  "reject": [
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": "1793000000",
+      "body": "{\"data\":{\"status\":\"Failed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+      "now": 1793000000.0,
+      "tolerance": 300,
+      "reason": "tampered body"
+    },
+    {
+      "secret": "wrong-secret",
+      "timestamp": "1793000000",
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+      "now": 1793000000.0,
+      "tolerance": 300,
+      "reason": "wrong secret"
+    },
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": "1793000000",
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+      "now": 1793000000.0,
+      "tolerance": 300,
+      "reason": "missing prefix"
+    },
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": " 1793000000",
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+      "now": 1793000000.0,
+      "tolerance": 300,
+      "reason": "timestamp with leading space"
+    },
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": "+1793000000",
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+      "now": 1793000000.0,
+      "tolerance": 300,
+      "reason": "timestamp with plus sign"
+    },
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": "00000000001793000000",
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+      "now": 1793000000.0,
+      "tolerance": 300,
+      "reason": "zero-padded timestamp over 19 digits"
+    },
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": "9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+      "now": 1793000000.0,
+      "tolerance": 300,
+      "reason": "over-long timestamp"
+    },
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": "1793000000",
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7",
+      "now": 1793000301.0,
+      "tolerance": 300,
+      "reason": "outside tolerance"
+    }
+  ]
+}

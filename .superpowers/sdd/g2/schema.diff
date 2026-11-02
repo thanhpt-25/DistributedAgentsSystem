@@ -1,0 +1,338 @@
+--- a/das/config/schema.py
++++ b/das/config/schema.py
+@@ -21,6 +21,7 @@
+ from typing import Annotated, Any, Literal
+ 
+ from pydantic import (
++    AfterValidator,
+     BaseModel,
+     BeforeValidator,
+     ConfigDict,
+@@ -35,6 +36,7 @@
+ from das.errors import FieldError
+ from das.ops.cost import MAX_PRICE_ENTRIES, PriceEntry, PriceTable
+ from das.ops.iso4217 import ISO_4217_CODES
++from das.ops.keys import key_fingerprint
+ 
+ Role = Literal["gateway", "manager", "worker"]
+ ROLES: tuple[str, ...] = ("gateway", "manager", "worker")
+@@ -56,7 +58,12 @@
+     "llm.aws_session_token",
+     "tracing.otlp_headers",
+     "gateway.cursor_secret",
++    "webhook_secrets",
+ )
++
++#: Credential fields that hold a map of named secrets. Each entry comes from
++#: ``DAS__<FIELD>__<NAME>`` in the environment or the secrets file (Phase 4 Req 1.7).
++SECRET_PREFIX_FIELDS: tuple[str, ...] = ("webhook_secrets",)
+ 
+ #: Default histogram bucket boundaries (Req 2.11).
+ DEFAULT_HTTP_BUCKETS: tuple[float, ...] = (
+@@ -313,8 +320,140 @@
+     dlq_record_ttl: int = Field(default=2_592_000, ge=3600, le=31_536_000)
+     sweep_interval: float = Field(default=60, ge=10, le=3600)
+     batch_size: int = Field(default=500, ge=1, le=10_000)
++
++
++# --------------------------------------------------------------------------- Phase 4 client API
++
++#: Webhook secret names: letters and digits in groups joined by single underscores
++#: (``partner_a``). Names are lower-cased because environment names are upper case.
++SECRET_NAME_PATTERN = r"^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$"
++WEBHOOK_SECRET_MIN_LENGTH = 16
++MAX_CLIENT_OVERRIDES = 1000
++#: Smallest non-zero ``rate``; 0 disables the Rate_Limit (Phase 4 Req 1.2).
++MIN_RATE = 0.001
++
++
++def _rate(value: float) -> float:
++    if 0 < value < MIN_RATE:
++        raise ValueError(f"must be 0 (no limit) or at least {MIN_RATE}")
++    return value
++
++
++def _webhook_url(value: str) -> str:
++    if not _is_http_url(value):
++        raise ValueError("must be an absolute http or https URL with a host")
++    return value
++
++
++def _webhook_secret(value: SecretStr) -> SecretStr:
++    if len(value.get_secret_value()) < WEBHOOK_SECRET_MIN_LENGTH:
++        raise ValueError(f"must be at least {WEBHOOK_SECRET_MIN_LENGTH} characters")
++    return value
++
++
++def _budget_decimal(value: Any) -> Any:
++    """YAML floats become ``Decimal(repr(x))``, as for prices; booleans are rejected."""
++    if isinstance(value, bool):
++        raise ValueError("must be a decimal number")
++    if isinstance(value, float):
++        return Decimal(repr(value))
++    return value
++
++
++Rate = Annotated[float, Field(ge=0, le=100_000, allow_inf_nan=False), AfterValidator(_rate)]
++Burst = Annotated[int, Field(ge=1, le=1_000_000)]
++ActiveRequests = Annotated[int, Field(ge=0, le=1_000_000)]
++Streams = Annotated[int, Field(ge=0, le=10_000)]
++SecretName = Annotated[
++    str, Field(min_length=1, max_length=64, pattern=SECRET_NAME_PATTERN), AfterValidator(str.lower)
++]
++WebhookUrl = Annotated[str, Field(max_length=2048), AfterValidator(_webhook_url)]
++WebhookSecret = Annotated[SecretStr, AfterValidator(_webhook_secret)]
++
++
++class BudgetConfig(_Section):
++    """A key's ``default_budget`` (Phase 4 Req 5.2). ``max_cost`` is in the Price_Table currency."""
++
++    max_total_tokens: int | None = Field(default=None, ge=1)
++    max_cost: Decimal | None = Field(
++        default=None, gt=0, max_digits=18, decimal_places=6, allow_inf_nan=False
++    )
++
++    @field_validator("max_cost", mode="before")
++    @classmethod
++    def _from_yaml(cls, value: Any) -> Any:
++        return _budget_decimal(value)
++
++
++class ClientSettingsConfig(_Section):
++    """Client_Settings fields (Phase 4 Req 1.2). 0 disables ``rate``, ``max_active_requests`` or ``max_streams``."""
++
++    rate: Rate = 60.0
++    burst: Burst = 120
++    max_active_requests: ActiveRequests = 100
++    max_streams: Streams = 10
++    default_budget: BudgetConfig | None = None
++    webhook_url: WebhookUrl | None = None
++    webhook_secret_name: SecretName | None = None
++
++
++class ClientOverride(_Section):
++    """Settings for one Key_Fingerprint. A field left unset (``None``) inherits the default."""
++
++    fingerprint: str = Field(pattern=r"^[0-9a-f]{8}$")
++    rate: Rate | None = None
++    burst: Burst | None = None
++    max_active_requests: ActiveRequests | None = None
++    max_streams: Streams | None = None
++    default_budget: BudgetConfig | None = None
++    webhook_url: WebhookUrl | None = None
++    webhook_secret_name: SecretName | None = None
++
++
++class ClientLimitsConfig(_Section):
++    """``client_limits`` (Phase 4 Req 1.1). Overrides are matched by Key_Fingerprint."""
++
++    default: ClientSettingsConfig = Field(default_factory=ClientSettingsConfig)
++    overrides: list[ClientOverride] = Field(default_factory=list, max_length=MAX_CLIENT_OVERRIDES)
++    idempotency_ttl: int = Field(default=86_400, ge=60, le=604_800)
++    allow_insecure_webhooks: bool = False
++
++    def merged(self, override: ClientOverride | None) -> ClientSettingsConfig:
++        """Effective settings: each field the override sets, else the default (Phase 4 Req 1.3)."""
++        if override is None:
++            return self.default
++        update = {
++            name: getattr(override, name)
++            for name in ClientSettingsConfig.model_fields
++            if getattr(override, name) is not None
++        }
++        return self.default.model_copy(update=update)
++
++    def override_for(self, fingerprint: str) -> ClientOverride | None:
++        return next((o for o in self.overrides if o.fingerprint == fingerprint), None)
++
++    def settings_for(self, fingerprint: str) -> ClientSettingsConfig:
++        return self.merged(self.override_for(fingerprint))
++
++
++class EventsConfig(_Section):
++    """Event_Stream and SSE_Endpoint limits (Phase 4 Req 6.5, 7.5, 7.7)."""
++
++    max_len: int = Field(default=1000, ge=100, le=100_000)
++    max_connections: int = Field(default=500, ge=1, le=10_000)
++    keepalive: float = Field(default=15.0, gt=0, le=300)
++
+ 
++class WebhookConfig(_Section):
++    """Webhook_Sender settings (Phase 4 Req 8.6). ``workers`` 0 disables the sender on this replica."""
+ 
++    workers: int = Field(default=2, ge=0, le=32)
++    timeout: float = Field(default=10.0, gt=0, le=60)
++    base_backoff: float = Field(default=30.0, gt=0, le=3600)
++    max_backoff: float = Field(default=3600.0, gt=0, le=86_400)
++    max_attempts: int = Field(default=8, ge=1, le=20)
++
++
+ class GatewayConfig(_Section):
+     # Credential: env or secrets file only (D10).
+     cursor_secret: SecretStr | None = None
+@@ -358,6 +497,12 @@
+     admin_api_keys: Annotated[list[SecretStr], BeforeValidator(_split_csv)] = Field(
+         default_factory=list
+     )
++    # Phase 4 client API (Req 1).
++    client_limits: ClientLimitsConfig = Field(default_factory=ClientLimitsConfig)
++    events: EventsConfig = Field(default_factory=EventsConfig)
++    webhook: WebhookConfig = Field(default_factory=WebhookConfig)
++    # Webhook secrets by name: DAS__WEBHOOK_SECRETS__<NAME> or the secrets file only (Req 1.7).
++    webhook_secrets: dict[SecretName, WebhookSecret] = Field(default_factory=dict)
+ 
+     @model_validator(mode="after")
+     def _defaults(self) -> AgentConfig:
+@@ -381,6 +526,7 @@
+         values.extend(v for _, v in self.tracing.header_pairs())
+         if self.gateway.cursor_secret is not None:
+             values.append(self.gateway.cursor_secret.get_secret_value())
++        values.extend(s.get_secret_value() for s in self.webhook_secrets.values())
+         if self.llm is not None:
+             for s in (
+                 self.llm.api_key,
+@@ -654,9 +800,106 @@
+             )
+         elif key in api_keys:
+             errors.append(FieldError(path, "must not equal an API key in api_keys"))
++    return errors
++
++
++def client_api_errors(config: AgentConfig) -> list[FieldError]:
++    """Phase 4 checks that need validated values (Req 1.4-1.6, 8.6).
++
++    For role ``gateway``: Key_Fingerprint collisions, unknown or duplicate override
++    fingerprints, and webhook settings. For every role: ``webhook.base_backoff`` is
++    at most ``webhook.max_backoff``. Errors name field paths and never include a
++    key, secret or fingerprint value.
++    """
++    errors: list[FieldError] = []
++    if config.webhook.base_backoff > config.webhook.max_backoff:
++        errors.append(
++            FieldError("webhook.base_backoff", "must be less than or equal to webhook.max_backoff")
++        )
++    if config.role != "gateway":
++        return errors
++
++    owners: dict[str, str] = {}
++    values: set[str] = set()
++    for field, keys in (("api_keys", config.api_keys), ("admin_api_keys", config.admin_api_keys)):
++        for index, key in enumerate(keys):
++            value = key.get_secret_value()
++            if value in values:
++                continue  # the same key listed twice is not a collision
++            values.add(value)
++            path = f"{field}[{index}]"
++            fp = key_fingerprint(value.encode("utf-8"))
++            if fp in owners:
++                errors.append(
++                    FieldError(path, f"has the same Key_Fingerprint as {owners[fp]}; replace one of the two keys")
++                )
++            else:
++                owners[fp] = path
++
++    limits = config.client_limits
++    first: dict[str, int] = {}
++    for index, override in enumerate(limits.overrides):
++        path = f"client_limits.overrides[{index}].fingerprint"
++        if override.fingerprint in first:
++            errors.append(
++                FieldError(
++                    path,
++                    f"duplicate fingerprint (same as client_limits.overrides[{first[override.fingerprint]}])",
++                )
++            )
++            continue
++        first[override.fingerprint] = index
++        if override.fingerprint not in owners:
++            errors.append(FieldError(path, "matches no configured API key or Admin_API_Key"))
++
++    errors.extend(_webhook_errors("client_limits.default", limits.default, limits.default, config))
++    for index, override in enumerate(limits.overrides):
++        errors.extend(
++            _webhook_errors(f"client_limits.overrides[{index}]", override, limits.merged(override), config)
++        )
+     return errors
+ 
+ 
++def _webhook_errors(
++    prefix: str,
++    own: ClientSettingsConfig | ClientOverride,
++    effective: ClientSettingsConfig,
++    config: AgentConfig,
++) -> list[FieldError]:
++    """Webhook_Target checks for one settings entry (Req 1.5, 1.6).
++
++    ``own`` is the entry as written at ``prefix``; ``effective`` is it merged with the
++    default. Only fields the entry sets itself are reported, so an inherited problem
++    is reported once, at ``client_limits.default``.
++    """
++    if own.webhook_url is None and own.webhook_secret_name is None:
++        return []
++    if (effective.webhook_url is None) != (effective.webhook_secret_name is None):
++        missing = "webhook_url" if effective.webhook_url is None else "webhook_secret_name"
++        reason = "required when the other webhook field is set (set both, or neither)"
++        return [FieldError(f"{prefix}.{missing}", reason)]
++    errors: list[FieldError] = []
++    name = own.webhook_secret_name
++    if name is not None and name not in config.webhook_secrets:
++        errors.append(
++            FieldError(
++                f"{prefix}.webhook_secret_name",
++                f"names no configured webhook secret (set DAS__WEBHOOK_SECRETS__{name.upper()} "
++                "in the environment or the secrets file)",
++            )
++        )
++    url = own.webhook_url
++    insecure_ok = config.client_limits.allow_insecure_webhooks
++    if url is not None and urlsplit(url).scheme.lower() != "https" and not insecure_ok:
++        errors.append(
++            FieldError(
++                f"{prefix}.webhook_url",
++                "must use https (set client_limits.allow_insecure_webhooks to allow http)",
++            )
++        )
++    return errors
++
++
+ # --------------------------------------------------------------------------- error formatting
+ 
+ 
+@@ -756,6 +999,9 @@
+         errors.extend(pydantic_errors(exc))
+     seen = {e.field for e in errors}
+     errors.extend(e for e in cross_field_errors(data) if e.field not in seen)
++    if config is not None:
++        seen = {e.field for e in errors}
++        errors.extend(e for e in client_api_errors(config) if e.field not in seen)
+     if errors or config is None:
+         raise ConfigError(errors, reason="invalid configuration")
+     return config
+@@ -771,8 +1017,19 @@
+     "DEFAULT_HTTP_BUCKETS",
+     "MAX_ADMIN_API_KEYS",
+     "MAX_BUCKETS",
++    "MAX_CLIENT_OVERRIDES",
++    "MIN_RATE",
++    "SECRET_NAME_PATTERN",
++    "SECRET_PREFIX_FIELDS",
++    "WEBHOOK_SECRET_MIN_LENGTH",
+     "AgentConfig",
+     "BucketsConfig",
++    "BudgetConfig",
++    "ClientLimitsConfig",
++    "ClientOverride",
++    "ClientSettingsConfig",
++    "EventsConfig",
++    "WebhookConfig",
+     "GatewayConfig",
+     "GrpcConfig",
+     "LLMConfig",
+@@ -787,6 +1044,7 @@
+     "TracingConfig",
+     "TransportsConfig",
+     "WorkerConfig",
++    "client_api_errors",
+     "cross_field_errors",
+     "parse_otlp_headers",
+     "pydantic_errors",

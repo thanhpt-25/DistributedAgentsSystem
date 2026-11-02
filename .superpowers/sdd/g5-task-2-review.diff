@@ -1,0 +1,1007 @@
+diff --color -ruN -U10 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-2/das/manager/agent.py das/manager/agent.py
+--- /tmp/das_sdd_snaps/snap-g5-2/das/manager/agent.py	2026-10-28 08:30:06
++++ das/manager/agent.py	2026-10-30 17:25:24
+@@ -173,21 +173,22 @@
+     claim_period: float = CLAIM_PERIOD
+     max_concurrent: int | None = None
+     #: Seconds between registry sweeps; defaults to ``heartbeat_interval``.
+     sweep_interval: float | None = None
+     #: ``metrics.queue_sample_interval`` (Req 3.1).
+     queue_sample_interval: float = DEFAULT_QUEUE_SAMPLE_INTERVAL
+     #: ``limits.max_message_bytes``: raw-bytes bound of Dead_Letter_Records (Req 12.1).
+     max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES
+     #: Retention_Policy (Req 14); disabled by default.
+     retention: RetentionConfig = field(default_factory=RetentionConfig)
+-    #: The agent's Price_Table for ``das_llm_estimated_cost_total`` (Req 4.6, 10.7).
++    #: The agent's Price_Table for ``das_llm_estimated_cost_total`` (Req 4.6, 10.7) and
++    #: for pricing ``max_cost`` budgets (Phase 4 Req 5.5-5.7).
+     price_table: PriceTable | None = None
+ 
+     def __post_init__(self) -> None:
+         if not self.agent_id:
+             raise ValueError("agent_id must be non-empty")
+         for name in (
+             "lease_duration",
+             "heartbeat_interval",
+             "shutdown_timeout",
+             "registration_timeout",
+@@ -282,20 +283,21 @@
+             registry=registry,
+             transport=queue,
+             planner=planner,
+             summarizer=summarizer,
+             planner_config=settings.planner_config,
+             machine_config=settings.machine_config,
+             control_transport=control,
+             clock=self._clock,
+             metrics=self.metrics,
+             tracer=self.tracer,
++            price_table=settings.price_table,  # Phase 4 Req 5.5-5.7
+         )
+         if tweak_deps is not None:
+             deps = tweak_deps(deps)
+         self.held_leases = HeldLeases()
+         self.metrics.leases_held(self.held_leases.count)  # Req 3.5
+         self.drivers = RequestDrivers(deps, settings.lease_duration, held=self.held_leases)
+         self.result_ingest = ResultIngest(
+             queue, store, on_ingested=self.drivers.notify, tracer=self.tracer
+         )
+         self.dead_letter_ingest = DeadLetterIngest(queue, store, on_ingested=self.drivers.notify)
+diff --color -ruN -U10 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-2/das/manager/driver.py das/manager/driver.py
+--- /tmp/das_sdd_snaps/snap-g5-2/das/manager/driver.py	2026-10-29 08:48:23
++++ das/manager/driver.py	2026-10-30 17:25:50
+@@ -64,42 +64,52 @@
+ the persisted Trace_Context (a new root when there is none, never written back);
+ planning and Summarizer attempts get ``manager.plan`` / ``manager.summarize`` through
+ the ``on_attempt`` hook, and each dispatch publish a ``manager.dispatch`` Span whose
+ context rides in the envelope. ``LEASE_LOST``, ``REQUEST_TERMINAL`` and planning or
+ summarization failures mark ``manager.request`` failed.
+ 
+ Timers. Persisted timers in the snapshot drive wakeups, so ``ScheduleTimer`` effects
+ need no in-memory bookkeeping: a timer whose due time has passed is fired as
+ ``TimerFired`` (capability-wait timers are evaluated by every ``Tick`` instead).
+ 
++Budget (Phase 4 Req 5.5, 5.7, 6.1, 10.2). Snapshots are loaded with every persisted
++UsageRecord and the reducer gets the Price_Table through ``StepContext``, so budget-stop
++mode is recomputed from persisted state (a new owner reaches the same decision). Before
++the Planner runs, a Request with ``max_cost`` and no Price_Table fails with
++``budget_unenforceable``. Every terminal write of a budgeted Request carries its
++Budget_Used view for the Terminal_Event, and ``das_budget_exceeded_total`` counts a
++budget stop once, when its terminal write answers OK.
++
+ This module talks to the network only through :class:`~das.transport.base.Transport`
+ and to Redis only through :class:`~das.state.store.StateStore` (import-linter
+ contract).
+ """
+ 
+ from __future__ import annotations
+ 
+ import asyncio
+ import contextlib
+ import dataclasses
+ from collections import deque
+ from collections.abc import Awaitable, Callable, Iterable, Sequence
+ from dataclasses import dataclass
+ from enum import StrEnum
+-from typing import Final, Protocol
++from typing import Any, Final, Protocol
+ 
++from das.client.budget import ExceededKind, budget_status, budget_view
+ from das.clock import Clock, SystemClock
+ from das.codec import new_message
+ from das.manager.attempts import AttemptHook
+ from das.manager.final_result import build_final_result
+ from das.manager.lease import HeldLeases, LeaseKeeper
+ from das.manager.machine import (
++    BUDGET_UNENFORCEABLE,
+     NO_SUCCESS_ERROR,
+     TIMER_CAPABILITY_WAIT,
+     CancelObserved,
+     Effect,
+     Event,
+     FinalizeFailed,
+     JobResultReceived,
+     MachineConfig,
+     PlanCommitted,
+     PublishConfirmed,
+@@ -139,20 +149,21 @@
+     JobDispatchPayload,
+     JobPlan,
+     JobState,
+     Lease,
+     RequestStatus,
+ )
+ from das.models.usage import UsageRecord
+ from das.observability import bind_job, bind_request, get_logger
+ from das.observability.metrics import ManagerMetrics, NoopRecorder
+ from das.observability.tracing import NoopTracer, SpanHandle, Tracer
++from das.ops.cost import PriceTable
+ from das.registry import WORKER_ROLE, RegistrySnapshot
+ from das.state import (
+     INBOX_JOB_RESULT,
+     INBOX_REPLAY,
+     INBOX_UNACKED_EXHAUSTED,
+     InboxEntry,
+     StateStore,
+     StoredRequest,
+     StoreStatus,
+     TransitionBatch,
+@@ -221,20 +232,22 @@
+     tick_period: float = TICK_PERIOD
+     finalize_extra_attempts: int = FINALIZE_EXTRA_ATTEMPTS
+     finalize_retry_delay: float = FINALIZE_RETRY_DELAY
+     cancel_send_timeout: float = CANCEL_SEND_TIMEOUT
+     #: Phase 2 Req 2.2, 2.4, 2.7: request/job metrics (no-op unless wired).
+     metrics: ManagerMetrics = dataclasses.field(
+         default_factory=lambda: ManagerMetrics(NoopRecorder())
+     )
+     #: Phase 2 Req 6.2-6.4, 6.8: manager.request/plan/dispatch/summarize Spans.
+     tracer: Tracer = dataclasses.field(default_factory=NoopTracer)
++    #: Phase 4 Req 5.5-5.7: prices ``max_cost`` budgets; ``None`` makes them unenforceable.
++    price_table: PriceTable | None = None
+ 
+     def __post_init__(self) -> None:
+         if self.tick_period <= 0:
+             raise ValueError("tick_period must be positive")
+         if self.finalize_extra_attempts < 0:
+             raise ValueError("finalize_extra_attempts must be >= 0")
+         if self.finalize_retry_delay < 0:
+             raise ValueError("finalize_retry_delay must be >= 0")
+ 
+ 
+@@ -357,21 +370,21 @@
+ 
+     def _close_request_span(self) -> None:
+         span = self._request_span
+         if span is not None and self._fail_code is not None:
+             span.fail(self._fail_code)  # Req 6.10
+         self._request_span = None
+         # Closed without exception info: failures are reported via fail() above.
+         self._span_stack.close()
+ 
+     async def _run(self) -> DriverOutcome:
+-        stored = await self._retry(self._store.load_snapshot, self.rid)
++        stored = await self._retry(self._load)
+         if stored is None:
+             await self.keeper.release()
+             return DriverOutcome.ABANDONED
+         self._open_request_span(stored)
+         self._adopt(stored)
+         if stored.status is RequestStatus.PENDING:
+             await self._plan(stored)
+         elif stored.status is RequestStatus.RUNNING:
+             await self._refresh_agents()
+             assert self._snap is not None
+@@ -383,20 +396,25 @@
+         while True:
+             await self._loop()
+             assert self._finish is not None
+             outcome = await self._finalize(self._finish)
+             if outcome is not None:
+                 return outcome
+             # REPLAY_PENDING: the inbox holds a Replay; evaluate again (D8).
+ 
+     # ------------------------------------------------------------------ helpers
+ 
++    async def _load(self) -> StoredRequest | None:
++        """The stored Request with every persisted UsageRecord, so the reducer computes
++        Budget_Used from persisted state (Phase 4 Req 5.7, 5.8)."""
++        return await self._store.load_snapshot(self.rid, include_usage=True)
++
+     def _adopt(self, stored: StoredRequest) -> None:
+         self._snap = RequestSnapshot.from_stored(stored)
+         self._cursor = stored.inbox_cursor or "0-0"
+ 
+     def _check_lease(self) -> None:
+         if self.keeper.is_lost:
+             raise _Stop(DriverOutcome.LEASE_LOST)
+ 
+     async def _check_release(self) -> None:
+         """Event boundary: honour :meth:`request_release` (Req 17.5)."""
+@@ -466,20 +484,26 @@
+                         with contextlib.suppress(asyncio.CancelledError):
+                             await fut
+         self._wake.clear()
+ 
+     # ------------------------------------------------------------------ planning
+ 
+     async def _plan(self, stored: StoredRequest) -> None:
+         if stored.plan is not None:
+             await self._reopen()
+             return
++        budget = stored.budget
++        if budget is not None and budget.max_cost is not None and self.deps.price_table is None:
++            # Phase 4 Req 5.5: a cost limit cannot be priced; fail before planning.
++            log.warning("planning_budget_unenforceable")
++            self._fail_code = BUDGET_UNENFORCEABLE
++            await self._fail(BUDGET_UNENFORCEABLE, budget_kind="unenforceable")
+         snapshot = await self._retry(self.deps.registry.snapshot)
+         self._agents = tuple(snapshot.agents)
+         capabilities = snapshot.advertised_capabilities()
+         outcome = await self._until_release(
+             self.deps.planner.plan(
+                 stored.prompt, capabilities, self.deps.planner_config,
+                 on_attempt=self._attempt_span("manager.plan"),
+             )
+         )
+         self._discard_if_lost("planner")
+@@ -506,21 +530,21 @@
+         )
+         if result.status is StoreStatus.LEASE_LOST:
+             self._fail_code = LEASE_LOST_CODE
+             raise _Stop(DriverOutcome.LEASE_LOST)
+         if result.status is StoreStatus.REQUEST_TERMINAL:
+             self._fail_code = REQUEST_TERMINAL_CODE
+             await self.keeper.release()  # cancelled while planning
+             raise _Stop(DriverOutcome.CANCELLED)
+         if result.ok:  # every Job written Waiting by commit_plan (Req 2.4)
+             self._record_plan_committed(outcome.plan)
+-        reloaded = await self._retry(self._store.load_snapshot, self.rid)
++        reloaded = await self._retry(self._load)
+         if reloaded is None or reloaded.status is not RequestStatus.RUNNING:
+             log.error("commit_plan_unexpected", status=str(result.status))
+             await self.keeper.release()
+             raise _Stop(DriverOutcome.ABANDONED)
+         self._adopt(reloaded)
+         log.info("plan_committed", jobs=len(outcome.plan.jobs), attempts=outcome.attempts)
+         assert self._snap is not None
+         if result.ok:
+             await self._start_events([(PlanCommitted(), None)])
+         else:  # INVALID_STATE: already Running (committed by an earlier owner)
+@@ -529,21 +553,21 @@
+     async def _reopen(self) -> None:
+         """Pending with a Job_Plan: reopened by a Replay of a Failed Request (D7).
+ 
+         ``reopen_request`` moves it to Running without planning; the Replay itself is
+         waiting in the inbox and is applied by the event loop.
+         """
+         result = await self._retry(self._store.reopen_request, self.lease)
+         if result.status is StoreStatus.LEASE_LOST:
+             self._fail_code = LEASE_LOST_CODE
+             raise _Stop(DriverOutcome.LEASE_LOST)
+-        reloaded = await self._retry(self._store.load_snapshot, self.rid)
++        reloaded = await self._retry(self._load)
+         if reloaded is None:
+             await self.keeper.release()
+             raise _Stop(DriverOutcome.ABANDONED)
+         if reloaded.status is not RequestStatus.RUNNING:
+             log.warning("reopen_rejected", status=str(result.status),
+                         request_status=reloaded.status.value)
+             await self._on_terminal(reloaded.status)
+         self._adopt(reloaded)
+         await self._refresh_agents()
+         log.info("request_reopened", status=str(result.status))
+@@ -595,24 +619,29 @@
+             self._metrics.job_transition(cap, change.to_state)
+             if change.to_state in TERMINAL_JOB:
+                 self._metrics.job_attempts(cap, change.attempt)
+ 
+     def _discard_if_lost(self, what: str) -> None:
+         if self.keeper.is_lost:
+             log.warning("output_discarded_lease_lost", component=what)
+             raise _Stop(DriverOutcome.LEASE_LOST)
+ 
+     async def _fail(
+-        self, error: str, final: FinalResult | None = None, usage: Sequence[UsageRecord] = ()
++        self,
++        error: str,
++        final: FinalResult | None = None,
++        usage: Sequence[UsageRecord] = (),
++        budget_kind: ExceededKind | None = None,
+     ) -> None:
+         """Fail the Request (and release the Lease) and stop the driver."""
+-        outcome = await self._write_final(final, RequestStatus.FAILED, error, usage)
++        outcome = await self._write_final(final, RequestStatus.FAILED, error, usage,
++                                          budget_kind=budget_kind)
+         if outcome is None:  # REPLAY_PENDING without a plan: cannot happen
+             log.error("finalize_unexpected_replay_pending")
+             await self.keeper.release()
+             outcome = DriverOutcome.ABANDONED
+         raise _Stop(outcome)
+ 
+     # ------------------------------------------------------------------ event loop
+ 
+     async def _loop(self) -> None:
+         while self._finish is None:
+@@ -648,21 +677,21 @@
+             raise
+         except Exception as exc:
+             log.warning("driver_start_events_failed", error=type(exc).__name__)
+             self._reload = True
+ 
+     async def _resync(self) -> None:
+         """After an unexpected error the local snapshot may be stale (a write may have
+         landed without its reply, or a publish without its commit): reload it and
+         re-drive in-flight Jobs like a new owner would (Req 2.6). Duplicate deliveries
+         are absorbed by result idempotency."""
+-        stored = await self._store.load_snapshot(self.rid)
++        stored = await self._load()
+         if stored is None:
+             await self.keeper.release()
+             raise _Stop(DriverOutcome.ABANDONED)
+         if stored.status is not RequestStatus.RUNNING:
+             await self._on_terminal(stored.status)
+         self._adopt(stored)
+         self._reload = False
+         assert self._snap is not None
+         await self._run_events([], resume(self._snap, self._agents))
+ 
+@@ -746,21 +775,21 @@
+             (t for t in self._snap.timers if t.kind != TIMER_CAPABILITY_WAIT and t.due <= now),
+             key=lambda t: (t.due, t.key.member),
+         )
+         for timer in due:
+             await self._run_events([(TimerFired(timer.kind, timer.job_id, timer.attempt), None)])
+             if self._finish is not None:
+                 return
+ 
+     async def _step_context(self) -> StepContext:
+         return StepContext(now=await self._now(), config=self.deps.machine_config,
+-                           agents=self._agents)
++                           agents=self._agents, price_table=self.deps.price_table)
+ 
+     async def _run_events(
+         self,
+         events: Iterable[tuple[Event | None, str | None]],
+         effects: Sequence[Effect] = (),
+     ) -> None:
+         """Step, commit, and execute effects for ``events`` and their follow-ups."""
+         queue: deque[tuple[Event | None, str | None]] = deque(events)
+         queue.extend((e, None) for e in await self._execute(effects))
+         while queue:
+@@ -945,21 +974,22 @@
+ 
+     # ------------------------------------------------------------------ finish
+ 
+     async def _finalize(self, finish: RunSummarizer | FinalizeFailed) -> DriverOutcome | None:
+         """Summarize (or not) and write the final status; ``None`` on REPLAY_PENDING."""
+         snap = self._snap
+         assert snap is not None and snap.plan is not None
+         if isinstance(finish, FinalizeFailed):
+             final = finish.final_result
+             return await self._write_final(final, RequestStatus.FAILED,
+-                                           final.error or NO_SUCCESS_ERROR)
++                                           final.error or NO_SUCCESS_ERROR,
++                                           budget_kind=finish.budget_kind)
+         summarizer = self.deps.summarizer
+         try:
+             summary = await self._until_release(
+                 summarizer.summarize(
+                     finish.prompt, finish.succeeded,
+                     on_attempt=self._attempt_span("manager.summarize"),
+                 )
+             )
+         except SummarizationFailed as exc:
+             self._discard_if_lost("summarizer")
+@@ -972,46 +1002,54 @@
+         return await self._write_final(
+             final, RequestStatus.COMPLETED, None, (summarizer.usage_of(summary),)
+         )
+ 
+     async def _write_final(
+         self,
+         final: FinalResult | None,
+         status: RequestStatus,
+         error: str | None,
+         usage: Sequence[UsageRecord] = (),
++        budget_kind: ExceededKind | None = None,
+     ) -> DriverOutcome | None:
+         """``finalize`` with 3 extra attempts at 1 s; stop renewing if all fail (7.4, 7.7).
+ 
+         ``usage`` (Planner/Summarizer UsageRecords) is written in the same script and
+         dropped when the write answers LEASE_LOST / REQUEST_TERMINAL (Req 9.4).
++        A budgeted Request passes its Budget_Used view (persisted plus ``usage``) for the
++        Terminal_Event (Phase 4 Req 6.1). ``budget_kind`` marks a budget stop; it is
++        counted in ``das_budget_exceeded_total`` only when the write answers OK, so a
++        REPLAY_PENDING or retried write never counts twice (Phase 4 Req 10.2).
+         Returns ``None`` when ``finalize`` answered REPLAY_PENDING (D8): the pending
+         finish is dropped and the inbox drained again; the caller re-runs the loop.
+         """
+         records = (*self._carry_usage, *usage)
++        view = self._budget_view(records)
+         attempts = 1 + self.deps.finalize_extra_attempts
+         last_error: str | None = None
+         for attempt in range(1, attempts + 1):
+             self._check_lease()
+             await self._check_release()
+             try:
+                 result = await self._store.finalize(self.lease, final, status, error,
+-                                                    records)
++                                                    records, budget_view=view)
+             except Exception as exc:
+                 log.warning("finalize_failed", attempt=attempt, error=type(exc).__name__)
+                 last_error = type(exc).__name__
+                 if attempt < attempts:
+                     await self._clock.sleep(self.deps.finalize_retry_delay)
+                 continue
+             if result.ok:
+                 self._carry_usage = []
+                 self._record_finished(status, result)
++                if budget_kind is not None:
++                    self._metrics.budget_exceeded(budget_kind)
+                 log.info("request_finalized", status=status.value)
+                 await self.keeper.release()  # finalize.lua already released; stop renewing
+                 return (
+                     DriverOutcome.COMPLETED
+                     if status is RequestStatus.COMPLETED
+                     else DriverOutcome.FAILED
+                 )
+             if result.status is StoreStatus.REPLAY_PENDING:
+                 log.info("finalize_replay_pending", status=status.value)
+                 self._carry_usage = list(records)  # still unpersisted (Req 9.3)
+@@ -1038,20 +1076,29 @@
+                     else DriverOutcome.ABANDONED
+                 )
+             log.error("finalize_rejected", status=str(result.status), detail=result.detail)
+             await self.keeper.release()
+             return DriverOutcome.ABANDONED
+         # Req 7.7: leave the Request unchanged and let the Lease lapse.
+         log.error("finalize_gave_up", attempts=attempts)
+         self._fail_code = last_error or self._fail_code
+         self.keeper.stop_renewing()
+         return DriverOutcome.STOPPED_RENEWING
++
++    def _budget_view(self, records: Sequence[UsageRecord]) -> dict[str, Any] | None:
++        """Budget_Used of a budgeted Request after ``records`` are written (Phase 4
++        Req 5.9, 6.1); ``None`` without a budget, so the Terminal_Event has no view."""
++        snap = self._snap
++        if snap is None or snap.budget is None:
++            return None
++        status = budget_status((*snap.usage, *records), snap.budget, self.deps.price_table)
++        return budget_view(snap.budget, status)
+ 
+     def _record_finished(self, status: RequestStatus, result: WriteResult) -> None:
+         """``finalize`` answered OK (Req 2.2): one count plus one duration observation,
+         ``finished_at - created_at`` as returned by the script, clamped at 0."""
+         finished, created = result.finished_at_ms, result.created_at_ms
+         duration = 0.0
+         if finished is not None and created is not None:
+             duration = max(0, finished - created) / 1000.0
+         self._metrics.request_finished(status, duration)
+ 
+diff --color -ruN -U10 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-2/das/observability/metrics.py das/observability/metrics.py
+--- /tmp/das_sdd_snaps/snap-g5-2/das/observability/metrics.py	2026-10-28 17:18:22
++++ das/observability/metrics.py	2026-10-30 17:24:55
+@@ -62,20 +62,22 @@
+     "request_state",
+     "request_gone",
+     "job_state",
+     "stale_attempt",
+     "lease_held",
+     "service_unavailable",
+ ]
+ LeaseKind = Literal["initial", "takeover"]
+ LeaseLossReason = Literal["held_by_other", "store_unreachable"]
+ RetentionKind = Literal["request", "inbox", "dlq_record"]
++#: Same values as ``das.client.budget.ExceededKind`` (Phase 4 Req 10.2).
++BudgetExceededKind = Literal["tokens", "cost", "unenforceable"]
+ RegistryRole = Literal["manager", "worker"]
+ RegistryStatus = Literal["Available", "Unavailable", "Draining"]
+ HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "_other"]
+ 
+ 
+ def _values(literal: Any) -> frozenset[str]:
+     return frozenset(str(v) for v in get_args(literal))
+ 
+ 
+ REQUEST_FINISH_STATUSES: frozenset[str] = frozenset(s.value for s in TERMINAL_REQUEST)
+@@ -83,20 +85,21 @@
+ JOB_RESULT_STATUSES: frozenset[str] = _values(JobResultStatus)
+ LLM_OPERATIONS: frozenset[str] = _values(LLMOperation)
+ LLM_OUTCOMES: frozenset[str] = _values(LLMOutcome)
+ TOKEN_DIRECTIONS: frozenset[str] = _values(TokenDirection)
+ DLQ_ACTIONS: frozenset[str] = _values(DlqAction)
+ DLQ_ADMIN_OUTCOMES: frozenset[str] = _values(DlqAdminOutcome)
+ DEAD_LETTER_REASONS: frozenset[str] = _values(DeadLetterReason)
+ LEASE_KINDS: frozenset[str] = _values(LeaseKind)
+ LEASE_LOSS_REASONS: frozenset[str] = _values(LeaseLossReason)
+ RETENTION_KINDS: frozenset[str] = _values(RetentionKind)
++BUDGET_EXCEEDED_KINDS: frozenset[str] = _values(BudgetExceededKind)
+ REGISTRY_ROLES: frozenset[str] = _values(RegistryRole)
+ REGISTRY_STATUSES: frozenset[str] = _values(RegistryStatus)
+ HTTP_METHODS: frozenset[str] = _values(HttpMethod)
+ STATUS_CODES: frozenset[str] = frozenset(str(code) for code in range(100, 600))
+ 
+ #: Labels bounded by a configured distinct-value limit (Req 5.3).
+ DYNAMIC_LABELS: frozenset[str] = frozenset({"capability", "queue", "provider", "model"})
+ #: Labels whose allowed set is only known at runtime (route templates, Price_Table currency).
+ RUNTIME_LABELS: frozenset[str] = frozenset({"route", "currency"})
+ #: Every label name the recorder may use (Req 5.1).
+@@ -217,20 +220,24 @@
+         operation=LLM_OPERATIONS, direction=TOKEN_DIRECTIONS,
+     ),
+     _spec(
+         "das_llm_estimated_cost_total", "counter", "Estimated LLM cost per the Price_Table.",
+         ("provider", "model", "currency"),
+     ),
+     _spec(
+         "das_retention_deleted_total", "counter", "Items deleted by the Retention_Sweeper.",
+         ("kind",), kind=RETENTION_KINDS,
+     ),
++    _spec(
++        "das_budget_exceeded_total", "counter", "Requests failed by a budget stop, by exceeded kind.",
++        ("kind",), kind=BUDGET_EXCEEDED_KINDS,
++    ),
+ )
+ 
+ CATALOG_BY_NAME: Mapping[str, MetricSpec] = {spec.name: spec for spec in CATALOG}
+ 
+ 
+ def policy_for(
+     spec: MetricSpec,
+     limits: LabelLimitsConfig,
+     *,
+     route_templates: Iterable[str] = (),
+@@ -643,20 +650,24 @@
+ 
+     def registry_sample_error(self) -> None:
+         self._r.inc("das_registry_sample_errors_total")
+ 
+     def dlq_record_created(self, reason: DeadLetterReason) -> None:
+         self._r.inc("das_dlq_records_created_total", {"reason": reason})
+ 
+     def retention_deleted(self, kind: RetentionKind, count: int) -> None:
+         if count > 0:
+             self._r.inc("das_retention_deleted_total", {"kind": kind}, int(count))
++
++    def budget_exceeded(self, kind: BudgetExceededKind) -> None:
++        """A budget-stop terminal write answered OK (Phase 4 Req 10.2)."""
++        self._r.inc("das_budget_exceeded_total", {"kind": kind})
+ 
+ 
+ class WorkerMetrics(_Facade):
+     """Worker_Agent metrics (Req 2.8, 2.9) plus its LLM metrics."""
+ 
+     def __init__(self, recorder: MetricsRecorder) -> None:
+         super().__init__(recorder)
+         self.llm = LLMMetrics(recorder)
+ 
+     def job_executed(self, capability: str, status: JobResultStatus, seconds: float) -> None:
+diff --color -ruN -U10 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-2/tests/fixtures/phase3_baseline/contract.json tests/fixtures/phase3_baseline/contract.json
+--- /tmp/das_sdd_snaps/snap-g5-2/tests/fixtures/phase3_baseline/contract.json	2026-10-30 11:52:40
++++ tests/fixtures/phase3_baseline/contract.json	2026-10-30 17:26:42
+@@ -1318,20 +1318,36 @@
+       "DependencyUnreachable": 4,
+       "OpsPortUnavailable": 2,
+       "RegistrationFailed": 5,
+       "TransportIncomplete": 3,
+       "TransportLoadError": 3,
+       "TransportNotInstalled": 3
+     }
+   },
+   "metrics": [
+     {
++      "allowed": {
++        "kind": [
++          "cost",
++          "tokens",
++          "unenforceable"
++        ]
++      },
++      "buckets_key": null,
++      "help": "Requests failed by a budget stop, by exceeded kind.",
++      "labels": [
++        "kind"
++      ],
++      "name": "das_budget_exceeded_total",
++      "type": "counter"
++    },
++    {
+       "allowed": {},
+       "buckets_key": null,
+       "help": "Available Worker_Agents advertising a Capability.",
+       "labels": [
+         "capability"
+       ],
+       "name": "das_capability_workers",
+       "type": "gauge"
+     },
+     {
+diff --color -ruN -U10 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-2/tests/unit/test_manager_driver_budget.py tests/unit/test_manager_driver_budget.py
+--- /tmp/das_sdd_snaps/snap-g5-2/tests/unit/test_manager_driver_budget.py	1970-01-01 08:00:00
++++ tests/unit/test_manager_driver_budget.py	2026-10-30 17:24:35
+@@ -0,0 +1,343 @@
++"""RequestDriver budget enforcement (das-client-api task 5.3; Phase 4 Req 5.5, 5.7,
++5.9, 6.1, 10.2).
++
++Same real pieces as ``test_manager_driver`` (fakeredis + Lua, MemoryTransport,
++Planner/Summarizer over FakeAdapter), plus a real ``MetricsRecorder``. Budgeted
++Requests are created with ``StateStore.submit_request``.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import dataclasses
++import json
++from decimal import Decimal
++from typing import Any
++
++from das.client.budget import Budget
++from das.clock import FakeClock
++from das.codec import new_message
++from das.llm.retry import LLMProvider
++from das.manager.agent import ManagerAgent, ManagerSettings
++from das.manager.driver import DriverDeps, DriverOutcome, RequestDrivers
++from das.manager.machine import BUDGET_EXCEEDED, BUDGET_UNENFORCEABLE, UNKNOWN_LLM
++from das.manager.planner import Planner, PlannerConfig
++from das.manager.summarizer import Summarizer
++from das.models import JobResultPayload, JobState, RequestStatus, TokenUsage
++from das.observability.metrics import CATALOG_BY_NAME, ManagerMetrics, MetricsRecorder
++from das.ops.cost import PriceEntry, PriceTable
++from das.registry import AgentRegistry
++from das.state import ClientRequestSpec, StateStore, StoreStatus, WriteResult, keys
++from tests.fakes.llm_adapter import FakeAdapter
++from tests.fakes.memory_transport import MemoryBroker, MemoryTransport
++from tests.unit.test_manager_driver import (
++    ONE_JOB,
++    PARAMS,
++    TIMEOUT,
++    TWO_JOBS,
++    Env,
++    _status_of,
++    _true,
++    make_env,
++    wait_until,
++)
++
++METRIC = "das_budget_exceeded_total"
++#: Planner usage of the FakeAdapter's default completion: 1 input + 1 output token.
++PLANNER_TOKENS = 2
++#: FakeWorker usage per Job_Result.
++WORKER_TOKENS = 5
++#: Two independent Jobs plus one that depends on both.
++FAN_IN = json.dumps(
++    {
++        "jobs": [
++            {"job_id": "a", "instruction": "find facts", "capabilities": ["search"]},
++            {"job_id": "c", "instruction": "find more", "capabilities": ["search"]},
++            {"job_id": "b", "instruction": "write", "capabilities": ["write"],
++             "depends_on": ["a", "c"]},
++        ]
++    }
++)
++
++
++class _Log:
++    def warning(self, *_a, **_k) -> None: ...
++
++
++def _recorder() -> MetricsRecorder:
++    return MetricsRecorder(clock=FakeClock(), log=_Log())
++
++
++def _wire(rec: MetricsRecorder, price_table: PriceTable | None = None):
++    def tweak(deps: DriverDeps) -> DriverDeps:
++        return dataclasses.replace(deps, metrics=ManagerMetrics(rec), price_table=price_table)
++
++    return tweak
++
++
++def _value(rec: MetricsRecorder, kind: str) -> float:
++    return rec.registry.get_sample_value(METRIC, {"kind": kind}) or 0.0
++
++
++def _total(rec: MetricsRecorder) -> float:
++    return sum(_value(rec, k) for k in ("tokens", "cost", "unenforceable"))
++
++
++async def _submit_and_claim(env: Env, budget: Budget | None, owner: str = "m1"):
++    created = await env.store.submit_request(
++        "hello", ClientRequestSpec(fingerprint="fp1", budget=budget)
++    )
++    rid = created.request_id
++    assert rid is not None
++    acquired = await env.store.acquire_lease(rid, owner, env.drivers.lease_duration)
++    assert acquired.ok and acquired.lease is not None
++    return rid, env.drivers.on_claimed(acquired.lease)
++
++
++async def _events(store: StateStore, rid: str) -> list[tuple[str, dict[str, Any]]]:
++    return [
++        (f["type"], json.loads(f["data"])) for _, f in await store.client.xrange(keys.events(rid))
++    ]
++
++
++def _result(rid: str, job_id: str, attempt: int, tokens: int) -> JobResultPayload:
++    return JobResultPayload(
++        request_id=rid, job_id=job_id, attempt=attempt, worker_id="w1", status="Succeeded",
++        content=f"out-{job_id}",
++        usage=TokenUsage(input_tokens=tokens, output_tokens=0, total_tokens=tokens),
++        duration_ms=1,
++    )
++
++
++# --------------------------------------------------------------------------- metric catalog
++
++
++def test_catalog_has_budget_exceeded_metric():
++    spec = CATALOG_BY_NAME[METRIC]
++    assert spec.kind == "counter"
++    assert spec.labels == ("kind",)
++    assert spec.allowed == {"kind": frozenset({"tokens", "cost", "unenforceable"})}
++
++
++# --------------------------------------------------------------------------- planning check
++
++
++async def test_max_cost_without_price_table_fails_before_planning(
++    state_store: StateStore, fake_redis
++):
++    """Phase 4 Req 5.5: ``max_cost`` and no Price_Table fail before the Planner runs."""
++    rec = _recorder()
++    env = await make_env(state_store, fake_redis, tweak=_wire(rec))
++    rid, task = await _submit_and_claim(env, Budget(max_cost=Decimal("1.5")))
++    assert await asyncio.wait_for(task, TIMEOUT) is DriverOutcome.FAILED
++
++    stored = await state_store.load_snapshot(rid)
++    assert stored is not None and stored.status is RequestStatus.FAILED
++    assert stored.error == BUDGET_UNENFORCEABLE
++    assert stored.plan is None and stored.lease is None
++    assert env.planner_llm.calls == []
++    assert env.worker.dispatches == []
++    assert _value(rec, "unenforceable") == 1 and _total(rec) == 1
++
++    kind, data = (await _events(state_store, rid))[-1]
++    assert kind == "request.failed"
++    assert data["error"] == BUDGET_UNENFORCEABLE
++    assert data["budget"] == {
++        "limits": {"max_cost": "1.5"},
++        "used": {"total_tokens": 0, "cost": None},
++        "exceeded": True,
++    }
++
++
++# --------------------------------------------------------------------------- budget stop
++
++
++async def test_token_budget_hit_mid_run_fails_without_summarizer(
++    state_store: StateStore, fake_redis
++):
++    """Phase 4 Req 5.7, 5.9, 6.1: Job "a" reaches the limit; "b" is never dispatched."""
++    rec = _recorder()
++    env = await make_env(state_store, fake_redis, tweak=_wire(rec))
++    limit = PLANNER_TOKENS + WORKER_TOKENS
++    rid, task = await _submit_and_claim(env, Budget(max_total_tokens=limit))
++    assert await asyncio.wait_for(task, TIMEOUT) is DriverOutcome.FAILED
++
++    stored = await state_store.load_snapshot(rid)
++    assert stored is not None and stored.status is RequestStatus.FAILED
++    assert stored.error == BUDGET_EXCEEDED
++    assert env.summary_llm.calls == []
++    assert [m.payload.job_id for m in env.worker.dispatches] == ["a"]
++    assert stored.jobs["a"].state is JobState.SUCCEEDED
++    assert stored.jobs["b"].state is JobState.SKIPPED
++    assert stored.jobs["b"].reason == BUDGET_EXCEEDED
++    # Succeeded Job results stay queryable (Req 5.9).
++    assert stored.results[("a", 1)].content == "out-a"
++
++    kind, data = (await _events(state_store, rid))[-1]
++    assert kind == "request.failed"
++    assert data["budget"]["exceeded"] is True
++    assert data["budget"]["used"]["total_tokens"] == data["usage"]["total_tokens"] == limit
++    assert _value(rec, "tokens") == 1 and _total(rec) == 1
++
++
++async def test_no_budget_completes_without_budget_view_or_metric(
++    state_store: StateStore, fake_redis
++):
++    rec = _recorder()
++    env = await make_env(state_store, fake_redis, tweak=_wire(rec))
++    rid, task = await _submit_and_claim(env, None)
++    assert await asyncio.wait_for(task, TIMEOUT) is DriverOutcome.COMPLETED
++
++    kind, data = (await _events(state_store, rid))[-1]
++    assert kind == "request.completed"
++    assert "budget" not in data
++    assert _total(rec) == 0
++
++
++async def test_budget_within_limit_completes_with_budget_view(
++    state_store: StateStore, fake_redis
++):
++    rec = _recorder()
++    env = await make_env(state_store, fake_redis, tweak=_wire(rec))
++    rid, task = await _submit_and_claim(env, Budget(max_total_tokens=1000))
++    assert await asyncio.wait_for(task, TIMEOUT) is DriverOutcome.COMPLETED
++
++    kind, data = (await _events(state_store, rid))[-1]
++    assert kind == "request.completed"
++    assert data["budget"]["exceeded"] is False
++    # Planner + two Jobs + Summarizer.
++    assert data["budget"]["used"]["total_tokens"] == data["usage"]["total_tokens"]
++    assert data["usage"]["total_tokens"] == 2 * PLANNER_TOKENS + 2 * WORKER_TOKENS
++    assert _total(rec) == 0
++
++
++async def test_max_cost_with_price_table_is_enforceable(state_store: StateStore, fake_redis):
++    """The driver passes the Price_Table to the reducer, so ``max_cost`` is priced."""
++    table = PriceTable(
++        currency="USD",
++        models=[
++            PriceEntry(provider="fake", model="m-1", input_per_million=Decimal(1),
++                       output_per_million=Decimal(1)),
++            PriceEntry(provider=UNKNOWN_LLM, model=UNKNOWN_LLM, input_per_million=Decimal(1),
++                       output_per_million=Decimal(1)),
++        ],
++    )
++    rec = _recorder()
++    env = await make_env(state_store, fake_redis, tweak=_wire(rec, table))
++    rid, task = await _submit_and_claim(env, Budget(max_cost=Decimal(100)))
++    assert await asyncio.wait_for(task, TIMEOUT) is DriverOutcome.COMPLETED
++
++    kind, data = (await _events(state_store, rid))[-1]
++    assert kind == "request.completed"
++    assert data["budget"]["exceeded"] is False
++    assert data["budget"]["used"]["cost"] is not None
++    assert _total(rec) == 0
++
++
++# --------------------------------------------------------------------------- takeover
++
++
++async def test_takeover_during_budget_stop_finishes_in_flight_job(
++    state_store: StateStore, fake_redis
++):
++    """Phase 4 Req 5.7, 5.8 with v1 Req 2.5: a new owner recomputes the stop from the
++    persisted usage, dispatches nothing new and fails once the in-flight Job is done."""
++    rec = _recorder()
++    env = await make_env(
++        state_store, fake_redis, plan_outcomes=(FAN_IN,), lease_duration=1.0, tweak=_wire(rec)
++    )
++    env.worker.mode = "hold"
++    limit = PLANNER_TOKENS + 10
++    rid, task = await _submit_and_claim(env, Budget(max_total_tokens=limit))
++    await wait_until(lambda: _true(len(env.worker.dispatches) == 2))
++    await wait_until(lambda: _status_of(state_store, rid, "c", JobState.DISPATCHED))
++    attempts = {m.payload.job_id: m.payload.attempt for m in env.worker.dispatches}
++
++    # "a" reaches the limit while "c" is still in flight: "b" is Skipped, no finalize.
++    late_a = _result(rid, "a", attempts["a"], 10)
++    await env.worker.transport.publish("results", new_message(late_a, correlation_id=rid))
++    await wait_until(lambda: _status_of(state_store, rid, "b", JobState.SKIPPED))
++    stored = await state_store.load_snapshot(rid)
++    assert stored is not None and stored.status is RequestStatus.RUNNING
++    assert stored.jobs["c"].state is JobState.DISPATCHED
++
++    # Another Manager takes the Lease over and starts its own driver.
++    sec, _ = await fake_redis.time()
++    await fake_redis.hset(keys.lease(rid), "expires_at", f"{int(sec) - 1}.000000")
++    acquired = await state_store.acquire_lease(rid, "m2", 30)
++    assert acquired.ok and acquired.lease is not None
++    before = len(env.worker.dispatches)
++    m2 = RequestDrivers(env.drivers.deps, 30.0)
++    task2 = m2.on_claimed(acquired.lease)
++    assert await asyncio.wait_for(task, TIMEOUT) is DriverOutcome.LEASE_LOST
++
++    # The new owner reached the same budget-stop state: nothing is Ready or re-planned.
++    await asyncio.sleep(0.2)
++    stored = await state_store.load_snapshot(rid)
++    assert stored is not None and stored.status is RequestStatus.RUNNING
++    assert stored.jobs["b"].state is JobState.SKIPPED
++    assert not task2.done()
++
++    late_c = _result(rid, "c", attempts["c"], 1)
++    await env.worker.transport.publish("results", new_message(late_c, correlation_id=rid))
++    assert await asyncio.wait_for(task2, TIMEOUT) is DriverOutcome.FAILED
++
++    # resume() may re-publish "c", which was in flight when the stop began (liveness
++    # after a takeover, not a new dispatch); nothing else is dispatched, no retry.
++    assert {m.payload.job_id for m in env.worker.dispatches[before:]} <= {"c"}
++    assert all(m.payload.attempt == attempts["c"] for m in env.worker.dispatches[before:])
++    stored = await state_store.load_snapshot(rid)
++    assert stored is not None and stored.status is RequestStatus.FAILED
++    assert stored.error == BUDGET_EXCEEDED
++    assert stored.jobs["c"].state is JobState.SUCCEEDED
++    assert env.summary_llm.calls == []
++    kind, data = (await _events(state_store, rid))[-1]
++    assert kind == "request.failed"
++    assert data["budget"]["used"]["total_tokens"] == limit + 1
++    assert _value(rec, "tokens") == 1 and _total(rec) == 1
++
++
++# --------------------------------------------------------------------------- metric once
++
++
++async def test_replay_pending_finalize_counts_metric_once(state_store: StateStore, fake_redis):
++    rec = _recorder()
++    env = await make_env(state_store, fake_redis, plan_outcomes=(ONE_JOB,), tweak=_wire(rec))
++    real_finalize = state_store.finalize
++    calls: list[int] = []
++
++    async def finalize(*args, **kwargs):
++        calls.append(1)
++        if len(calls) == 1:
++            return WriteResult(StoreStatus.REPLAY_PENDING)
++        return await real_finalize(*args, **kwargs)
++
++    state_store.finalize = finalize  # type: ignore[method-assign]
++    rid, task = await _submit_and_claim(env, Budget(max_total_tokens=PLANNER_TOKENS + 1))
++    assert await asyncio.wait_for(task, TIMEOUT) is DriverOutcome.FAILED
++    assert len(calls) == 2
++    stored = await state_store.load_snapshot(rid)
++    assert stored is not None and stored.error == BUDGET_EXCEEDED
++    assert _value(rec, "tokens") == 1 and _total(rec) == 1
++
++
++# --------------------------------------------------------------------------- agent wiring
++
++
++async def test_manager_agent_passes_price_table_to_drivers(state_store: StateStore, fake_redis):
++    table = PriceTable(currency="EUR")
++    broker = MemoryBroker()
++    settings = ManagerSettings(
++        agent_id="m1", host="mhost", grpc_endpoint="mhost:50051",
++        planner_config=PlannerConfig(planning_retries=0), price_table=table,
++    )
++    agent = ManagerAgent(
++        settings,
++        queue=MemoryTransport(broker, agent_id="m1"),
++        control=MemoryTransport(MemoryBroker(), agent_id="m1"),
++        store=state_store,
++        registry=AgentRegistry(fake_redis),
++        planner=Planner(LLMProvider(FakeAdapter([TWO_JOBS]), PARAMS, retry_count=0)),
++        summarizer=Summarizer(LLMProvider(FakeAdapter(["x"]), PARAMS, retry_count=0)),
++    )
++    assert agent.drivers.deps.price_table is table
+diff --color -ruN -U10 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-2/tests/unit/test_metrics_recorder.py tests/unit/test_metrics_recorder.py
+--- /tmp/das_sdd_snaps/snap-g5-2/tests/unit/test_metrics_recorder.py	2026-10-26 16:40:11
++++ tests/unit/test_metrics_recorder.py	2026-10-30 17:26:23
+@@ -59,21 +59,21 @@
+             if s.name == sample_name and s.labels == labels:
+                 return s.value
+     return None
+ 
+ 
+ # --- catalog / exposition ---------------------------------------------------------------
+ 
+ 
+ def test_catalog_names_and_labels_are_allowed() -> None:
+     names = [s.name for s in CATALOG]
+-    assert len(names) == len(set(names)) == 26
++    assert len(names) == len(set(names)) == 27  # + das_budget_exceeded_total (Phase 4 Req 10.2)
+     for spec in CATALOG:
+         assert spec.name.startswith("das_")
+         assert set(spec.labels) <= ALLOWED_LABEL_NAMES
+         if spec.kind == "histogram":
+             assert spec.buckets_key in {"http", "duration", "attempts"}
+ 
+ 
+ def test_render_content_type_and_one_help_type_per_metric() -> None:
+     rec, _, _ = make()
+     body, ctype = rec.render()
+diff --color -ruN -U10 -x __pycache__ /tmp/das_sdd_snaps/snap-g5-2/.kiro/specs/das-client-api/tasks.md .kiro/specs/das-client-api/tasks.md
+--- /tmp/das_sdd_snaps/snap-g5-2/.kiro/specs/das-client-api/tasks.md	2026-10-30 16:38:32
++++ .kiro/specs/das-client-api/tasks.md	2026-10-30 17:30:17
+@@ -66,29 +66,29 @@
+   - [x] 4.7 Write property test for the Event_Stream
+     - **Property 6: Event_Stream mirrors persisted changes**
+     - **Validates: Requirements 6.1, 6.2, 6.3, 6.4**
+   - [x] 4.8 Add webhook claim and completion scripts
+     - `claim_webhook.lua` (lease re-score, drop entries without hash), `complete_webhook.lua` (fenced by the `claim` counter and the delivery `event_id`); `StateStore.claim_webhook`, `StateStore.complete_webhook`
+     - _Requirements: 8.3, 8.5, 8.6_
+   - [x] 4.9 Write property test for webhook outbox delivery
+     - **Property 7: Webhook outbox delivery**
+     - **Validates: Requirements 8.2, 8.3, 8.5, 8.6, 8.7**
+ 
+-- [ ] 5. Manager budget enforcement
++- [x] 5. Manager budget enforcement
+   - [x] 5.1 Enforce budgets in the reducer
+     - `RequestSnapshot.budget`, `StepContext.price_table`; budget-stop mode per design §4 (no dispatch, skip non-in-flight Jobs with reason `budget_exceeded`, no retries, `FinalizeFailed` with `budget_exceeded` / `budget_unenforceable` when nothing is in flight, never `RunSummarizer`)
+     - `load_snapshot` reads `budget` (and `client_fp`), so the Manager and Gateway share one consistent read
+     - _Requirements: 5.6, 5.7, 5.8_
+   - [x] 5.2 Write property test for budget stop
+     - **Property 5: Budget stop**
+     - **Validates: Requirements 5.6, 5.7, 5.8**
+-  - [ ] 5.3 Wire the driver and planning check
++  - [x] 5.3 Wire the driver and planning check
+     - Driver passes `price_table` into `StepContext`; before planning, `max_cost` without Price_Table → `FinalizeFailed(budget_unenforceable)`; for a budgeted Request the driver passes `budget_view(budget, budget_status(...))` to `StateStore.finalize` / `fail_request`, so the Terminal_Event carries Budget_Used (Req 6.1); `das_budget_exceeded_total{kind}` once per successful finalize
+     - Unit tests: planning check, takeover reaches the same budget decision, metric counted once, Terminal_Event of a budgeted Request has `budget`
+     - _Requirements: 5.5, 10.2_
+ 
+ - [ ] 6. Checkpoint - Ensure all tests pass
+ 
+ - [ ] 7. Gateway_API
+   - [ ] 7.1 Add client settings and the rate-limit dependency
+     - `auth.py` stores `ClientSettings` on `request.state`; `limits.py` `rate_limit` dependency on `/v1` and admin routers; 429 with `Retry-After`; 503 on store failure; `/healthz` exempt
+     - _Requirements: 2.1, 2.2, 2.5, 2.6_

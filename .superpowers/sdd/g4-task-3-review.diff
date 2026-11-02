@@ -1,0 +1,547 @@
+# Group 4 Task 3 review package (no git: diff vs pre-task snapshot)
+
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-3/das/state/lua/_common.lua das/state/lua/_common.lua
+--- /tmp/das_sdd_snaps/snap-g4-3/das/state/lua/_common.lua	2026-10-30 13:46:08
++++ das/state/lua/_common.lua	2026-10-30 13:48:58
+@@ -220,8 +220,21 @@
+ 
+ -- Append one Event to the Request's Event_Stream (Phase 4 Req 6.1, 6.5), capped at
+ -- the stored events_max_len (1000 when absent). data_json is stored verbatim.
+ -- Returns the new stream ID.
+ local function append_event(req_key, event_type, data_json)
+   local n = tonumber(redis.call('HGET', req_key, 'events_max_len')) or 1000
+   return redis.call('XADD', events_key(req_key), 'MAXLEN', n, '*', 'type', event_type, 'data', data_json)
+ end
++
++-- Active_Set membership of a Request (Phase 4 Req 3.3-3.7): add or remove rid in
++-- das:client:{client_fp}:active. No-op for a Request without client_fp (created
++-- before Phase 4 or through create_request), so those touch no Active_Set.
++local function client_active_add(req_key, rid)
++  local fp = redis.call('HGET', req_key, 'client_fp')
++  if fp and fp ~= '' then redis.call('SADD', active_key(req_key, fp), rid) end
++end
++
++local function client_active_remove(req_key, rid)
++  local fp = redis.call('HGET', req_key, 'client_fp')
++  if fp and fp ~= '' then redis.call('SREM', active_key(req_key, fp), rid) end
++end
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-3/das/state/lua/cancel_request.lua das/state/lua/cancel_request.lua
+--- /tmp/das_sdd_snaps/snap-g4-3/das/state/lua/cancel_request.lua	2026-10-30 13:46:08
++++ das/state/lua/cancel_request.lua	2026-10-30 13:49:25
+@@ -1,9 +1,10 @@
+--- cancel_request: Gateway cancellation (Req 1.6, 1.8; Phase 2: 2.3, 13.15, 14.2, 15.11).
++-- cancel_request: Gateway cancellation (Req 1.6, 1.8; Phase 2: 2.3, 13.15, 14.2, 15.11;
++-- Phase 4 Req 3.3: leaves the client's Active_Set).
+ -- KEYS[1] request hash, KEYS[2] jobs hash, KEYS[3] transitions list, KEYS[4] das:requests:pending,
+ -- KEYS[5] pending_replays set, KEYS[6] das:requests:index, KEYS[7] das:requests:finished,
+ -- KEYS[8] das:requests:inbox_purge, KEYS[9] das:requests:by_status:Pending,
+ -- KEYS[10] das:requests:by_status:Running, KEYS[11] das:requests:by_status:Cancelled,
+ -- KEYS[12] das:dlq:by_status:Pending, KEYS[13] das:dlq:by_status:Replayed,
+ -- KEYS[14] das:dlq:terminal, KEYS[15..] das:dlq:{dlid} for each dlid of ARGV[2], in order
+ -- ARGV[1] request_id, ARGV[2] JSON array of the Dead_Letter_IDs read from pending_replays,
+ -- ARGV[3..] triples: job_id, expected current JobRecord JSON, new JobRecord JSON
+@@ -58,16 +59,17 @@
+ local rid = ARGV[1]
+ local _, ms = server_time()
+ local at = iso_ms(ms)
+ local created = created_ms(KEYS[1], KEYS[6], rid)
+ for i = 3, #ARGV, 3 do
+   put_job(KEYS[2], KEYS[3], ARGV[i], ARGV[i + 2], at)
+ end
+ redis.call('HSET', KEYS[1], 'status', 'Cancelled')
++client_active_remove(KEYS[1], rid)  -- Phase 4 Req 3.3
+ mark_finished(KEYS[1], KEYS[7], KEYS[8], rid, ms)
+ local from_key = KEYS[10]
+ if status == 'Pending' then from_key = KEYS[9] end
+ index_move(rid, from_key, KEYS[11], created)
+ redis.call('ZREM', KEYS[4], rid)
+ for i, dlid in ipairs(dlids) do
+   dlq_revert(KEYS[14 + i], KEYS[12], KEYS[13], KEYS[14], dlid, rid, ms)
+ end
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-3/das/state/lua/finalize.lua das/state/lua/finalize.lua
+--- /tmp/das_sdd_snaps/snap-g4-3/das/state/lua/finalize.lua	2026-10-30 13:46:08
++++ das/state/lua/finalize.lua	2026-10-30 13:49:25
+@@ -1,11 +1,11 @@
+ -- finalize: write the Final_Result and Usage_Records, then the terminal status, then
+ -- release the lease, all in one script (Req 3.6, 3.10, 3.11, 7.3, 7.4, 7.6;
+--- Phase 2: 2.2, 9.1, 9.3, 14.2, 15.11).
++-- Phase 2: 2.2, 9.1, 9.3, 14.2, 15.11; Phase 4 Req 3.3: leaves the client's Active_Set).
+ -- KEYS[1] request hash, KEYS[2] lease hash, KEYS[3] das:leases:expiry, KEYS[4] das:requests:pending,
+ -- KEYS[5] usage list, KEYS[6] pending_replays set, KEYS[7] das:requests:index,
+ -- KEYS[8] das:requests:finished, KEYS[9] das:requests:inbox_purge,
+ -- KEYS[10] das:requests:by_status:Pending, KEYS[11] das:requests:by_status:Running,
+ -- KEYS[12] das:requests:by_status:{target}
+ -- ARGV[1] request_id, ARGV[2] manager_id, ARGV[3] epoch, ARGV[4] status (Completed|Failed),
+ -- ARGV[5] Final_Result JSON ('' for none), ARGV[6] error ('' for none),
+ -- ARGV[7] JSON array of UsageRecords (summarize and/or planning; '' for none)
+@@ -38,16 +38,17 @@
+ if ARGV[5] ~= '' then
+   redis.call('HSET', KEYS[1], 'final_result', ARGV[5])
+ end
+ if ARGV[6] ~= '' then
+   redis.call('HSET', KEYS[1], 'error', ARGV[6])
+ end
+ append_usage(KEYS[5], KEYS[1], ARGV[7])
+ redis.call('HSET', KEYS[1], 'status', target)
++client_active_remove(KEYS[1], rid)  -- Phase 4 Req 3.3
+ mark_finished(KEYS[1], KEYS[8], KEYS[9], rid, ms)
+ local from_key = KEYS[11]
+ if status == 'Pending' then from_key = KEYS[10] end
+ index_move(rid, from_key, KEYS[12], created)
+ redis.call('HDEL', KEYS[2], 'owner', 'expires_at')
+ redis.call('ZREM', KEYS[3], rid)
+ redis.call('ZREM', KEYS[4], rid)
+ return { 'OK', tostring(ms), tostring(created) }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-3/das/state/lua/purge_request.lua das/state/lua/purge_request.lua
+--- /tmp/das_sdd_snaps/snap-g4-3/das/state/lua/purge_request.lua	2026-10-30 13:46:08
++++ das/state/lua/purge_request.lua	2026-10-30 13:51:03
+@@ -1,15 +1,16 @@
+ -- purge_request: retention of one Request (Req 14.3, 14.4, 14.5, 14.9). Mirrors
+ -- das.ops.retention.retention_decision with the script's own TIME, so the safety
+ -- condition never depends on the caller's clock:
+ --   missing or non-terminal -> KEEP (stale retention candidates are removed)
+ --   terminal without finished_at -> STAMPED (finished_at = now; never deleted now)
+ --   finished_at + ttl > now -> KEEP
+ --   otherwise -> every key of the Request and every index entry is removed: DELETED
++--   (including its Active_Set member, Phase 4 Req 3.5)
+ -- KEYS[1..11] request_keys(rid): request, jobs, results, inbox, timers, transitions,
+ --   lease, usage, pending_replays, events, webhook (Phase 4)
+ -- KEYS[12] das:requests:index, KEYS[13..17] das:requests:by_status:{Pending, Running,
+ --   Completed, Failed, Cancelled}, KEYS[18] das:requests:finished,
+ -- KEYS[19] das:requests:inbox_purge, KEYS[20] das:requests:pending, KEYS[21] das:leases:expiry
+ -- ARGV[1] request_id, ARGV[2] terminal_request_ttl in ms
+ -- Returns {'DELETED'} | {'KEEP'} | {'STAMPED'}.
+ local rid = ARGV[1]
+@@ -32,14 +33,16 @@
+   mark_finished(KEYS[1], KEYS[18], KEYS[19], rid, now)
+   return { 'STAMPED' }
+ end
+ if finished + ttl > now then
+   -- Keep the candidate score in line with finished_at (e.g. after a later re-finish).
+   redis.call('ZADD', KEYS[18], finished, rid)
+   return { 'KEEP' }
+ end
++-- Read client_fp before the DEL removes the request hash (Phase 4 Req 3.5).
++client_active_remove(KEYS[1], rid)
+ redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7],
+   KEYS[8], KEYS[9], KEYS[10], KEYS[11])
+ for i = 12, 21 do
+   redis.call('ZREM', KEYS[i], rid)
+ end
+ return { 'DELETED' }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-3/das/state/lua/replay_dead_letter.lua das/state/lua/replay_dead_letter.lua
+--- /tmp/das_sdd_snaps/snap-g4-3/das/state/lua/replay_dead_letter.lua	2026-10-30 13:46:08
++++ das/state/lua/replay_dead_letter.lua	2026-10-30 13:51:02
+@@ -11,17 +11,18 @@
+ -- KEYS[14] das:dlq:by_status:Pending, KEYS[15] das:dlq:by_status:Replayed,
+ -- KEYS[16] das:dlq:terminal
+ -- ARGV[1] dead_letter_id, ARGV[2] request_id the shell read from the record ('' for none)
+ -- Running Request: record -> Replayed, XADD inbox replay event, SADD pending_replays;
+ -- the Lease owner applies it through the RequestMachine (fenced).
+ -- Failed Request (no unexpired Lease): additionally status Failed -> Pending with a
+ -- request transition entry tagged with the dlid, error/final_result/finished_at moved
+ -- into replay_history, Finished_At cleared, index Failed -> Pending, removed from the
+--- retention zsets and queued on das:requests:pending.
++-- retention zsets, queued on das:requests:pending and added back to the client's
++-- Active_Set regardless of the Concurrent_Quota (Phase 4 Req 3.4).
+ -- Returns {'ACCEPTED', request_status_before, new_attempt} | {code, current_state}
+ --   | {'NOT_FOUND'} | {'REQUEST_GONE'} | {'CONFLICT'} (record names another Request).
+ local rec = redis.call('HMGET', KEYS[1], 'status', 'reason', 'request_id', 'job_id',
+   'attempt', 'dead_lettered_at')
+ if not rec[1] then
+   return { 'NOT_FOUND' }
+ end
+ if rec[1] ~= 'Pending' then
+@@ -92,16 +93,18 @@
+   local history = cur[4]
+   if not history or history == '' or string.match(history, '^%s*%[%s*%]%s*$') then
+     history = '[' .. entry .. ']'
+   else
+     history = string.gsub(history, '%]%s*$', '') .. ',' .. entry .. ']'
+   end
+   redis.call('HSET', KEYS[2], 'replay_history', history, 'status', 'Pending')
+   redis.call('HDEL', KEYS[2], 'error', 'final_result', 'finished_at')
++  -- Reopened: back in the Active_Set even when it is full (Phase 4 Req 3.4).
++  client_active_add(KEYS[2], rid)
+   redis.call('RPUSH', KEYS[6], cjson.encode({
+     scope = 'request', from_status = 'Failed', to_status = 'Pending',
+     dead_letter_id = dlid, at = at,
+   }))
+   local created = created_ms(KEYS[2], KEYS[9], rid)
+   index_move(rid, KEYS[10], KEYS[11], created)
+   redis.call('ZREM', KEYS[12], rid)
+   redis.call('ZREM', KEYS[13], rid)
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-3/das/state/store.py das/state/store.py
+--- /tmp/das_sdd_snaps/snap-g4-3/das/state/store.py	2026-10-30 13:46:08
++++ das/state/store.py	2026-10-30 13:49:25
+@@ -1202,18 +1202,25 @@
+         last_rid, last_score = page[-1]
+         next_after = (last_score, last_rid) if len(hits) > limit else None
+         return RequestPage(items, next_after)
+ 
+     # ------------------------------------------------------------------ removal
+ 
+     async def delete_request(self, rid: str) -> None:
+         """Remove the Request record and everything stored with it, including its
+-        transition log, which is never deleted any other way (Req 13.8)."""
++        transition log, which is never deleted any other way (Req 13.8).
++
++        The Request also leaves its client's Active_Set (Phase 4 Req 3.6), so no
++        dangling member is left behind.
++        """
++        fp = await self._r.hget(keys.request(rid), keys.F_CLIENT_FP)
+         async with self._r.pipeline(transaction=True) as pipe:
++            if fp:
++                pipe.srem(keys.client_active(_s(fp)), rid)
+             pipe.delete(*keys.request_keys(rid))
+             pipe.zrem(keys.REQUESTS_PENDING, rid)
+             pipe.zrem(keys.LEASES_EXPIRY, rid)
+             pipe.zrem(keys.REQUESTS_INDEX, rid)
+             for status in RequestStatus:
+                 pipe.zrem(keys.requests_by_status(status.value), rid)
+             pipe.zrem(keys.REQUESTS_FINISHED, rid)
+             pipe.zrem(keys.REQUESTS_INBOX_PURGE, rid)
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-3/tests/property/test_active_set.py tests/property/test_active_set.py
+--- /tmp/das_sdd_snaps/snap-g4-3/tests/property/test_active_set.py	1970-01-01 08:00:00
++++ tests/property/test_active_set.py	2026-10-30 13:50:53
+@@ -0,0 +1,181 @@
++# Feature: das-client-api, Property 3: Active_Set equals non-terminal Requests
++"""Property 3: Active_Set equals non-terminal Requests.
++
++For any sequence of 1 to 20 operations (real ``das/state/lua`` scripts through
++``StateStore`` on a fresh fakeredis server per example, ``TIME`` from
++:class:`FakeRedisTime`):
++
++- ``create(fp)`` with fp from a pool of two fingerprints (``submit_request``) or
++  ``None`` (a pre-upgrade Request through ``create_request``);
++- ``finalize(i, Completed|Failed)`` (planning first when needed; a Failed finalize
++  leaves Job ``a`` Failed so the Request can be replayed);
++- ``cancel(i)``;
++- ``replay(i)`` of a Dead_Letter_Record for the Failed Job of a Failed Request, which
++  reopens it (skipped for any other Request);
++- ``purge(i)`` with Redis time advanced past the terminal TTL,
++
++after every operation each ``das:client:{fp}:active`` equals the set of that fp's
++Requests that still exist and are non-terminal, and Requests without ``client_fp``
++are in no Active_Set.
++
++**Validates: Requirements 3.1, 3.3, 3.4, 3.5, 3.6, 3.7**
++"""
++
++from __future__ import annotations
++
++import asyncio
++from dataclasses import dataclass, field
++
++from fakeredis import FakeServer
++from fakeredis.aioredis import FakeRedis
++from hypothesis import event, given
++from hypothesis import strategies as st
++
++from das.models import FinalResult, JobRecord, JobState, RequestStatus
++from das.state import (
++    PURGE_DELETED,
++    PURGE_KEEP,
++    ClientRequestSpec,
++    StateStore,
++    StoreStatus,
++    TransitionBatch,
++    keys,
++)
++from tests.fixtures.redis_time import FakeRedisTime
++from tests.unit.test_state_phase2_dlq import fields
++from tests.unit.test_state_store import PLAN
++
++FPS = ("aaaaaaaa", "bbbbbbbb")
++TTL_MS = 60_000
++TERMINAL = {RequestStatus.COMPLETED, RequestStatus.FAILED, RequestStatus.CANCELLED}
++FINAL = FinalResult(summary="done", jobs=[])
++
++ops = st.lists(
++    st.one_of(
++        st.tuples(st.just("create"), st.sampled_from([*FPS, None])),
++        st.tuples(st.just("finalize"), st.integers(0, 19),
++                  st.sampled_from([RequestStatus.COMPLETED, RequestStatus.FAILED])),
++        st.tuples(st.just("cancel"), st.integers(0, 19)),
++        st.tuples(st.just("replay"), st.integers(0, 19)),
++        st.tuples(st.just("purge"), st.integers(0, 19)),
++    ),
++    min_size=1,
++    max_size=20,
++)
++
++
++@dataclass
++class Req:
++    rid: str
++    fp: str | None
++    status: RequestStatus = RequestStatus.PENDING
++    exists: bool = True
++    has_plan: bool = False
++    failed_attempt: int | None = None  # attempt of Job ``a`` while it is Failed
++    pending_replays: list[str] = field(default_factory=list)
++
++
++class Scenario:
++    def __init__(self, store: StateStore, clock: FakeRedisTime) -> None:
++        self.store = store
++        self.clock = clock
++        self.reqs: list[Req] = []
++        self.dl_seq = 0
++
++    async def create(self, fp: str | None) -> None:
++        if fp is None:
++            rid = await self.store.create_request("p")
++        else:
++            res = await self.store.submit_request("p", ClientRequestSpec(fingerprint=fp))
++            assert res.outcome == "created" and res.request_id is not None
++            rid = res.request_id
++        self.reqs.append(Req(rid, fp))
++
++    async def finalize(self, r: Req, target: RequestStatus) -> None:
++        if not r.exists or r.status in TERMINAL:
++            return
++        lease = (await self.store.acquire_lease(r.rid, "m1", 3600.0)).lease
++        assert lease is not None
++        if r.has_plan:  # reopened by a Replay
++            assert (await self.store.reopen_request(lease)).ok
++        else:
++            assert (await self.store.commit_plan(lease, PLAN)).ok
++            r.has_plan = True
++        if target is RequestStatus.FAILED:
++            attempt = (r.failed_attempt or 0) + 1
++            failed = JobRecord(job=PLAN.jobs[0], state=JobState.FAILED, attempt=attempt, reason="x")
++            batch = TransitionBatch(jobs={"a": failed}, replays_applied=tuple(r.pending_replays))
++            assert (await self.store.apply_transition(lease, batch)).ok
++            r.failed_attempt = attempt
++            assert (await self.store.fail_request(lease, "boom")).ok
++        else:
++            batch = TransitionBatch(replays_applied=tuple(r.pending_replays))
++            assert (await self.store.apply_transition(lease, batch)).ok
++            r.failed_attempt = None
++            assert (await self.store.finalize(lease, FINAL)).ok
++        r.pending_replays = []
++        r.status = target
++
++    async def cancel(self, r: Req) -> None:
++        res = await self.store.cancel_request(r.rid)
++        if not r.exists:
++            assert res.status is StoreStatus.NOT_FOUND
++        elif r.status in TERMINAL:
++            assert res.status is StoreStatus.TERMINAL
++        else:
++            assert res.ok
++            r.status = RequestStatus.CANCELLED
++            r.pending_replays = []
++
++    async def replay(self, r: Req) -> None:
++        if not r.exists or r.status is not RequestStatus.FAILED or r.failed_attempt is None:
++            return
++        self.dl_seq += 1
++        dlid = f"{self.dl_seq:032x}"
++        assert (await self.store.create_dead_letter(fields(dlid, r.rid, attempt=r.failed_attempt))).created
++        assert (await self.store.replay_dead_letter(dlid)).outcome == "accepted"
++        r.status = RequestStatus.PENDING
++        r.pending_replays.append(dlid)
++        event("replay reopened a Failed Request")
++
++    async def purge(self, r: Req) -> None:
++        self.clock.advance(TTL_MS / 1000 + 1)
++        outcome = await self.store.purge_request(r.rid, TTL_MS)
++        if r.exists and r.status in TERMINAL:
++            assert outcome == PURGE_DELETED
++            r.exists = False
++            event(f"purged a {'client' if r.fp else 'pre-upgrade'} Request")
++        else:
++            assert outcome == PURGE_KEEP
++
++    async def check(self) -> None:
++        r = self.store.client
++        for req in self.reqs:
++            got = await self.store.get_status(req.rid)
++            assert got == (req.status if req.exists else None), req
++        for fp in FPS:
++            expected = {q.rid for q in self.reqs if q.fp == fp and q.exists and q.status not in TERMINAL}
++            assert await r.smembers(keys.client_active(fp)) == expected, fp
++        allowed = {keys.client_active(fp) for fp in FPS}
++        assert set(await r.keys(keys.client_active("*"))) <= allowed
++
++
++async def _run(operations: list[tuple], clock: FakeRedisTime) -> None:
++    sc = Scenario(StateStore(FakeRedis(server=FakeServer(), decode_responses=True)), clock)
++    for op in operations:
++        name = op[0]
++        if name == "create":
++            await sc.create(op[1])
++        elif sc.reqs:
++            req = sc.reqs[op[1] % len(sc.reqs)]
++            if name == "finalize":
++                await sc.finalize(req, op[2])
++            else:
++                await getattr(sc, name)(req)
++        await sc.check()
++
++
++@given(operations=ops)
++def test_active_set_equals_non_terminal_requests(operations: list[tuple]) -> None:
++    with FakeRedisTime() as clock:
++        asyncio.run(_run(operations, clock))
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-3/tests/unit/test_state_phase4_quota.py tests/unit/test_state_phase4_quota.py
+--- /tmp/das_sdd_snaps/snap-g4-3/tests/unit/test_state_phase4_quota.py	1970-01-01 08:00:00
++++ tests/unit/test_state_phase4_quota.py	2026-10-30 13:48:29
+@@ -0,0 +1,145 @@
++"""Unit tests for Active_Set release and re-add (das-client-api task 4.5, Phase 4
++Req 3.3, 3.4, 3.5, 3.6, 3.7): finalize, cancel, Replay of a Failed Request,
++retention purge and ``delete_request`` keep ``das:client:{fp}:active`` in sync."""
++
++from __future__ import annotations
++
++from das.models import JobRecord, JobState, Lease, RequestStatus
++from das.state import PURGE_DELETED, ClientRequestSpec, StateStore, TransitionBatch, keys
++from tests.unit.test_state_phase2_dlq import FINAL, fields
++from tests.unit.test_state_store import PLAN
++
++FP = "cbabecbd"
++OTHER_FP = "0f0f0f0f"
++DLID = "e" * 32
++TTL_MS = 60_000
++
++
++async def submitted(store: StateStore, fp: str = FP, max_active: int = 0) -> str:
++    res = await store.submit_request("p", ClientRequestSpec(fingerprint=fp, max_active_requests=max_active))
++    assert res.outcome == "created" and res.request_id is not None
++    return res.request_id
++
++
++async def leased(store: StateStore, rid: str) -> Lease:
++    lease = (await store.acquire_lease(rid, "m1", 30)).lease
++    assert lease is not None
++    return lease
++
++
++async def running(store: StateStore, fp: str = FP) -> tuple[str, Lease]:
++    rid = await submitted(store, fp)
++    lease = await leased(store, rid)
++    assert (await store.commit_plan(lease, PLAN)).ok
++    return rid, lease
++
++
++async def failed_with_dead_letter(store: StateStore) -> str:
++    """A Failed Request with a Failed Job, a Pending dead letter for it and no Lease."""
++    rid, lease = await running(store)
++    failed = JobRecord(job=PLAN.jobs[0], state=JobState.FAILED, attempt=1, reason="x")
++    skipped = JobRecord(job=PLAN.jobs[1], state=JobState.SKIPPED, reason="dep failed")
++    assert (await store.apply_transition(lease, TransitionBatch(jobs={"a": failed, "b": skipped}))).ok
++    assert (await store.fail_request(lease, "job a failed", FINAL)).ok
++    await store.client.delete(keys.lease(rid))
++    assert (await store.create_dead_letter(fields(DLID, rid))).created
++    return rid
++
++
++async def active(store: StateStore, fp: str = FP) -> set[str]:
++    return set(await store.client.smembers(keys.client_active(fp)))
++
++
++async def test_finalize_completed_removes_member(state_store: StateStore):
++    rid, lease = await running(state_store)
++    other = await submitted(state_store)
++    assert await active(state_store) == {rid, other}
++    assert (await state_store.finalize(lease, FINAL)).ok
++    assert await active(state_store) == {other}
++
++
++async def test_finalize_failed_removes_member(state_store: StateStore):
++    rid = await submitted(state_store)
++    lease = await leased(state_store, rid)
++    assert (await state_store.fail_request(lease, "boom")).ok
++    assert await active(state_store) == set()
++
++
++async def test_rejected_finalize_keeps_member(state_store: StateStore):
++    rid = await submitted(state_store)
++    lease = await leased(state_store, rid)
++    stale = Lease(request_id=rid, owner="m1", epoch=lease.epoch + 1, expires_at=lease.expires_at)
++    assert not (await state_store.fail_request(stale, "boom")).ok
++    assert await active(state_store) == {rid}
++
++
++async def test_cancel_removes_member(state_store: StateStore):
++    pending = await submitted(state_store)
++    rid, _ = await running(state_store)
++    assert (await state_store.cancel_request(rid)).ok
++    assert await active(state_store) == {pending}
++    assert (await state_store.cancel_request(pending)).ok
++    assert await active(state_store) == set()
++
++
++async def test_replay_of_failed_request_re_adds_member(state_store: StateStore):
++    rid = await failed_with_dead_letter(state_store)
++    assert await active(state_store) == set()
++    assert (await state_store.replay_dead_letter(DLID)).outcome == "accepted"
++    assert await state_store.get_status(rid) is RequestStatus.PENDING
++    assert await active(state_store) == {rid}
++
++
++async def test_replay_re_adds_even_when_set_is_full(state_store: StateStore):
++    rid = await failed_with_dead_letter(state_store)
++    others = {await submitted(state_store, max_active=2) for _ in range(2)}
++    assert (await state_store.submit_request(
++        "p", ClientRequestSpec(fingerprint=FP, max_active_requests=2))).outcome == "quota_exceeded"
++    assert (await state_store.replay_dead_letter(DLID)).outcome == "accepted"
++    assert await active(state_store) == others | {rid}
++
++
++async def test_replay_of_running_request_leaves_set_alone(state_store: StateStore):
++    rid, lease = await running(state_store)
++    failed = JobRecord(job=PLAN.jobs[0], state=JobState.FAILED, attempt=1, reason="x")
++    assert (await state_store.apply_transition(lease, TransitionBatch(jobs={"a": failed}))).ok
++    assert (await state_store.create_dead_letter(fields(DLID, rid))).created
++    assert (await state_store.replay_dead_letter(DLID)).outcome == "accepted"
++    assert await active(state_store) == {rid}
++
++
++async def test_purge_of_expired_request_leaves_no_member(fake_redis_time, state_store: StateStore):
++    fake_redis_time.set_ms(1_700_000_000_000)
++    rid = await submitted(state_store)
++    keep = await submitted(state_store)
++    lease = await leased(state_store, rid)
++    assert (await state_store.fail_request(lease, "boom")).ok
++    # Simulate a dangling member (e.g. written before the release existed): purge removes it.
++    await state_store.client.sadd(keys.client_active(FP), rid)
++    fake_redis_time.advance(TTL_MS / 1000 + 1)
++    assert await state_store.purge_request(rid, TTL_MS) == PURGE_DELETED
++    assert await active(state_store) == {keep}
++
++
++async def test_delete_request_removes_member(state_store: StateStore):
++    rid = await submitted(state_store)
++    keep = await submitted(state_store)
++    await state_store.delete_request(rid)
++    assert await active(state_store) == {keep}
++    await state_store.delete_request("missing")
++    assert await active(state_store) == {keep}
++
++
++async def test_requests_without_client_fp_touch_no_active_set(fake_redis_time, state_store: StateStore):
++    fake_redis_time.set_ms(1_700_000_000_000)
++    other = await submitted(state_store, OTHER_FP)
++    rid = await state_store.create_request("p")
++    lease = await leased(state_store, rid)
++    assert (await state_store.fail_request(lease, "boom")).ok
++    cancelled = await state_store.create_request("p")
++    assert (await state_store.cancel_request(cancelled)).ok
++    fake_redis_time.advance(TTL_MS / 1000 + 1)
++    assert await state_store.purge_request(rid, TTL_MS) == PURGE_DELETED
++    await state_store.delete_request(cancelled)
++    assert await state_store.client.keys(keys.client_active("*")) == [keys.client_active(OTHER_FP)]
++    assert await active(state_store, OTHER_FP) == {other}
+diff --color -ruN -U2 /tmp/das_sdd_snaps/snap-g4-3/das-client-api/tasks.md .kiro/specs/das-client-api/tasks.md
+--- /tmp/das_sdd_snaps/snap-g4-3/das-client-api/tasks.md	2026-10-30 13:46:08
++++ .kiro/specs/das-client-api/tasks.md	2026-10-30 13:54:42
+@@ -61,5 +61,5 @@
+     - Update the matching `StateStore` methods (`commit_plan`, `finalize`, `cancel_request` budget view, `delete_request`, `get_webhook`)
+     - _Requirements: 3.3, 3.4, 3.5, 6.1, 6.3, 6.4, 6.6, 8.2_
+-  - [ ] 4.6 Write property test for Active_Set accounting
++  - [x] 4.6 Write property test for Active_Set accounting
+     - **Property 3: Active_Set equals non-terminal Requests**
+     - **Validates: Requirements 3.1, 3.3, 3.4, 3.5, 3.6, 3.7**

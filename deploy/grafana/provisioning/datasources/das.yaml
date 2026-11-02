@@ -1,0 +1,20 @@
+# Grafana datasources provisioned at startup (Requirement 18.5).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: das-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+
+  - name: Jaeger
+    uid: das-jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: false

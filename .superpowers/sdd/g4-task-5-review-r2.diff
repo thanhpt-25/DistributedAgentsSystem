@@ -1,0 +1,1299 @@
+# Group 4 Task 5 re-review package (no git)
+
+## Fix-only diff (vs snapshot taken before the fix)
+diff --color -ruN -U6 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5fix/das/state/lua/complete_webhook.lua das/state/lua/complete_webhook.lua
+--- /tmp/das_sdd_snaps/snap-g4-5fix/das/state/lua/complete_webhook.lua	2026-10-30 14:45:11
++++ das/state/lua/complete_webhook.lua	2026-10-30 14:50:37
+@@ -1,31 +1,40 @@
+--- complete_webhook: record the outcome of one Webhook_Delivery attempt (Phase 4 Req 8.5-8.7).
+--- Fenced by the claim counter: applied only when the hash exists, is pending and its
+--- claim equals ARGV[2]. A sender whose lease ran out and whose delivery was claimed
+--- again gets STALE and changes nothing. Inputs are validated before any write.
++-- complete_webhook: record the outcome of one Webhook_Delivery attempt
++-- (Phase 4 Req 8.3, 8.5-8.7).
++-- Fenced by the claim counter and the event_id: applied only when the hash exists, is
++-- pending, its claim equals ARGV[2] and its event_id equals ARGV[6]. A sender whose
++-- lease ran out and whose delivery was claimed again fails the claim check; a sender
++-- whose delivery was reset by a later terminal write (which restarts claim at 0 with a
++-- new event_id, so the counter can match again) fails the event_id check. Either gets
++-- STALE and changes nothing. Inputs are validated before any read or write.
+ --   delivered -> state delivered, ZREM outbox
+ --   failed    -> state failed, ZREM outbox
+ --   retry     -> stays pending, ZADD outbox next_due
+ -- Every applied outcome increments attempts and stores last_status.
+ -- KEYS[1] das:webhooks:due, KEYS[2] das:req:{rid}:webhook
+ -- ARGV[1] rid, ARGV[2] claim, ARGV[3] outcome, ARGV[4] last_status,
+--- ARGV[5] next_due (Redis seconds, %.17g text; '' unless retry)
++-- ARGV[5] next_due (Redis seconds, %.17g text; '' unless retry),
++-- ARGV[6] event_id of the claimed delivery (required, non-empty)
+ -- Returns {'OK', attempts} | {'STALE'}.
+ local rid, claim, outcome, last_status = ARGV[1], ARGV[2], ARGV[3], ARGV[4] or ''
++local event_id = ARGV[6]
++if not event_id or event_id == '' then
++  return redis.error_reply('complete_webhook: event_id required')
++end
+ if outcome ~= 'delivered' and outcome ~= 'retry' and outcome ~= 'failed' then
+   return redis.error_reply('complete_webhook: unknown outcome ' .. tostring(outcome))
+ end
+ local next_due
+ if outcome == 'retry' then
+   next_due = tonumber(ARGV[5] or '')
+   if not next_due or next_due ~= next_due or next_due == math.huge or next_due == -math.huge then
+     return redis.error_reply('complete_webhook: retry needs a finite numeric next_due')
+   end
+ end
+-local v = redis.call('HMGET', KEYS[2], 'state', 'claim')
+-if v[1] ~= 'pending' or v[2] ~= claim then
++local v = redis.call('HMGET', KEYS[2], 'state', 'claim', 'event_id')
++if v[1] ~= 'pending' or v[2] ~= claim or v[3] ~= event_id then
+   return { 'STALE' }
+ end
+ local attempts = redis.call('HINCRBY', KEYS[2], 'attempts', 1)
+ redis.call('HSET', KEYS[2], 'last_status', last_status)
+ if outcome == 'retry' then
+   redis.call('ZADD', KEYS[1], fmt_double(next_due), rid)
+diff --color -ruN -U6 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5fix/das/state/store.py das/state/store.py
+--- /tmp/das_sdd_snaps/snap-g4-5fix/das/state/store.py	2026-10-30 14:45:11
++++ das/state/store.py	2026-10-30 14:48:54
+@@ -1299,13 +1299,15 @@
+         )
+ 
+     async def claim_webhook(self, lease_seconds: float) -> WebhookClaim | None:
+         """Claim the next due Webhook_Delivery for ``lease_seconds`` (Phase 4 Req 8.3).
+ 
+         The delivery is re-scored to Redis ``now + lease_seconds``, so other senders do
+-        not see it as due until the lease ends. Returns ``None`` when nothing is due.
++        not see it as due until the lease ends. At most 10 due entries are inspected per
++        call (non-pending ones are dropped from the outbox), so ``None`` means nothing
++        was claimable among the first 10 due entries, not necessarily that nothing is due.
+         """
+         reply = await self._run(
+             "claim_webhook", [keys.WEBHOOKS_DUE], [f"{lease_seconds:.17g}", keys.request("")]
+         )
+         if not reply:
+             return None
+@@ -1328,24 +1330,32 @@
+         last_status: str,
+         next_due: float | None = None,
+     ) -> bool:
+         """Record one delivery attempt of a claimed Webhook_Delivery (Phase 4 Req 8.5-8.7).
+ 
+         ``next_due`` (Redis seconds) is required for ``retry``. Returns ``False`` when
+-        the claim is stale (re-claimed after its lease ended, or no longer pending);
++        the claim is stale (re-claimed after its lease ended, reset by a later terminal
++        write so its ``event_id`` no longer matches (Req 8.3), or no longer pending);
+         nothing is changed then.
+         """
+         if outcome not in _WEBHOOK_OUTCOMES:
+             raise ValueError(f"unknown webhook outcome: {outcome!r}")
+         if outcome == "retry" and next_due is None:
+             raise ValueError("next_due is required for a retry outcome")
+         rid = claim.request_id
+         reply = await self._run(
+             "complete_webhook",
+             [keys.WEBHOOKS_DUE, keys.webhook(rid)],
+-            [rid, claim.claim, outcome, last_status, "" if next_due is None else f"{next_due:.17g}"],
++            [
++                rid,
++                claim.claim,
++                outcome,
++                last_status,
++                "" if next_due is None else f"{next_due:.17g}",
++                claim.event_id,
++            ],
+         )
+         return _s(reply[0]) == "OK"
+ 
+     async def load_usage(self, rid: str) -> list[UsageRecord]:
+         """Every committed UsageRecord of the Request, in append order (Req 9.8).
+ 
+diff --color -ruN -U6 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5fix/tests/property/test_webhook_outbox.py tests/property/test_webhook_outbox.py
+--- /tmp/das_sdd_snaps/snap-g4-5fix/tests/property/test_webhook_outbox.py	2026-10-30 14:45:11
++++ tests/property/test_webhook_outbox.py	2026-10-30 14:50:11
+@@ -1,25 +1,32 @@
+ # Feature: das-client-api, Property 7: Webhook outbox delivery
+ """Property 7: Webhook outbox delivery.
+ 
+ 1 to 5 Requests, each with or without a Webhook_Target, are terminated with
+-``finalize`` or ``cancel_request`` (real ``das/state/lua`` scripts through
+-``StateStore`` on a fresh fakeredis server per example, ``TIME`` from
++``finalize``, ``fail_request`` (Job ``a`` Failed) or ``cancel_request`` (real
++``das/state/lua`` scripts through ``StateStore`` on a fresh fakeredis server per example, ``TIME`` from
+ :class:`FakeRedisTime`). Each terminal write enqueues exactly one pending delivery for
+ a Request with a target and none for the others.
+ 
+ Then 2 or 3 simulated senders run a step list: ``claim``, ``crash`` (forget the held
+-claim), ``advance`` Redis time by 0..2*lease, or ``complete`` the held claim with a
+-random outcome (``delivered``, or else ``failed`` once ``attempts + 1 == MAX_ATTEMPTS``
++claim), ``advance`` Redis time by 0..2*lease, ``reset`` a Failed Request (Replay of a
++Dead_Letter_Record for its Failed Job, ``reopen_request``, then ``fail_request`` again:
++a second terminal write), or ``complete`` the held claim with a random outcome
++(``delivered``, or else ``failed`` once ``attempts + 1 == MAX_ATTEMPTS``
+ and ``retry`` at ``now + 1`` before that). A model tracks, per delivery, its state,
+-attempts, claim counter, due time and the lease expiry of the latest claim:
++attempts, claim counter, event_id, due time and the lease expiry of the latest claim.
++A reset gives the delivery a new event_id, claim 0, attempts 0 and due now, whatever
++its state was; every claim senders held on it is kept as stale and completed right
++after the delivery is next claimed (or at the end), so a pre-reset claim whose
++counter equals the new claim's must still be fenced by event_id (Req 8.3):
+ 
+ - a claim succeeds only for a pending, due delivery, never while an earlier claim's
+   lease is live, and ``None`` only when nothing is due;
+-- a ``complete_webhook`` with a superseded claim returns ``False`` and changes
+-  neither the delivery hash nor the outbox.
++- a ``complete_webhook`` with a superseded claim (older counter, or an event_id from
++  before a reset) returns ``False`` and changes neither the delivery hash nor the
++  outbox.
+ 
+ A well-behaved sender then drains the outbox. Every delivery ends ``delivered`` or
+ ``failed`` with ``1 <= attempts <= MAX_ATTEMPTS``.
+ 
+ **Validates: Requirements 8.2, 8.3, 8.5, 8.6, 8.7**
+ """
+@@ -31,113 +38,185 @@
+ 
+ from fakeredis import FakeServer
+ from fakeredis.aioredis import FakeRedis
+ from hypothesis import event, given
+ from hypothesis import strategies as st
+ 
+-from das.models import FinalResult
++from das.models import FinalResult, JobRecord, JobState
+ from das.state import ClientRequestSpec, StateStore, TransitionBatch, WebhookClaim, WebhookOutcome, WebhookState, keys
+ from tests.fixtures.redis_time import FakeRedisTime
++from tests.unit.test_state_phase2_dlq import fields as dlq_fields
+ from tests.unit.test_state_store import PLAN
+ 
+ LEASE = 10.0
+ MAX_ATTEMPTS = 3
+ FINAL = FinalResult(summary="done", jobs=[])
+ 
+ requests = st.lists(
+-    st.tuples(st.booleans(), st.sampled_from(["finalize", "cancel"])), min_size=1, max_size=5
++    st.tuples(st.booleans(), st.sampled_from(["finalize", "fail", "cancel"])), min_size=1, max_size=5
+ )
+ steps = st.lists(
+     st.one_of(
+         st.tuples(st.integers(0, 2), st.just("claim"), st.none()),
+         st.tuples(st.integers(0, 2), st.just("crash"), st.none()),
+         st.tuples(st.integers(0, 2), st.just("advance"), st.floats(0, 2 * LEASE)),
+         st.tuples(st.integers(0, 2), st.just("complete"), st.booleans()),  # True: delivered
++        st.tuples(st.integers(0, 2), st.just("reset"), st.integers(0, 4)),  # Request index
+     ),
+     max_size=40,
+ )
+ 
+ 
+ @dataclass
+ class Delivery:
+     state: str = "pending"
+     attempts: int = 0
+     claim: int = 0
++    event_id: str = ""
+     due: float = 0.0
+     lease_until: float | None = None  # lease expiry of the latest claim
+ 
+ 
+ class Scenario:
+     def __init__(self, store: StateStore, clock: FakeRedisTime) -> None:
+         self.store = store
+         self.clock = clock
+         self.model: dict[str, Delivery] = {}
++        self.rids: list[str] = []
++        self.failed_attempt: dict[str, int] = {}  # attempt of Job ``a`` of a Failed Request
++        self.stale: list[WebhookClaim] = []  # claims held when their delivery was reset
++        self.dl_seq = 0
+ 
+     async def terminate(self, with_target: bool, how: str) -> None:
+         spec = ClientRequestSpec(
+             fingerprint="aaaaaaaa",
+             webhook_url="https://hooks.example.test/das" if with_target else None,
+             webhook_secret_name="hook-secret" if with_target else None,
+         )
+         res = await self.store.submit_request("p", spec)
+         assert res.request_id is not None
+         rid = res.request_id
++        self.rids.append(rid)
+         if how == "cancel":
+             assert (await self.store.cancel_request(rid)).ok
+         else:
+             lease = (await self.store.acquire_lease(rid, "m1", 3600.0)).lease
+             assert lease is not None
+             assert (await self.store.commit_plan(lease, PLAN)).ok
+-            assert (await self.store.apply_transition(lease, TransitionBatch())).ok
+-            assert (await self.store.finalize(lease, FINAL)).ok
++            if how == "fail":
++                await self.fail(rid, lease, attempt=1, replays=())
++            else:
++                assert (await self.store.apply_transition(lease, TransitionBatch())).ok
++                assert (await self.store.finalize(lease, FINAL)).ok
+         r = self.store.client
+         if with_target:
+-            assert await self.store.get_webhook(rid) == WebhookState("pending", 0, None)
+-            due = await r.zscore(keys.WEBHOOKS_DUE, rid)
+-            assert due is not None and abs(due - self.clock.now_ms() / 1000) < 1e-6
+-            self.model[rid] = Delivery(due=due)
++            self.model[rid] = await self.fresh_delivery(rid)
+         else:
+             assert await self.store.get_webhook(rid) is None
+             assert await r.zscore(keys.WEBHOOKS_DUE, rid) is None
+         # Exactly one outbox entry per Request with a target, none for the others.
+         assert await r.zcard(keys.WEBHOOKS_DUE) == len(self.model)
+ 
++    async def fail(self, rid: str, lease, attempt: int, replays: tuple[str, ...]) -> None:
++        failed = JobRecord(job=PLAN.jobs[0], state=JobState.FAILED, attempt=attempt, reason="x")
++        batch = TransitionBatch(jobs={"a": failed}, replays_applied=replays)
++        assert (await self.store.apply_transition(lease, batch)).ok
++        assert (await self.store.fail_request(lease, "boom")).ok
++        self.failed_attempt[rid] = attempt
++
++    async def fresh_delivery(self, rid: str) -> Delivery:
++        """The model of a delivery a terminal write just (re)created: pending, claim 0,
++        attempts 0, due at the Redis time of the write."""
++        r = self.store.client
++        assert await self.store.get_webhook(rid) == WebhookState("pending", 0, None)
++        h = await r.hgetall(keys.webhook(rid))
++        assert h["claim"] == "0" and h["event_id"]
++        due = await r.zscore(keys.WEBHOOKS_DUE, rid)
++        assert due is not None and abs(due - self.clock.now_ms() / 1000) < 1e-6
++        return Delivery(due=due, event_id=h["event_id"])
++
++    async def reset(self, rid: str, held: dict[int, WebhookClaim | None]) -> None:
++        """A second terminal write on a Failed Request: Replay, reopen, fail again."""
++        attempt = self.failed_attempt.get(rid)
++        if attempt is None:
++            return
++        self.dl_seq += 1
++        dlid = f"{self.dl_seq:032x}"
++        assert (await self.store.create_dead_letter(dlq_fields(dlid, rid, attempt=attempt))).created
++        assert (await self.store.replay_dead_letter(dlid)).outcome == "accepted"
++        lease = (await self.store.acquire_lease(rid, "m1", 3600.0)).lease
++        assert lease is not None
++        assert (await self.store.reopen_request(lease)).ok
++        await self.fail(rid, lease, attempt=attempt + 1, replays=(dlid,))
++        if rid not in self.model:
++            assert await self.store.get_webhook(rid) is None
++            return
++        old = self.model[rid]
++        new = await self.fresh_delivery(rid)
++        assert new.event_id != old.event_id
++        self.model[rid] = new
++        for sender, c in list(held.items()):
++            if c is not None and c.request_id == rid:
++                self.stale.append(c)
++                held[sender] = None
++        assert await self.store.client.zcard(keys.WEBHOOKS_DUE) == sum(
++            1 for d in self.model.values() if d.state == "pending"
++        )
++        event(f"reset a {old.state} delivery")
++
++    async def complete_stale(self, rid: str | None = None) -> None:
++        """Complete the kept pre-reset claims (of ``rid``, or all): each must be fenced."""
++        for old in [x for x in self.stale if rid is None or x.request_id == rid]:
++            self.stale.remove(old)
++            d = self.model[old.request_id]
++            if d.claim == old.claim and d.state == "pending":
++                event("stale: pre-reset claim with the current counter")
++            await self.complete(old, delivered=True, expect_stale=True)
++
+     async def claim(self) -> WebhookClaim | None:
+         now = self.clock.now()
+         due = {rid for rid, d in self.model.items() if d.state == "pending" and d.due <= now}
+         c = await self.store.claim_webhook(LEASE)
+         if c is None:
+             assert not due, due
+             return None
+         d = self.model[c.request_id]
+         assert c.request_id in due
+         assert d.lease_until is None or d.lease_until <= now, "claimed during a live lease"
+         assert c.claim == d.claim + 1 and c.attempts == d.attempts
++        assert c.event_id == d.event_id
+         d.claim, d.due, d.lease_until = c.claim, now + LEASE, now + LEASE
++        await self.complete_stale(c.request_id)
+         return c
+ 
+     async def snapshot(self, rid: str) -> tuple[dict[str, str], list[tuple[str, float]]]:
+         r = self.store.client
+         return await r.hgetall(keys.webhook(rid)), await r.zrange(keys.WEBHOOKS_DUE, 0, -1, withscores=True)
+ 
+-    async def complete(self, c: WebhookClaim, delivered: bool) -> None:
++    async def complete(self, c: WebhookClaim, delivered: bool, expect_stale: bool = False) -> None:
+         d = self.model[c.request_id]
+         outcome: WebhookOutcome
+         next_due: float | None
+         if delivered:
+             outcome, next_due = "delivered", None
+         elif c.attempts + 1 == MAX_ATTEMPTS:
+             outcome, next_due = "failed", None
+         else:
+             outcome, next_due = "retry", self.clock.now() + 1
+-        stale = d.state != "pending" or d.claim != c.claim
++        stale = d.state != "pending" or d.claim != c.claim or d.event_id != c.event_id
++        assert stale or not expect_stale
+         before = await self.snapshot(c.request_id)
+         ok = await self.store.complete_webhook(c, outcome, "200" if delivered else "503", next_due)
+         assert ok is (not stale)
+         if stale:
+-            event("stale: superseded claim" if d.claim != c.claim else "stale: no longer pending")
++            if d.event_id != c.event_id:
++                event("stale: claim from before a reset")
++            elif d.claim != c.claim:
++                event("stale: superseded claim")
++            else:
++                event("stale: no longer pending")
+             assert await self.snapshot(c.request_id) == before
+             return
+         d.attempts += 1
+         if outcome == "retry":
+             assert next_due is not None
+             d.due = next_due
+@@ -179,16 +258,26 @@
+             if c is not None:
+                 held[sender] = c
+         elif action == "crash":
+             held[sender] = None
+         elif action == "advance":
+             clock.advance(arg)
++        elif action == "reset":
++            # The sender's held delivery when it can be reset (so pre-reset claims
++            # are common), else the ``arg``-th Failed Request.
++            c = held.get(sender)
++            failed = [rid for rid in sc.rids if rid in sc.failed_attempt]
++            if c is not None and c.request_id in sc.failed_attempt:
++                await sc.reset(c.request_id, held)
++            elif failed:
++                await sc.reset(failed[arg % len(failed)], held)
+         elif (c := held.get(sender)) is not None:
+             await sc.complete(c, arg)
+             held[sender] = None
+     await sc.drain([c for c in held.values() if c is not None])
++    await sc.complete_stale()
+     for rid, d in sc.model.items():
+         got = await sc.store.get_webhook(rid)
+         assert got is not None and got.state in {"delivered", "failed"}, (rid, got)
+         assert got.state == d.state and got.attempts == d.attempts
+         assert 1 <= got.attempts <= MAX_ATTEMPTS
+         event(f"ended {got.state}")
+diff --color -ruN -U6 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5fix/tests/unit/test_state_phase4_webhook.py tests/unit/test_state_phase4_webhook.py
+--- /tmp/das_sdd_snaps/snap-g4-5fix/tests/unit/test_state_phase4_webhook.py	2026-10-30 14:45:11
++++ tests/unit/test_state_phase4_webhook.py	2026-10-30 14:47:17
+@@ -1,14 +1,25 @@
+ """Unit tests for Webhook_Delivery claim and completion (das-client-api task 4.8;
+-Phase 4 Req 8.3, 8.5, 8.6)."""
++Phase 4 Req 8.3, 8.5, 8.6, 8.7)."""
+ 
+ from __future__ import annotations
+ 
+ import pytest
++import redis.exceptions
+ 
+-from das.state import ClientRequestSpec, StateStore, WebhookClaim, WebhookState, keys
++from das.models import JobRecord, JobState
++from das.state import (
++    ClientRequestSpec,
++    StateStore,
++    TransitionBatch,
++    WebhookClaim,
++    WebhookState,
++    keys,
++)
++from tests.unit.test_state_phase2_dlq import fields as dlq_fields
++from tests.unit.test_state_store import PLAN
+ 
+ FP = "cbabecbd"
+ URL = "https://hooks.example.test/das"
+ SECRET_NAME = "hook-secret"
+ LEASE = 30.0
+ 
+@@ -103,6 +114,79 @@
+     c = await state_store.claim_webhook(LEASE)
+     assert c is not None
+     before = await state_store.client.hgetall(keys.webhook(rid))
+     with pytest.raises(ValueError):
+         await state_store.complete_webhook(c, "retry", "503")
+     assert await state_store.client.hgetall(keys.webhook(rid)) == before
++
++
++async def failed_with_target(store: StateStore) -> str:
++    """A Failed Request with a webhook target whose Job ``a`` is Failed (attempt 1),
++    so a Dead_Letter_Record for it can be replayed."""
++    spec = ClientRequestSpec(fingerprint=FP, webhook_url=URL, webhook_secret_name=SECRET_NAME)
++    res = await store.submit_request("p", spec)
++    assert res.request_id is not None
++    rid = res.request_id
++    lease = (await store.acquire_lease(rid, "m1", 3600.0)).lease
++    assert lease is not None
++    assert (await store.commit_plan(lease, PLAN)).ok
++    failed = JobRecord(job=PLAN.jobs[0], state=JobState.FAILED, attempt=1, reason="x")
++    assert (await store.apply_transition(lease, TransitionBatch(jobs={"a": failed}))).ok
++    assert (await store.fail_request(lease, "boom")).ok
++    return rid
++
++
++async def test_claim_from_before_a_delivery_reset_is_stale(fake_redis_time, state_store: StateStore):
++    """Req 8.3: a later terminal write resets the delivery (claim back to 0, new
++    event_id); a claim taken before the reset must not complete the new delivery."""
++    store = state_store
++    rid = await failed_with_target(store)
++    a = await store.claim_webhook(LEASE)
++    assert a is not None and a.request_id == rid and a.claim == 1
++    # Replay reopens the Request; it is applied and the Request fails again.
++    dlid = "1" * 32
++    assert (await store.create_dead_letter(dlq_fields(dlid, rid, attempt=1))).created
++    assert (await store.replay_dead_letter(dlid)).outcome == "accepted"
++    lease = (await store.acquire_lease(rid, "m1", 3600.0)).lease
++    assert lease is not None
++    assert (await store.reopen_request(lease)).ok
++    failed = JobRecord(job=PLAN.jobs[0], state=JobState.FAILED, attempt=2, reason="x")
++    batch = TransitionBatch(jobs={"a": failed}, replays_applied=(dlid,))
++    assert (await store.apply_transition(lease, batch)).ok
++    assert (await store.fail_request(lease, "boom again")).ok
++    b = await store.claim_webhook(LEASE)
++    assert b is not None and b.request_id == rid and b.claim == 1
++    assert b.event_id != a.event_id
++    before = await store.client.hgetall(keys.webhook(rid))
++    score = await due_score(store, rid)
++    assert await store.complete_webhook(a, "delivered", "200") is False
++    assert await store.client.hgetall(keys.webhook(rid)) == before
++    assert await due_score(store, rid) == score
++    assert await store.complete_webhook(b, "delivered", "204") is True
++    assert await store.get_webhook(rid) == WebhookState("delivered", 1, "204")
++
++
++@pytest.mark.parametrize(
++    ("outcome", "next_due", "event_id"),
++    [
++        ("sent", "", "E"),  # unknown outcome
++        ("retry", "soon", "E"),  # retry with non-numeric next_due
++        ("delivered", "", ""),  # empty event_id
++    ],
++)
++async def test_lua_rejects_bad_arguments_without_writing(
++    fake_redis_time, state_store: StateStore, outcome: str, next_due: str, event_id: str
++):
++    rid = await enqueued(state_store)
++    c = await state_store.claim_webhook(LEASE)
++    assert c is not None
++    eid = c.event_id if event_id == "E" else event_id
++    before = await state_store.client.hgetall(keys.webhook(rid))
++    score = await due_score(state_store, rid)
++    with pytest.raises(redis.exceptions.ResponseError):
++        await state_store._run(
++            "complete_webhook",
++            [keys.WEBHOOKS_DUE, keys.webhook(rid)],
++            [rid, c.claim, outcome, "200", next_due, eid],
++        )
++    assert await state_store.client.hgetall(keys.webhook(rid)) == before
++    assert await due_score(state_store, rid) == score
+
+## Full task diff (vs snapshot taken before Task 5)
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5/das/state/__init__.py das/state/__init__.py
+--- /tmp/das_sdd_snaps/snap-g4-5/das/state/__init__.py	2026-10-30 14:28:45
++++ das/state/__init__.py	2026-10-30 14:31:54
+@@ -25,16 +25,18 @@
+     RequestPage,
+     StateStore,
+     StoredRequest,
+     StoreError,
+     StoreStatus,
+     Timer,
+     TimerKey,
+     TransitionBatch,
++    WebhookClaim,
++    WebhookOutcome,
+     WebhookState,
+     WriteResult,
+ )
+ 
+ __all__ = [
+     "CANCEL_REASON",
+     "DEFAULT_EVENTS_MAX_LEN",
+     "INBOX_JOB_RESULT",
+@@ -59,11 +61,13 @@
+     "RequestPage",
+     "StateStore",
+     "StoreError",
+     "StoreStatus",
+     "StoredRequest",
+     "Timer",
+     "TimerKey",
+     "TransitionBatch",
++    "WebhookClaim",
++    "WebhookOutcome",
+     "WebhookState",
+     "WriteResult",
+ ]
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5/das/state/lua/claim_webhook.lua das/state/lua/claim_webhook.lua
+--- /tmp/das_sdd_snaps/snap-g4-5/das/state/lua/claim_webhook.lua	1970-01-01 08:00:00
++++ das/state/lua/claim_webhook.lua	2026-10-30 14:36:13
+@@ -0,0 +1,31 @@
++-- claim_webhook: claim the next due Webhook_Delivery (Phase 4 Req 8.3).
++-- Scans at most 10 rids with score <= now (Redis TIME). A rid whose delivery hash is
++-- missing or not pending is removed from the outbox. The first pending one is
++-- re-scored to now + lease, so no other sender sees it as due until the lease ends,
++-- and its claim counter is incremented; complete_webhook applies only with that
++-- claim value. The hash key is built from ARGV[2] (single Redis primary, OD 4.1).
++-- KEYS[1] das:webhooks:due
++-- ARGV[1] lease seconds (> 0), ARGV[2] request key prefix 'das:req:'
++-- Returns {rid, claim, attempts, url, secret_name, event_id, type, data} or {}.
++local lease = tonumber(ARGV[1])
++if not lease or lease ~= lease or lease <= 0 or lease == math.huge then
++  return redis.error_reply('claim_webhook: lease_seconds must be a finite number > 0')
++end
++local prefix = ARGV[2]
++if not prefix or prefix == '' then
++  return redis.error_reply('claim_webhook: request key prefix required')
++end
++local now = server_time()
++local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', fmt_double(now), 'LIMIT', 0, 10)
++for _, rid in ipairs(due) do
++  local wk = prefix .. rid .. ':webhook'
++  local v = redis.call('HMGET', wk, 'state', 'attempts', 'url', 'secret_name', 'event_id', 'type', 'data')
++  if v[1] ~= 'pending' then
++    redis.call('ZREM', KEYS[1], rid)
++  else
++    redis.call('ZADD', KEYS[1], fmt_double(now + lease), rid)
++    local claim = redis.call('HINCRBY', wk, 'claim', 1)
++    return { rid, tostring(claim), v[2] or '0', v[3] or '', v[4] or '', v[5] or '', v[6] or '', v[7] or '{}' }
++  end
++end
++return {}
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5/das/state/lua/complete_webhook.lua das/state/lua/complete_webhook.lua
+--- /tmp/das_sdd_snaps/snap-g4-5/das/state/lua/complete_webhook.lua	1970-01-01 08:00:00
++++ das/state/lua/complete_webhook.lua	2026-10-30 14:50:37
+@@ -0,0 +1,45 @@
++-- complete_webhook: record the outcome of one Webhook_Delivery attempt
++-- (Phase 4 Req 8.3, 8.5-8.7).
++-- Fenced by the claim counter and the event_id: applied only when the hash exists, is
++-- pending, its claim equals ARGV[2] and its event_id equals ARGV[6]. A sender whose
++-- lease ran out and whose delivery was claimed again fails the claim check; a sender
++-- whose delivery was reset by a later terminal write (which restarts claim at 0 with a
++-- new event_id, so the counter can match again) fails the event_id check. Either gets
++-- STALE and changes nothing. Inputs are validated before any read or write.
++--   delivered -> state delivered, ZREM outbox
++--   failed    -> state failed, ZREM outbox
++--   retry     -> stays pending, ZADD outbox next_due
++-- Every applied outcome increments attempts and stores last_status.
++-- KEYS[1] das:webhooks:due, KEYS[2] das:req:{rid}:webhook
++-- ARGV[1] rid, ARGV[2] claim, ARGV[3] outcome, ARGV[4] last_status,
++-- ARGV[5] next_due (Redis seconds, %.17g text; '' unless retry),
++-- ARGV[6] event_id of the claimed delivery (required, non-empty)
++-- Returns {'OK', attempts} | {'STALE'}.
++local rid, claim, outcome, last_status = ARGV[1], ARGV[2], ARGV[3], ARGV[4] or ''
++local event_id = ARGV[6]
++if not event_id or event_id == '' then
++  return redis.error_reply('complete_webhook: event_id required')
++end
++if outcome ~= 'delivered' and outcome ~= 'retry' and outcome ~= 'failed' then
++  return redis.error_reply('complete_webhook: unknown outcome ' .. tostring(outcome))
++end
++local next_due
++if outcome == 'retry' then
++  next_due = tonumber(ARGV[5] or '')
++  if not next_due or next_due ~= next_due or next_due == math.huge or next_due == -math.huge then
++    return redis.error_reply('complete_webhook: retry needs a finite numeric next_due')
++  end
++end
++local v = redis.call('HMGET', KEYS[2], 'state', 'claim', 'event_id')
++if v[1] ~= 'pending' or v[2] ~= claim or v[3] ~= event_id then
++  return { 'STALE' }
++end
++local attempts = redis.call('HINCRBY', KEYS[2], 'attempts', 1)
++redis.call('HSET', KEYS[2], 'last_status', last_status)
++if outcome == 'retry' then
++  redis.call('ZADD', KEYS[1], fmt_double(next_due), rid)
++else
++  redis.call('HSET', KEYS[2], 'state', outcome)
++  redis.call('ZREM', KEYS[1], rid)
++end
++return { 'OK', attempts }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5/das/state/scripts.py das/state/scripts.py
+--- /tmp/das_sdd_snaps/snap-g4-5/das/state/scripts.py	2026-10-30 14:28:45
++++ das/state/scripts.py	2026-10-30 14:31:54
+@@ -22,16 +22,18 @@
+     "reopen_request",
+     "list_dead_letters",
+     "purge_request",
+     "purge_inbox",
+     "purge_dead_letter",
+     "index_request",
+     "list_index",
+     "rate_check",
++    "claim_webhook",
++    "complete_webhook",
+ )
+ 
+ 
+ def _read(name: str) -> str:
+     return resources.files("das.state").joinpath("lua", f"{name}.lua").read_text(encoding="utf-8")
+ 
+ 
+ @cache
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5/das/state/store.py das/state/store.py
+--- /tmp/das_sdd_snaps/snap-g4-5/das/state/store.py	2026-10-30 14:28:45
++++ das/state/store.py	2026-10-30 14:48:54
+@@ -109,16 +109,38 @@
+     ``last_status`` is ``None`` until a delivery attempt recorded one.
+     """
+ 
+     state: str
+     attempts: int
+     last_status: str | None
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class WebhookClaim:
++    """A claimed Webhook_Delivery (Phase 4 Req 8.3).
++
++    ``claim`` fences :meth:`StateStore.complete_webhook`; ``attempts`` counts the
++    attempts made before this one.
++    """
++
++    request_id: str
++    claim: int  # pass back to complete_webhook
++    attempts: int  # attempts made before this one
++    url: str
++    secret_name: str
++    event_id: str
++    event_type: str
++    data: dict[str, Any]
++
++
++WebhookOutcome = Literal["delivered", "retry", "failed"]
++_WEBHOOK_OUTCOMES: Final = frozenset({"delivered", "retry", "failed"})
++
++
+ class StoreStatus(StrEnum):
+     OK = "OK"
+     LEASE_LOST = "LEASE_LOST"
+     REQUEST_TERMINAL = "REQUEST_TERMINAL"  # Manager write on a Completed/Failed/Cancelled Request
+     TERMINAL = "TERMINAL"  # Gateway cancel on a terminal Request (Req 1.8)
+     NOT_FOUND = "NOT_FOUND"
+     HELD = "HELD"  # acquire: another Manager holds an unexpired Lease
+     INVALID_STATE = "INVALID_STATE"  # e.g. commit_plan on a Running Request
+@@ -1271,16 +1293,74 @@
+         """Webhook_Delivery state of a Request, or ``None`` when it has none (Phase 4 Req 8.2)."""
+         raw = await self._r.hmget(keys.webhook(rid), "state", "attempts", "last_status")
+         if raw[0] is None:
+             return None
+         return WebhookState(
+             state=_s(raw[0]), attempts=_opt_int(_opt(raw[1])) or 0, last_status=_opt(raw[2]) or None
+         )
+ 
++    async def claim_webhook(self, lease_seconds: float) -> WebhookClaim | None:
++        """Claim the next due Webhook_Delivery for ``lease_seconds`` (Phase 4 Req 8.3).
++
++        The delivery is re-scored to Redis ``now + lease_seconds``, so other senders do
++        not see it as due until the lease ends. At most 10 due entries are inspected per
++        call (non-pending ones are dropped from the outbox), so ``None`` means nothing
++        was claimable among the first 10 due entries, not necessarily that nothing is due.
++        """
++        reply = await self._run(
++            "claim_webhook", [keys.WEBHOOKS_DUE], [f"{lease_seconds:.17g}", keys.request("")]
++        )
++        if not reply:
++            return None
++        rid, claim, attempts, url, secret_name, event_id, event_type, data = (_s(x) for x in reply)
++        return WebhookClaim(
++            request_id=rid,
++            claim=int(claim),
++            attempts=int(attempts),
++            url=url,
++            secret_name=secret_name,
++            event_id=event_id,
++            event_type=event_type,
++            data=json.loads(data),
++        )
++
++    async def complete_webhook(
++        self,
++        claim: WebhookClaim,
++        outcome: WebhookOutcome,
++        last_status: str,
++        next_due: float | None = None,
++    ) -> bool:
++        """Record one delivery attempt of a claimed Webhook_Delivery (Phase 4 Req 8.5-8.7).
++
++        ``next_due`` (Redis seconds) is required for ``retry``. Returns ``False`` when
++        the claim is stale (re-claimed after its lease ended, reset by a later terminal
++        write so its ``event_id`` no longer matches (Req 8.3), or no longer pending);
++        nothing is changed then.
++        """
++        if outcome not in _WEBHOOK_OUTCOMES:
++            raise ValueError(f"unknown webhook outcome: {outcome!r}")
++        if outcome == "retry" and next_due is None:
++            raise ValueError("next_due is required for a retry outcome")
++        rid = claim.request_id
++        reply = await self._run(
++            "complete_webhook",
++            [keys.WEBHOOKS_DUE, keys.webhook(rid)],
++            [
++                rid,
++                claim.claim,
++                outcome,
++                last_status,
++                "" if next_due is None else f"{next_due:.17g}",
++                claim.event_id,
++            ],
++        )
++        return _s(reply[0]) == "OK"
++
+     async def load_usage(self, rid: str) -> list[UsageRecord]:
+         """Every committed UsageRecord of the Request, in append order (Req 9.8).
+ 
+         A single LRANGE: the Gateway wraps it in ``_bounded()`` so a slow or failed
+         read becomes 503 rather than a summary of partial records (Req 9.12). A stored
+         record that does not parse raises, for the same reason.
+         """
+         raw = await self._r.lrange(keys.usage(rid), 0, -1)
+@@ -1588,16 +1668,18 @@
+     "RequestPage",
+     "StateStore",
+     "StoreError",
+     "StoreStatus",
+     "StoredRequest",
+     "Timer",
+     "TimerKey",
+     "TransitionBatch",
++    "WebhookClaim",
++    "WebhookOutcome",
+     "WebhookState",
+     "WriteResult",
+     "apply_transition_keys",
+     "cancel_request_keys",
+     "commit_plan_keys",
+     "finalize_keys",
+     "index_request_keys",
+     "purge_request_keys",
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5/tests/property/test_webhook_outbox.py tests/property/test_webhook_outbox.py
+--- /tmp/das_sdd_snaps/snap-g4-5/tests/property/test_webhook_outbox.py	1970-01-01 08:00:00
++++ tests/property/test_webhook_outbox.py	2026-10-30 14:50:11
+@@ -0,0 +1,290 @@
++# Feature: das-client-api, Property 7: Webhook outbox delivery
++"""Property 7: Webhook outbox delivery.
++
++1 to 5 Requests, each with or without a Webhook_Target, are terminated with
++``finalize``, ``fail_request`` (Job ``a`` Failed) or ``cancel_request`` (real
++``das/state/lua`` scripts through ``StateStore`` on a fresh fakeredis server per example, ``TIME`` from
++:class:`FakeRedisTime`). Each terminal write enqueues exactly one pending delivery for
++a Request with a target and none for the others.
++
++Then 2 or 3 simulated senders run a step list: ``claim``, ``crash`` (forget the held
++claim), ``advance`` Redis time by 0..2*lease, ``reset`` a Failed Request (Replay of a
++Dead_Letter_Record for its Failed Job, ``reopen_request``, then ``fail_request`` again:
++a second terminal write), or ``complete`` the held claim with a random outcome
++(``delivered``, or else ``failed`` once ``attempts + 1 == MAX_ATTEMPTS``
++and ``retry`` at ``now + 1`` before that). A model tracks, per delivery, its state,
++attempts, claim counter, event_id, due time and the lease expiry of the latest claim.
++A reset gives the delivery a new event_id, claim 0, attempts 0 and due now, whatever
++its state was; every claim senders held on it is kept as stale and completed right
++after the delivery is next claimed (or at the end), so a pre-reset claim whose
++counter equals the new claim's must still be fenced by event_id (Req 8.3):
++
++- a claim succeeds only for a pending, due delivery, never while an earlier claim's
++  lease is live, and ``None`` only when nothing is due;
++- a ``complete_webhook`` with a superseded claim (older counter, or an event_id from
++  before a reset) returns ``False`` and changes neither the delivery hash nor the
++  outbox.
++
++A well-behaved sender then drains the outbox. Every delivery ends ``delivered`` or
++``failed`` with ``1 <= attempts <= MAX_ATTEMPTS``.
++
++**Validates: Requirements 8.2, 8.3, 8.5, 8.6, 8.7**
++"""
++
++from __future__ import annotations
++
++import asyncio
++from dataclasses import dataclass
++
++from fakeredis import FakeServer
++from fakeredis.aioredis import FakeRedis
++from hypothesis import event, given
++from hypothesis import strategies as st
++
++from das.models import FinalResult, JobRecord, JobState
++from das.state import ClientRequestSpec, StateStore, TransitionBatch, WebhookClaim, WebhookOutcome, WebhookState, keys
++from tests.fixtures.redis_time import FakeRedisTime
++from tests.unit.test_state_phase2_dlq import fields as dlq_fields
++from tests.unit.test_state_store import PLAN
++
++LEASE = 10.0
++MAX_ATTEMPTS = 3
++FINAL = FinalResult(summary="done", jobs=[])
++
++requests = st.lists(
++    st.tuples(st.booleans(), st.sampled_from(["finalize", "fail", "cancel"])), min_size=1, max_size=5
++)
++steps = st.lists(
++    st.one_of(
++        st.tuples(st.integers(0, 2), st.just("claim"), st.none()),
++        st.tuples(st.integers(0, 2), st.just("crash"), st.none()),
++        st.tuples(st.integers(0, 2), st.just("advance"), st.floats(0, 2 * LEASE)),
++        st.tuples(st.integers(0, 2), st.just("complete"), st.booleans()),  # True: delivered
++        st.tuples(st.integers(0, 2), st.just("reset"), st.integers(0, 4)),  # Request index
++    ),
++    max_size=40,
++)
++
++
++@dataclass
++class Delivery:
++    state: str = "pending"
++    attempts: int = 0
++    claim: int = 0
++    event_id: str = ""
++    due: float = 0.0
++    lease_until: float | None = None  # lease expiry of the latest claim
++
++
++class Scenario:
++    def __init__(self, store: StateStore, clock: FakeRedisTime) -> None:
++        self.store = store
++        self.clock = clock
++        self.model: dict[str, Delivery] = {}
++        self.rids: list[str] = []
++        self.failed_attempt: dict[str, int] = {}  # attempt of Job ``a`` of a Failed Request
++        self.stale: list[WebhookClaim] = []  # claims held when their delivery was reset
++        self.dl_seq = 0
++
++    async def terminate(self, with_target: bool, how: str) -> None:
++        spec = ClientRequestSpec(
++            fingerprint="aaaaaaaa",
++            webhook_url="https://hooks.example.test/das" if with_target else None,
++            webhook_secret_name="hook-secret" if with_target else None,
++        )
++        res = await self.store.submit_request("p", spec)
++        assert res.request_id is not None
++        rid = res.request_id
++        self.rids.append(rid)
++        if how == "cancel":
++            assert (await self.store.cancel_request(rid)).ok
++        else:
++            lease = (await self.store.acquire_lease(rid, "m1", 3600.0)).lease
++            assert lease is not None
++            assert (await self.store.commit_plan(lease, PLAN)).ok
++            if how == "fail":
++                await self.fail(rid, lease, attempt=1, replays=())
++            else:
++                assert (await self.store.apply_transition(lease, TransitionBatch())).ok
++                assert (await self.store.finalize(lease, FINAL)).ok
++        r = self.store.client
++        if with_target:
++            self.model[rid] = await self.fresh_delivery(rid)
++        else:
++            assert await self.store.get_webhook(rid) is None
++            assert await r.zscore(keys.WEBHOOKS_DUE, rid) is None
++        # Exactly one outbox entry per Request with a target, none for the others.
++        assert await r.zcard(keys.WEBHOOKS_DUE) == len(self.model)
++
++    async def fail(self, rid: str, lease, attempt: int, replays: tuple[str, ...]) -> None:
++        failed = JobRecord(job=PLAN.jobs[0], state=JobState.FAILED, attempt=attempt, reason="x")
++        batch = TransitionBatch(jobs={"a": failed}, replays_applied=replays)
++        assert (await self.store.apply_transition(lease, batch)).ok
++        assert (await self.store.fail_request(lease, "boom")).ok
++        self.failed_attempt[rid] = attempt
++
++    async def fresh_delivery(self, rid: str) -> Delivery:
++        """The model of a delivery a terminal write just (re)created: pending, claim 0,
++        attempts 0, due at the Redis time of the write."""
++        r = self.store.client
++        assert await self.store.get_webhook(rid) == WebhookState("pending", 0, None)
++        h = await r.hgetall(keys.webhook(rid))
++        assert h["claim"] == "0" and h["event_id"]
++        due = await r.zscore(keys.WEBHOOKS_DUE, rid)
++        assert due is not None and abs(due - self.clock.now_ms() / 1000) < 1e-6
++        return Delivery(due=due, event_id=h["event_id"])
++
++    async def reset(self, rid: str, held: dict[int, WebhookClaim | None]) -> None:
++        """A second terminal write on a Failed Request: Replay, reopen, fail again."""
++        attempt = self.failed_attempt.get(rid)
++        if attempt is None:
++            return
++        self.dl_seq += 1
++        dlid = f"{self.dl_seq:032x}"
++        assert (await self.store.create_dead_letter(dlq_fields(dlid, rid, attempt=attempt))).created
++        assert (await self.store.replay_dead_letter(dlid)).outcome == "accepted"
++        lease = (await self.store.acquire_lease(rid, "m1", 3600.0)).lease
++        assert lease is not None
++        assert (await self.store.reopen_request(lease)).ok
++        await self.fail(rid, lease, attempt=attempt + 1, replays=(dlid,))
++        if rid not in self.model:
++            assert await self.store.get_webhook(rid) is None
++            return
++        old = self.model[rid]
++        new = await self.fresh_delivery(rid)
++        assert new.event_id != old.event_id
++        self.model[rid] = new
++        for sender, c in list(held.items()):
++            if c is not None and c.request_id == rid:
++                self.stale.append(c)
++                held[sender] = None
++        assert await self.store.client.zcard(keys.WEBHOOKS_DUE) == sum(
++            1 for d in self.model.values() if d.state == "pending"
++        )
++        event(f"reset a {old.state} delivery")
++
++    async def complete_stale(self, rid: str | None = None) -> None:
++        """Complete the kept pre-reset claims (of ``rid``, or all): each must be fenced."""
++        for old in [x for x in self.stale if rid is None or x.request_id == rid]:
++            self.stale.remove(old)
++            d = self.model[old.request_id]
++            if d.claim == old.claim and d.state == "pending":
++                event("stale: pre-reset claim with the current counter")
++            await self.complete(old, delivered=True, expect_stale=True)
++
++    async def claim(self) -> WebhookClaim | None:
++        now = self.clock.now()
++        due = {rid for rid, d in self.model.items() if d.state == "pending" and d.due <= now}
++        c = await self.store.claim_webhook(LEASE)
++        if c is None:
++            assert not due, due
++            return None
++        d = self.model[c.request_id]
++        assert c.request_id in due
++        assert d.lease_until is None or d.lease_until <= now, "claimed during a live lease"
++        assert c.claim == d.claim + 1 and c.attempts == d.attempts
++        assert c.event_id == d.event_id
++        d.claim, d.due, d.lease_until = c.claim, now + LEASE, now + LEASE
++        await self.complete_stale(c.request_id)
++        return c
++
++    async def snapshot(self, rid: str) -> tuple[dict[str, str], list[tuple[str, float]]]:
++        r = self.store.client
++        return await r.hgetall(keys.webhook(rid)), await r.zrange(keys.WEBHOOKS_DUE, 0, -1, withscores=True)
++
++    async def complete(self, c: WebhookClaim, delivered: bool, expect_stale: bool = False) -> None:
++        d = self.model[c.request_id]
++        outcome: WebhookOutcome
++        next_due: float | None
++        if delivered:
++            outcome, next_due = "delivered", None
++        elif c.attempts + 1 == MAX_ATTEMPTS:
++            outcome, next_due = "failed", None
++        else:
++            outcome, next_due = "retry", self.clock.now() + 1
++        stale = d.state != "pending" or d.claim != c.claim or d.event_id != c.event_id
++        assert stale or not expect_stale
++        before = await self.snapshot(c.request_id)
++        ok = await self.store.complete_webhook(c, outcome, "200" if delivered else "503", next_due)
++        assert ok is (not stale)
++        if stale:
++            if d.event_id != c.event_id:
++                event("stale: claim from before a reset")
++            elif d.claim != c.claim:
++                event("stale: superseded claim")
++            else:
++                event("stale: no longer pending")
++            assert await self.snapshot(c.request_id) == before
++            return
++        d.attempts += 1
++        if outcome == "retry":
++            assert next_due is not None
++            d.due = next_due
++        else:
++            d.state = outcome
++        d.lease_until = None
++
++    async def drain(self, late: list[WebhookClaim]) -> None:
++        """Claim and complete until the outbox is empty. ``late`` holds claims senders
++        still had when the steps ended; each is completed (by a slow sender) right
++        after the drain sender re-claims its delivery, so it must be fenced."""
++        r = self.store.client
++        for _ in range(10 * MAX_ATTEMPTS * max(1, len(self.model))):
++            c = await self.claim()
++            if c is not None:
++                for old in [x for x in late if x.request_id == c.request_id]:
++                    late.remove(old)
++                    await self.complete(old, delivered=True)
++                await self.complete(c, delivered=False)
++                continue
++            first = await r.zrange(keys.WEBHOOKS_DUE, 0, 0, withscores=True)
++            if not first:
++                return
++            self.clock.advance(max(0.0, first[0][1] - self.clock.now()) + 0.001)
++        raise AssertionError("outbox did not drain")
++
++
++async def _run(
++    reqs: list[tuple[bool, str]], senders: int, step_list: list[tuple], clock: FakeRedisTime
++) -> None:
++    sc = Scenario(StateStore(FakeRedis(server=FakeServer(), decode_responses=True)), clock)
++    for with_target, how in reqs:
++        await sc.terminate(with_target, how)
++    held: dict[int, WebhookClaim | None] = {}
++    for pick, action, arg in step_list:
++        sender = pick % senders
++        if action == "claim":
++            c = await sc.claim()
++            if c is not None:
++                held[sender] = c
++        elif action == "crash":
++            held[sender] = None
++        elif action == "advance":
++            clock.advance(arg)
++        elif action == "reset":
++            # The sender's held delivery when it can be reset (so pre-reset claims
++            # are common), else the ``arg``-th Failed Request.
++            c = held.get(sender)
++            failed = [rid for rid in sc.rids if rid in sc.failed_attempt]
++            if c is not None and c.request_id in sc.failed_attempt:
++                await sc.reset(c.request_id, held)
++            elif failed:
++                await sc.reset(failed[arg % len(failed)], held)
++        elif (c := held.get(sender)) is not None:
++            await sc.complete(c, arg)
++            held[sender] = None
++    await sc.drain([c for c in held.values() if c is not None])
++    await sc.complete_stale()
++    for rid, d in sc.model.items():
++        got = await sc.store.get_webhook(rid)
++        assert got is not None and got.state in {"delivered", "failed"}, (rid, got)
++        assert got.state == d.state and got.attempts == d.attempts
++        assert 1 <= got.attempts <= MAX_ATTEMPTS
++        event(f"ended {got.state}")
++    assert await sc.store.client.zcard(keys.WEBHOOKS_DUE) == 0
++
++
++@given(reqs=requests, senders=st.integers(2, 3), step_list=steps)
++def test_webhook_outbox_delivery(reqs: list[tuple[bool, str]], senders: int, step_list: list[tuple]) -> None:
++    with FakeRedisTime() as clock:
++        asyncio.run(_run(reqs, senders, step_list, clock))
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-5/tests/unit/test_state_phase4_webhook.py tests/unit/test_state_phase4_webhook.py
+--- /tmp/das_sdd_snaps/snap-g4-5/tests/unit/test_state_phase4_webhook.py	1970-01-01 08:00:00
++++ tests/unit/test_state_phase4_webhook.py	2026-10-30 14:47:17
+@@ -0,0 +1,192 @@
++"""Unit tests for Webhook_Delivery claim and completion (das-client-api task 4.8;
++Phase 4 Req 8.3, 8.5, 8.6, 8.7)."""
++
++from __future__ import annotations
++
++import pytest
++import redis.exceptions
++
++from das.models import JobRecord, JobState
++from das.state import (
++    ClientRequestSpec,
++    StateStore,
++    TransitionBatch,
++    WebhookClaim,
++    WebhookState,
++    keys,
++)
++from tests.unit.test_state_phase2_dlq import fields as dlq_fields
++from tests.unit.test_state_store import PLAN
++
++FP = "cbabecbd"
++URL = "https://hooks.example.test/das"
++SECRET_NAME = "hook-secret"
++LEASE = 30.0
++
++
++async def enqueued(store: StateStore) -> str:
++    """A Cancelled Request with a webhook target, so one delivery is due now."""
++    spec = ClientRequestSpec(fingerprint=FP, webhook_url=URL, webhook_secret_name=SECRET_NAME)
++    res = await store.submit_request("p", spec)
++    assert res.request_id is not None
++    assert (await store.cancel_request(res.request_id)).ok
++    return res.request_id
++
++
++async def due_score(store: StateStore, rid: str) -> float | None:
++    return await store.client.zscore(keys.WEBHOOKS_DUE, rid)
++
++
++async def test_nothing_due_returns_none(fake_redis_time, state_store: StateStore):
++    assert await state_store.claim_webhook(LEASE) is None
++
++
++async def test_due_delivery_is_claimed_once(fake_redis_time, state_store: StateStore):
++    rid = await enqueued(state_store)
++    h = await state_store.client.hgetall(keys.webhook(rid))
++    c = await state_store.claim_webhook(LEASE)
++    assert c is not None
++    assert c == WebhookClaim(
++        request_id=rid, claim=1, attempts=0, url=URL, secret_name=SECRET_NAME,
++        event_id=h["event_id"], event_type="request.cancelled", data=c.data,
++    )
++    assert c.data["status"] == "Cancelled"
++    assert await due_score(state_store, rid) == pytest.approx(fake_redis_time.now() + LEASE)
++    assert await state_store.claim_webhook(LEASE) is None
++
++
++async def test_expired_claim_is_reclaimed_and_old_claim_is_stale(fake_redis_time, state_store: StateStore):
++    rid = await enqueued(state_store)
++    first = await state_store.claim_webhook(LEASE)
++    assert first is not None
++    fake_redis_time.advance(LEASE + 1)
++    second = await state_store.claim_webhook(LEASE)
++    assert second is not None and second.request_id == rid and second.claim == 2
++    before = await state_store.client.hgetall(keys.webhook(rid))
++    score = await due_score(state_store, rid)
++    assert await state_store.complete_webhook(first, "delivered", "200") is False
++    assert await state_store.client.hgetall(keys.webhook(rid)) == before
++    assert await due_score(state_store, rid) == score
++
++
++async def test_delivered(fake_redis_time, state_store: StateStore):
++    rid = await enqueued(state_store)
++    c = await state_store.claim_webhook(LEASE)
++    assert c is not None
++    assert await state_store.complete_webhook(c, "delivered", "204") is True
++    assert await state_store.get_webhook(rid) == WebhookState("delivered", 1, "204")
++    assert await due_score(state_store, rid) is None
++    assert await state_store.complete_webhook(c, "delivered", "204") is False  # no longer pending
++
++
++async def test_retry_keeps_pending_due_at_next_due(fake_redis_time, state_store: StateStore):
++    rid = await enqueued(state_store)
++    c = await state_store.claim_webhook(LEASE)
++    assert c is not None
++    nd = fake_redis_time.now() + 5.5
++    assert await state_store.complete_webhook(c, "retry", "503", next_due=nd) is True
++    assert await state_store.get_webhook(rid) == WebhookState("pending", 1, "503")
++    assert await due_score(state_store, rid) == pytest.approx(nd)
++    assert await state_store.claim_webhook(LEASE) is None
++    fake_redis_time.advance(5.5)
++    again = await state_store.claim_webhook(LEASE)
++    assert again is not None and again.claim == 2 and again.attempts == 1
++
++
++async def test_failed_removes_from_outbox(fake_redis_time, state_store: StateStore):
++    rid = await enqueued(state_store)
++    c = await state_store.claim_webhook(LEASE)
++    assert c is not None
++    assert await state_store.complete_webhook(c, "failed", "timeout") is True
++    assert await state_store.get_webhook(rid) == WebhookState("failed", 1, "timeout")
++    assert await due_score(state_store, rid) is None
++
++
++async def test_entry_without_hash_is_dropped(fake_redis_time, state_store: StateStore):
++    rid = await enqueued(state_store)
++    await state_store.client.delete(keys.webhook(rid))
++    assert await state_store.claim_webhook(LEASE) is None
++    assert await due_score(state_store, rid) is None
++
++
++async def test_retry_without_next_due_raises_before_redis(fake_redis_time, state_store: StateStore):
++    rid = await enqueued(state_store)
++    c = await state_store.claim_webhook(LEASE)
++    assert c is not None
++    before = await state_store.client.hgetall(keys.webhook(rid))
++    with pytest.raises(ValueError):
++        await state_store.complete_webhook(c, "retry", "503")
++    assert await state_store.client.hgetall(keys.webhook(rid)) == before
++
++
++async def failed_with_target(store: StateStore) -> str:
++    """A Failed Request with a webhook target whose Job ``a`` is Failed (attempt 1),
++    so a Dead_Letter_Record for it can be replayed."""
++    spec = ClientRequestSpec(fingerprint=FP, webhook_url=URL, webhook_secret_name=SECRET_NAME)
++    res = await store.submit_request("p", spec)
++    assert res.request_id is not None
++    rid = res.request_id
++    lease = (await store.acquire_lease(rid, "m1", 3600.0)).lease
++    assert lease is not None
++    assert (await store.commit_plan(lease, PLAN)).ok
++    failed = JobRecord(job=PLAN.jobs[0], state=JobState.FAILED, attempt=1, reason="x")
++    assert (await store.apply_transition(lease, TransitionBatch(jobs={"a": failed}))).ok
++    assert (await store.fail_request(lease, "boom")).ok
++    return rid
++
++
++async def test_claim_from_before_a_delivery_reset_is_stale(fake_redis_time, state_store: StateStore):
++    """Req 8.3: a later terminal write resets the delivery (claim back to 0, new
++    event_id); a claim taken before the reset must not complete the new delivery."""
++    store = state_store
++    rid = await failed_with_target(store)
++    a = await store.claim_webhook(LEASE)
++    assert a is not None and a.request_id == rid and a.claim == 1
++    # Replay reopens the Request; it is applied and the Request fails again.
++    dlid = "1" * 32
++    assert (await store.create_dead_letter(dlq_fields(dlid, rid, attempt=1))).created
++    assert (await store.replay_dead_letter(dlid)).outcome == "accepted"
++    lease = (await store.acquire_lease(rid, "m1", 3600.0)).lease
++    assert lease is not None
++    assert (await store.reopen_request(lease)).ok
++    failed = JobRecord(job=PLAN.jobs[0], state=JobState.FAILED, attempt=2, reason="x")
++    batch = TransitionBatch(jobs={"a": failed}, replays_applied=(dlid,))
++    assert (await store.apply_transition(lease, batch)).ok
++    assert (await store.fail_request(lease, "boom again")).ok
++    b = await store.claim_webhook(LEASE)
++    assert b is not None and b.request_id == rid and b.claim == 1
++    assert b.event_id != a.event_id
++    before = await store.client.hgetall(keys.webhook(rid))
++    score = await due_score(store, rid)
++    assert await store.complete_webhook(a, "delivered", "200") is False
++    assert await store.client.hgetall(keys.webhook(rid)) == before
++    assert await due_score(store, rid) == score
++    assert await store.complete_webhook(b, "delivered", "204") is True
++    assert await store.get_webhook(rid) == WebhookState("delivered", 1, "204")
++
++
++@pytest.mark.parametrize(
++    ("outcome", "next_due", "event_id"),
++    [
++        ("sent", "", "E"),  # unknown outcome
++        ("retry", "soon", "E"),  # retry with non-numeric next_due
++        ("delivered", "", ""),  # empty event_id
++    ],
++)
++async def test_lua_rejects_bad_arguments_without_writing(
++    fake_redis_time, state_store: StateStore, outcome: str, next_due: str, event_id: str
++):
++    rid = await enqueued(state_store)
++    c = await state_store.claim_webhook(LEASE)
++    assert c is not None
++    eid = c.event_id if event_id == "E" else event_id
++    before = await state_store.client.hgetall(keys.webhook(rid))
++    score = await due_score(state_store, rid)
++    with pytest.raises(redis.exceptions.ResponseError):
++        await state_store._run(
++            "complete_webhook",
++            [keys.WEBHOOKS_DUE, keys.webhook(rid)],
++            [rid, c.claim, outcome, "200", next_due, eid],
++        )
++    assert await state_store.client.hgetall(keys.webhook(rid)) == before
++    assert await due_score(state_store, rid) == score
+diff --color -ruN -U2 /tmp/das_sdd_snaps/snap-g4-5/das-client-api/design.md .kiro/specs/das-client-api/design.md
+--- /tmp/das_sdd_snaps/snap-g4-5/das-client-api/design.md	2026-10-30 14:28:45
++++ .kiro/specs/das-client-api/design.md	2026-10-30 14:45:11
+@@ -251,5 +251,5 @@
+ - **`purge_request.lua`**: `request_keys(rid)` gains `events` and `webhook` (KEYS[10], KEYS[11]; index keys shift to KEYS[12..21]); also `client_active_remove` and `ZREM` of the outbox.
+ - **`claim_webhook.lua`** (new). KEYS[1] `webhooks:due`; ARGV[1] lease seconds, ARGV[2] request key prefix `das:req:`. Takes the first rid with score ≤ now whose hash exists and is `pending` (others are removed, at most 10 per call), re-scores it to `now + lease`, `HINCRBY claim 1`, and returns `{rid, claim, attempts, url, secret_name, event_id, type, data}` or `{}`.
+-- **`complete_webhook.lua`** (new). KEYS[1] outbox, KEYS[2] webhook hash; ARGV rid, claim, outcome (`delivered` | `retry` | `failed`), `last_status`, `next_due`. Applies only when the hash is `pending` and its `claim` equals ARGV claim (a sender whose lease ran out and was re-claimed is fenced); otherwise returns `{'STALE'}`. Every outcome increments `attempts`.
++- **`complete_webhook.lua`** (new). KEYS[1] outbox, KEYS[2] webhook hash; ARGV rid, claim, outcome (`delivered` | `retry` | `failed`), `last_status`, `next_due`, `event_id`. Applies only when the hash is `pending`, its `claim` equals ARGV claim (a sender whose lease ran out and was re-claimed is fenced) and its `event_id` equals ARGV event_id (a sender whose delivery was reset by a later terminal write, which restarts `claim` at 0, is fenced); otherwise returns `{'STALE'}`. Every outcome increments `attempts`.
+ 
+ ### 4. Reducer (`das/manager/machine.py`) (Req 5.5–5.8)
+diff --color -ruN -U2 /tmp/das_sdd_snaps/snap-g4-5/das-client-api/requirements.md .kiro/specs/das-client-api/requirements.md
+--- /tmp/das_sdd_snaps/snap-g4-5/das-client-api/requirements.md	2026-10-30 14:28:45
++++ .kiro/specs/das-client-api/requirements.md	2026-10-30 14:45:11
+@@ -159,5 +159,5 @@
+ 1. WHEN `create_request` runs for a key with a Webhook_Target, THE script SHALL store the Webhook_Target on the Request record.
+ 2. WHEN `finalize` or `cancel_request` writes a terminal status for a Request with a stored Webhook_Target, THE script SHALL create or reset the Webhook_Delivery (state `pending`, attempts 0, event = the Terminal_Event) and add the Request_ID to the Webhook_Outbox due now, in the same atomic write. A Request without a Webhook_Target SHALL add nothing.
+-3. THE Webhook_Sender SHALL claim a due delivery with an atomic script that re-scores it to `now + webhook.timeout + 5` and increments its `claim` counter, so that at most one sender holds it, a delivery held by a crashed sender becomes due again, and a completion is applied only when it carries the current `claim` value.
++3. THE Webhook_Sender SHALL claim a due delivery with an atomic script that re-scores it to `now + webhook.timeout + 5` and increments its `claim` counter, so that at most one sender holds it, a delivery held by a crashed sender becomes due again, and a completion is applied only when it carries the current `claim` value and the `event_id` of the delivery it claimed (a later terminal write resets the delivery with a new `event_id`, so a claim from before the reset never matches).
+ 4. THE Webhook_Sender SHALL POST the JSON body `{"request_id", "event_id", "type", "data"}` with headers `Content-Type: application/json`, `DAS-Webhook-Id` (`{request_id}:{event_id}`), `DAS-Webhook-Timestamp` (Unix seconds) and `DAS-Webhook-Signature: v1=<hex HMAC-SHA256(secret, "{timestamp}.{body}")>`.
+ 5. WHEN the response status is 2xx, THE Webhook_Sender SHALL mark the delivery `delivered` and remove it from the Webhook_Outbox.
+diff --color -ruN -U2 /tmp/das_sdd_snaps/snap-g4-5/das-client-api/tasks.md .kiro/specs/das-client-api/tasks.md
+--- /tmp/das_sdd_snaps/snap-g4-5/das-client-api/tasks.md	2026-10-30 14:28:45
++++ .kiro/specs/das-client-api/tasks.md	2026-10-30 14:45:11
+@@ -39,5 +39,5 @@
+ - [x] 3. Checkpoint - Ensure all tests pass
+ 
+-- [ ] 4. State_Store: Lua scripts
++- [x] 4. State_Store: Lua scripts
+   - [x] 4.1 Add Lua helpers and the rate-limit script
+     - `_common.lua`: key-name helpers derived from the request key (`key_prefix`, `events_key`, `webhook_key`, `outbox_key`, `active_key`, `idem_key`) and `fmt_double`
+@@ -67,8 +67,8 @@
+     - **Property 6: Event_Stream mirrors persisted changes**
+     - **Validates: Requirements 6.1, 6.2, 6.3, 6.4**
+-  - [ ] 4.8 Add webhook claim and completion scripts
+-    - `claim_webhook.lua` (lease re-score, drop entries without hash), `complete_webhook.lua` (fenced by the `claim` counter); `StateStore.claim_webhook`, `StateStore.complete_webhook`
++  - [x] 4.8 Add webhook claim and completion scripts
++    - `claim_webhook.lua` (lease re-score, drop entries without hash), `complete_webhook.lua` (fenced by the `claim` counter and the delivery `event_id`); `StateStore.claim_webhook`, `StateStore.complete_webhook`
+     - _Requirements: 8.3, 8.5, 8.6_
+-  - [ ] 4.9 Write property test for webhook outbox delivery
++  - [x] 4.9 Write property test for webhook outbox delivery
+     - **Property 7: Webhook outbox delivery**
+     - **Validates: Requirements 8.2, 8.3, 8.5, 8.6, 8.7**

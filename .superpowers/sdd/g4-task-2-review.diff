@@ -1,0 +1,613 @@
+# Group 4 Task 2 review package (no git: diff vs pre-task snapshot)
+
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-2/das/state/__init__.py das/state/__init__.py
+--- /tmp/das_sdd_snaps/snap-g4-2/das/state/__init__.py	2026-10-30 13:36:05
++++ das/state/__init__.py	2026-10-30 13:38:57
+@@ -8,17 +8,19 @@
+     INBOX_UNACKED_EXHAUSTED,
+     LEASE_KIND_INITIAL,
+     LEASE_KIND_TAKEOVER,
+     PURGE_DELETED,
+     PURGE_KEEP,
+     PURGE_STAMPED,
+     AcquireResult,
+     CancelResult,
++    ClientRequestSpec,
+     CreateDeadLetterResult,
++    CreateResult,
+     DeadLetterPage,
+     DiscardResult,
+     InboxEntry,
+     RenewResult,
+     ReplayResult,
+     RequestListItem,
+     RequestPage,
+     StateStore,
+@@ -39,17 +41,19 @@
+     "INBOX_UNACKED_EXHAUSTED",
+     "LEASE_KIND_INITIAL",
+     "LEASE_KIND_TAKEOVER",
+     "PURGE_DELETED",
+     "PURGE_KEEP",
+     "PURGE_STAMPED",
+     "AcquireResult",
+     "CancelResult",
++    "ClientRequestSpec",
+     "CreateDeadLetterResult",
++    "CreateResult",
+     "DeadLetterPage",
+     "DiscardResult",
+     "InboxEntry",
+     "RenewResult",
+     "ReplayResult",
+     "RequestListItem",
+     "RequestPage",
+     "StateStore",
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-2/das/state/lua/_common.lua das/state/lua/_common.lua
+--- /tmp/das_sdd_snaps/snap-g4-2/das/state/lua/_common.lua	2026-10-30 13:36:05
++++ das/state/lua/_common.lua	2026-10-30 13:38:24
+@@ -212,8 +212,16 @@
+ local function idem_key(req_key, fp, h)
+   return key_prefix(req_key) .. ':client:' .. fp .. ':idem:' .. h
+ end
+ 
+ -- Doubles as text that tonumber() and Python float() read back exactly.
+ local function fmt_double(x)
+   return string.format('%.17g', x)
+ end
++
++-- Append one Event to the Request's Event_Stream (Phase 4 Req 6.1, 6.5), capped at
++-- the stored events_max_len (1000 when absent). data_json is stored verbatim.
++-- Returns the new stream ID.
++local function append_event(req_key, event_type, data_json)
++  local n = tonumber(redis.call('HGET', req_key, 'events_max_len')) or 1000
++  return redis.call('XADD', events_key(req_key), 'MAXLEN', n, '*', 'type', event_type, 'data', data_json)
++end
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-2/das/state/lua/create_request.lua das/state/lua/create_request.lua
+--- /tmp/das_sdd_snaps/snap-g4-2/das/state/lua/create_request.lua	2026-10-30 13:36:05
++++ das/state/lua/create_request.lua	2026-10-30 13:38:24
+@@ -1,18 +1,106 @@
+--- create_request: persist a new Pending Request (Req 1.1, 6.1, 15.11).
++-- create_request: persist a new Pending Request (Req 1.1, 6.1, 15.11), idempotent and
++-- quota-checked for Phase 4 clients (Phase 4 Req 3.1, 3.2, 4.2-4.5, 5.4, 6.1, 8.1).
+ -- KEYS[1] request hash, KEYS[2] das:requests:pending, KEYS[3] das:requests:index,
+ -- KEYS[4] das:requests:by_status:Pending
+ -- ARGV[1] request_id, ARGV[2] prompt, ARGV[3] trace_context JSON or '' (optional)
+--- Returns {'OK', created_at} or {'EXISTS'} on Request_ID collision.
++-- Optional ARGV[4..12] ('' or '0' = not set): ARGV[4] client_fp, ARGV[5] budget JSON,
++-- ARGV[6] webhook_url, ARGV[7] webhook_secret_name (the target is stored only when both
++-- are set), ARGV[8] idem_hash, ARGV[9] body_hash (required with idem_hash),
++-- ARGV[10] idem_ttl seconds, ARGV[11] max_active (0 = no quota), ARGV[12] events_max_len.
++-- Order: (1) idempotency record of (client_fp, idem_hash) -> {'REPLAYED', rid} when its
++-- body_hash matches, else {'IDEM_CONFLICT'}; (2) {'EXISTS'} on Request_ID collision;
++-- (3) {'QUOTA_EXCEEDED', max_active} when the Active_Set is full; (4) writes, SADD to the
++-- Active_Set, the idempotency record with TTL, and the request.created Event.
++-- Nothing is written unless the reply is {'OK', created_at}.
++local function opt(i)
++  local v = ARGV[i]
++  if v == nil or v == '' then return nil end
++  return v
++end
++
++local rid = ARGV[1]
++local fp = opt(4)
++local budget_json = opt(5)
++local webhook_url = opt(6)
++local webhook_secret = opt(7)
++local idem_hash = opt(8)
++local body_hash = opt(9)
++local idem_ttl = tonumber(opt(10) or '0')
++local max_active = tonumber(opt(11) or '0')
++local events_max_len = opt(12)
++
++-- Validate every input before the first write (no rollback on runtime errors).
++if budget_json and type(cjson.decode(budget_json)) ~= 'table' then
++  error('create_request: budget must be a JSON object')
++end
++if not max_active or max_active < 0 or max_active ~= math.floor(max_active) then
++  error('create_request: max_active must be an integer >= 0')
++end
++if events_max_len then
++  local n = tonumber(events_max_len)
++  if not n or n < 1 or n ~= math.floor(n) then
++    error('create_request: events_max_len must be an integer >= 1')
++  end
++end
++if idem_hash then
++  if not fp then error('create_request: idem_hash requires client_fp') end
++  if not body_hash then error('create_request: idem_hash requires body_hash') end
++  if not idem_ttl or idem_ttl < 1 or idem_ttl ~= math.floor(idem_ttl) then
++    error('create_request: idem_ttl must be an integer >= 1')
++  end
++end
++
++local idem
++if idem_hash then
++  idem = idem_key(KEYS[1], fp, idem_hash)
++  local rec = redis.call('HMGET', idem, 'rid', 'body_hash')
++  if rec[1] then
++    if rec[2] == body_hash then
++      return { 'REPLAYED', rec[1] }
++    end
++    return { 'IDEM_CONFLICT' }
++  end
++end
++
+ if redis.call('EXISTS', KEYS[1]) == 1 then
+   return { 'EXISTS' }
+ end
++
++local active
++if fp then
++  active = active_key(KEYS[1], fp)
++  if max_active > 0 and redis.call('SCARD', active) >= max_active then
++    return { 'QUOTA_EXCEEDED', max_active }
++  end
++end
++
+ local now, ms = server_time()
+ local created = fmt_seconds(now)
+ redis.call('HSET', KEYS[1], 'status', 'Pending', 'prompt', ARGV[2], 'created_at', created, 'inbox_cursor', '0-0')
+ if ARGV[3] and ARGV[3] ~= '' then
+   redis.call('HSET', KEYS[1], 'trace_context', ARGV[3])
+ end
+-redis.call('ZADD', KEYS[2], created, ARGV[1])
+-index_move(ARGV[1], nil, KEYS[3], ms)
+-index_move(ARGV[1], nil, KEYS[4], ms)
++if fp then
++  redis.call('HSET', KEYS[1], 'client_fp', fp)
++end
++if budget_json then
++  redis.call('HSET', KEYS[1], 'budget', budget_json)
++end
++if webhook_url and webhook_secret then
++  redis.call('HSET', KEYS[1], 'webhook_url', webhook_url, 'webhook_secret_name', webhook_secret)
++end
++if events_max_len then
++  redis.call('HSET', KEYS[1], 'events_max_len', events_max_len)
++end
++redis.call('ZADD', KEYS[2], created, rid)
++index_move(rid, nil, KEYS[3], ms)
++index_move(rid, nil, KEYS[4], ms)
++if active then
++  redis.call('SADD', active, rid)
++end
++if idem then
++  redis.call('HSET', idem, 'rid', rid, 'body_hash', body_hash)
++  redis.call('EXPIRE', idem, idem_ttl)
++end
++append_event(KEYS[1], 'request.created', '{"status":"Pending"}')
+ return { 'OK', created }
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-2/das/state/store.py das/state/store.py
+--- /tmp/das_sdd_snaps/snap-g4-2/das/state/store.py	2026-10-30 13:36:05
++++ das/state/store.py	2026-10-30 13:38:57
+@@ -11,18 +11,19 @@
+ from __future__ import annotations
+ 
+ import json
+ import uuid
+ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+ from dataclasses import dataclass, field
+ from datetime import UTC, datetime, timedelta
+ from enum import StrEnum
+-from typing import Any, Final
++from typing import Any, Final, Literal
+ 
++from das.client.budget import Budget
+ from das.models import (
+     TERMINAL_JOB,
+     TERMINAL_REQUEST,
+     FinalResult,
+     JobPlan,
+     JobRecord,
+     JobResultPayload,
+     JobState,
+@@ -63,16 +64,48 @@
+     "return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end"
+ )
+ _RELEASE_LOCK_LUA: Final = (
+     "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+     "return redis.call('DEL', KEYS[1]) else return 0 end"
+ )
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class ClientRequestSpec:
++    """Phase 4 fields of a new Request (Phase 4 Req 3.1, 4.2, 5.4, 6.5, 8.1).
++
++    ``idempotency_key_hash`` is ``das.client.idempotency.idem_key_hash`` of the
++    Idempotency-Key and needs ``body_hash``. ``max_active_requests == 0`` means no quota.
++    The webhook target is stored only when both webhook fields are set.
++    """
++
++    fingerprint: str
++    budget: Budget | None = None
++    webhook_url: str | None = None
++    webhook_secret_name: str | None = None
++    idempotency_key_hash: str | None = None
++    body_hash: str | None = None
++    idempotency_ttl: int = 86_400
++    max_active_requests: int = 0
++    events_max_len: int = DEFAULT_EVENTS_MAX_LEN
++
++
++CreateOutcome = Literal["created", "replayed", "idempotency_conflict", "quota_exceeded"]
++
++
++@dataclass(frozen=True, slots=True)
++class CreateResult:
++    """Outcome of :meth:`StateStore.submit_request` (Phase 4 Req 3.2, 4.2-4.5)."""
++
++    outcome: CreateOutcome
++    request_id: str | None = None  # created / replayed
++    limit: int | None = None  # quota_exceeded
++
++
+ class StoreStatus(StrEnum):
+     OK = "OK"
+     LEASE_LOST = "LEASE_LOST"
+     REQUEST_TERMINAL = "REQUEST_TERMINAL"  # Manager write on a Completed/Failed/Cancelled Request
+     TERMINAL = "TERMINAL"  # Gateway cancel on a terminal Request (Req 1.8)
+     NOT_FOUND = "NOT_FOUND"
+     HELD = "HELD"  # acquire: another Manager holds an unexpired Lease
+     INVALID_STATE = "INVALID_STATE"  # e.g. commit_plan on a Running Request
+@@ -465,33 +498,86 @@
+ 
+     async def create_request(
+         self, prompt: str, trace_context: TraceContext | None = None
+     ) -> str:
+         """Persist a Pending Request and return its unique Request_ID (Req 1.1).
+ 
+         ``trace_context`` (the Gateway's ``gateway.submit`` Span) is stored on the
+         Request so the owning Manager can parent ``manager.request`` on it (Req 6.1).
+-        The Request is added to the listing index and ``by_status:Pending`` (Req 15.11).
++        The Request is added to the listing index and ``by_status:Pending`` (Req 15.11),
++        and its Event_Stream starts with ``request.created`` (Phase 4 Req 6.1).
+         """
++        result = await self._create(prompt, trace_context, [])
++        assert result.request_id is not None  # no client fields: always created
++        return result.request_id
++
++    async def submit_request(
++        self,
++        prompt: str,
++        client: ClientRequestSpec,
++        trace_context: TraceContext | None = None,
++    ) -> CreateResult:
++        """Create a Request for a Phase 4 client, idempotent and quota-checked in one script.
++
++        An Idempotency_Record of the same client and key replays its Request when the
++        Body_Hash matches and conflicts otherwise; neither writes anything (Phase 4
++        Req 4.2-4.4, 4.7). A replay is answered even when the Active_Set is full (Req 4.5);
++        otherwise a full Active_Set returns ``quota_exceeded`` (Req 3.2). A created Request
++        stores ``client_fp``, the Budget (Req 5.4), the webhook target (Req 8.1) and
++        ``events_max_len`` (Req 6.5), and joins the client's Active_Set (Req 3.1).
++
++        Raises ``ValueError`` when ``idempotency_key_hash`` is set without ``body_hash``.
++        """
++        if client.idempotency_key_hash is not None and client.body_hash is None:
++            raise ValueError("body_hash is required with idempotency_key_hash")
++        budget = client.budget
++        budget_json = (
++            "" if budget is None
++            else json.dumps(budget.to_json_obj(), sort_keys=True, separators=(",", ":"))
++        )
++        extra = [
++            client.fingerprint,
++            budget_json,
++            client.webhook_url or "",
++            client.webhook_secret_name or "",
++            client.idempotency_key_hash or "",
++            client.body_hash or "",
++            int(client.idempotency_ttl),
++            int(client.max_active_requests),
++            int(client.events_max_len),
++        ]
++        return await self._create(prompt, trace_context, extra)
++
++    async def _create(
++        self, prompt: str, trace_context: TraceContext | None, extra: Sequence[Any]
++    ) -> CreateResult:
++        """Run ``create_request.lua``, drawing a new Request_ID on each collision."""
+         ctx = _encode_trace_context(trace_context)
+         for _ in range(self._max_id_attempts):
+             rid = self._id_factory()
+             reply = await self._run(
+                 "create_request",
+                 [
+                     keys.request(rid),
+                     keys.REQUESTS_PENDING,
+                     keys.REQUESTS_INDEX,
+                     keys.requests_by_status(RequestStatus.PENDING.value),
+                 ],
+-                [rid, prompt, ctx],
++                [rid, prompt, ctx, *extra],
+             )
+-            if _s(reply[0]) == "OK":
+-                return rid
++            status = _s(reply[0])
++            if status == "OK":
++                return CreateResult("created", request_id=rid)
++            if status == "REPLAYED":
++                return CreateResult("replayed", request_id=_s(reply[1]))
++            if status == "IDEM_CONFLICT":
++                return CreateResult("idempotency_conflict")
++            if status == "QUOTA_EXCEEDED":
++                return CreateResult("quota_exceeded", limit=int(_s(reply[1])))
+         raise StoreError("could not allocate a unique request_id")
+ 
+     async def get_status(self, rid: str) -> RequestStatus | None:
+         value = await self._r.hget(keys.request(rid), keys.F_STATUS)
+         return None if value is None else RequestStatus(_s(value))
+ 
+     async def get_request_job(
+         self, rid: str, job_id: str | None
+@@ -1435,17 +1521,19 @@
+     "INBOX_UNACKED_EXHAUSTED",
+     "LEASE_KIND_INITIAL",
+     "LEASE_KIND_TAKEOVER",
+     "PURGE_DELETED",
+     "PURGE_KEEP",
+     "PURGE_STAMPED",
+     "AcquireResult",
+     "CancelResult",
++    "ClientRequestSpec",
+     "CreateDeadLetterResult",
++    "CreateResult",
+     "DeadLetterPage",
+     "DiscardResult",
+     "InboxEntry",
+     "RenewResult",
+     "ReplayResult",
+     "RequestListItem",
+     "RequestPage",
+     "StateStore",
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-2/tests/property/test_idempotent_create.py tests/property/test_idempotent_create.py
+--- /tmp/das_sdd_snaps/snap-g4-2/tests/property/test_idempotent_create.py	1970-01-01 08:00:00
++++ tests/property/test_idempotent_create.py	2026-10-30 13:39:21
+@@ -0,0 +1,75 @@
++# Feature: das-client-api, Property 2: Idempotent create
++"""Property 2: Idempotent create.
++
++*For any* set of concurrent submits that share the Idempotency-Key ``"k"``, drawn
++over two client fingerprints and two Body_Hashes, each fingerprint that appears gets
++exactly one Request. Every submit of that fingerprint with the creator's Body_Hash
++returns the creator's Request_ID (``created`` once, ``replayed`` otherwise), every
++submit with the other Body_Hash returns ``idempotency_conflict``, and the
++fingerprint's Active_Set holds exactly that one Request. The same key under two
++fingerprints never collides.
++
++Runs the real ``create_request.lua`` on a fresh in-process fakeredis server per example.
++
++**Validates: Requirements 4.2, 4.3, 4.4, 4.6, 4.7**
++"""
++
++from __future__ import annotations
++
++import asyncio
++
++from fakeredis import FakeServer
++from fakeredis.aioredis import FakeRedis
++from hypothesis import given, note
++from hypothesis import strategies as st
++
++from das.state import ClientRequestSpec, CreateResult, StateStore, keys
++
++FINGERPRINTS = ("fp-a", "fp-b")
++BODY_HASHES = ("body-1", "body-2")
++KEY_HASH = "k"
++
++submits = st.lists(
++    st.tuples(st.sampled_from(FINGERPRINTS), st.sampled_from(BODY_HASHES)), min_size=2, max_size=8
++)
++
++
++async def _run(plan: list[tuple[str, str]]) -> None:
++    redis = FakeRedis(server=FakeServer(), decode_responses=True)
++    try:
++        store = StateStore(redis)
++
++        async def submit(fp: str, body: str) -> CreateResult:
++            spec = ClientRequestSpec(fingerprint=fp, idempotency_key_hash=KEY_HASH, body_hash=body)
++            return await store.submit_request(f"prompt for {body}", spec)
++
++        results = await asyncio.gather(*(submit(fp, body) for fp, body in plan))
++        note(f"results={results}")
++
++        created_rids: list[str] = []
++        for fp in {fp for fp, _ in plan}:
++            mine = [(body, res) for (f, body), res in zip(plan, results, strict=True) if f == fp]
++            creators = [(body, res) for body, res in mine if res.outcome == "created"]
++            assert len(creators) == 1, f"{fp}: expected exactly one created, got {creators}"
++            creator_body, creator = creators[0]
++            assert creator.request_id is not None
++            created_rids.append(creator.request_id)
++            for body, res in mine:
++                if body == creator_body:
++                    assert res.outcome in ("created", "replayed")
++                    assert res.request_id == creator.request_id
++                else:
++                    assert res == CreateResult("idempotency_conflict")
++            assert await redis.smembers(keys.client_active(fp)) == {creator.request_id}
++
++        assert len(set(created_rids)) == len(created_rids)
++        prefix = keys.request("")
++        hashes = [k for k in await redis.keys(f"{prefix}*") if ":" not in k[len(prefix):]]
++        assert sorted(hashes) == sorted(keys.request(r) for r in created_rids)
++    finally:
++        await redis.aclose()
++
++
++@given(submits)
++def test_idempotent_create(plan: list[tuple[str, str]]) -> None:
++    asyncio.run(_run(plan))
+diff --color -ruN -U8 -x __pycache__ /tmp/das_sdd_snaps/snap-g4-2/tests/unit/test_state_phase4_create.py tests/unit/test_state_phase4_create.py
+--- /tmp/das_sdd_snaps/snap-g4-2/tests/unit/test_state_phase4_create.py	1970-01-01 08:00:00
++++ tests/unit/test_state_phase4_create.py	2026-10-30 13:40:18
+@@ -0,0 +1,150 @@
++"""Unit tests for idempotent, quota-checked Request creation and ``request.created``
++(das-client-api task 4.3, Phase 4 Req 3.1, 3.2, 4.2-4.7, 5.4, 6.1, 8.1)."""
++
++from __future__ import annotations
++
++import json
++from decimal import Decimal
++
++import pytest
++
++from das.client.budget import Budget
++from das.client.events import created_event_data
++from das.state import DEFAULT_EVENTS_MAX_LEN, ClientRequestSpec, CreateResult, StateStore, keys
++
++FP = "cbabecbd"
++
++
++async def _request_hashes(client) -> list[str]:
++    prefix = keys.request("")
++    return [k for k in await client.keys(f"{prefix}*") if ":" not in k[len(prefix):]]
++
++
++async def test_create_request_writes_created_event_and_no_client_fields(state_store: StateStore):
++    rid = await state_store.create_request("p")
++    r = state_store.client
++    assert await r.hget(keys.request(rid), keys.F_CLIENT_FP) is None
++    assert await r.hget(keys.request(rid), keys.F_EVENTS_MAX_LEN) is None
++    entries = await r.xrange(keys.events(rid))
++    assert len(entries) == 1
++    _, fields = entries[0]
++    assert fields["type"] == "request.created"
++    assert json.loads(fields["data"]) == created_event_data()
++
++
++async def test_submit_request_created_stores_client_fields(state_store: StateStore):
++    budget = Budget(max_total_tokens=500, max_cost=Decimal("1.50"))
++    res = await state_store.submit_request("p", ClientRequestSpec(fingerprint=FP, budget=budget, events_max_len=7))
++    assert res.outcome == "created"
++    assert res.request_id is not None
++    rid = res.request_id
++    r = state_store.client
++    h = await r.hgetall(keys.request(rid))
++    assert h[keys.F_CLIENT_FP] == FP
++    assert json.loads(h[keys.F_BUDGET]) == budget.to_json_obj()
++    assert h[keys.F_EVENTS_MAX_LEN] == "7"
++    assert h[keys.F_STATUS] == "Pending"
++    assert await r.smembers(keys.client_active(FP)) == {rid}
++    entries = await r.xrange(keys.events(rid))
++    assert [f["type"] for _, f in entries] == ["request.created"]
++
++
++async def test_submit_request_default_events_max_len(state_store: StateStore):
++    res = await state_store.submit_request("p", ClientRequestSpec(fingerprint=FP))
++    assert res.request_id is not None
++    stored = await state_store.client.hget(keys.request(res.request_id), keys.F_EVENTS_MAX_LEN)
++    assert stored == str(DEFAULT_EVENTS_MAX_LEN)
++    assert await state_store.client.hget(keys.request(res.request_id), keys.F_BUDGET) is None
++
++
++async def test_replay_returns_same_request(state_store: StateStore):
++    spec = ClientRequestSpec(fingerprint=FP, idempotency_key_hash="k1", body_hash="b1")
++    first = await state_store.submit_request("p", spec)
++    second = await state_store.submit_request("p", spec)
++    assert first.outcome == "created"
++    assert second == CreateResult("replayed", request_id=first.request_id)
++    r = state_store.client
++    assert len(await _request_hashes(r)) == 1
++    assert await r.scard(keys.client_active(FP)) == 1
++    assert first.request_id is not None
++    assert len(await r.xrange(keys.events(first.request_id))) == 1
++
++
++async def test_conflict_writes_nothing(state_store: StateStore):
++    await state_store.submit_request("p", ClientRequestSpec(fingerprint=FP, idempotency_key_hash="k1", body_hash="b1"))
++    r = state_store.client
++    before = sorted(await r.keys("*"))
++    res = await state_store.submit_request(
++        "other", ClientRequestSpec(fingerprint=FP, idempotency_key_hash="k1", body_hash="b2")
++    )
++    assert res == CreateResult("idempotency_conflict")
++    assert sorted(await r.keys("*")) == before
++    assert len(await _request_hashes(r)) == 1
++
++
++async def test_same_key_under_two_fingerprints_creates_two(state_store: StateStore):
++    def spec(fp: str) -> ClientRequestSpec:
++        return ClientRequestSpec(fingerprint=fp, idempotency_key_hash="k", body_hash="b")
++
++    a = await state_store.submit_request("p", spec("fa"))
++    b = await state_store.submit_request("p", spec("fb"))
++    assert a.outcome == b.outcome == "created"
++    assert a.request_id != b.request_id
++    assert len(await _request_hashes(state_store.client)) == 2
++
++
++async def test_idempotency_record_ttl(state_store: StateStore):
++    spec = ClientRequestSpec(fingerprint=FP, idempotency_key_hash="k1", body_hash="b1", idempotency_ttl=300)
++    res = await state_store.submit_request("p", spec)
++    r = state_store.client
++    idem = keys.client_idem(FP, "k1")
++    ttl = await r.ttl(idem)
++    assert 1 <= ttl <= 300
++    assert await r.hgetall(idem) == {"rid": res.request_id, "body_hash": "b1"}
++
++
++async def test_quota_exceeded_and_replay_still_allowed(state_store: StateStore):
++    def spec(k: str) -> ClientRequestSpec:
++        return ClientRequestSpec(fingerprint=FP, idempotency_key_hash=k, body_hash="b", max_active_requests=2)
++
++    first = await state_store.submit_request("p", spec("k1"))
++    second = await state_store.submit_request("p", spec("k2"))
++    third = await state_store.submit_request("p", spec("k3"))
++    assert first.outcome == second.outcome == "created"
++    assert third == CreateResult("quota_exceeded", limit=2)
++    assert await state_store.submit_request("p", spec("k1")) == CreateResult("replayed", request_id=first.request_id)
++    assert await state_store.client.exists(keys.client_idem(FP, "k3")) == 0
++    assert len(await _request_hashes(state_store.client)) == 2
++
++
++async def test_zero_quota_never_limits(state_store: StateStore):
++    for _ in range(5):
++        res = await state_store.submit_request("p", ClientRequestSpec(fingerprint=FP, max_active_requests=0))
++        assert res.outcome == "created"
++    assert await state_store.client.scard(keys.client_active(FP)) == 5
++
++
++@pytest.mark.parametrize(
++    ("url", "secret", "stored"),
++    [
++        ("https://hooks.example/x", "hook1", True),
++        ("https://hooks.example/x", None, False),
++        (None, "hook1", False),
++        (None, None, False),
++    ],
++)
++async def test_webhook_target_stored_only_when_complete(state_store: StateStore, url, secret, stored):
++    res = await state_store.submit_request(
++        "p", ClientRequestSpec(fingerprint=FP, webhook_url=url, webhook_secret_name=secret)
++    )
++    assert res.request_id is not None
++    got = await state_store.client.hmget(
++        keys.request(res.request_id), [keys.F_WEBHOOK_URL, keys.F_WEBHOOK_SECRET_NAME]
++    )
++    assert got == ([url, secret] if stored else [None, None])
++
++
++async def test_idempotency_key_without_body_hash_is_rejected(state_store: StateStore):
++    with pytest.raises(ValueError, match="body_hash"):
++        await state_store.submit_request("p", ClientRequestSpec(fingerprint=FP, idempotency_key_hash="k1"))
++    assert await state_store.client.keys("*") == []
+diff --color -ruN -U2 /tmp/das_sdd_snaps/snap-g4-2/das-client-api/tasks.md .kiro/specs/das-client-api/tasks.md
+--- /tmp/das_sdd_snaps/snap-g4-2/das-client-api/tasks.md	2026-10-30 13:36:05
++++ .kiro/specs/das-client-api/tasks.md	2026-10-30 13:41:55
+@@ -48,10 +48,10 @@
+     - **Property 1: Token bucket bound**
+     - **Validates: Requirements 2.3, 2.4**
+-  - [ ] 4.3 Extend `create_request.lua` and `StateStore.create_request`
++  - [x] 4.3 Extend `create_request.lua` and `StateStore.create_request`
+     - Idempotency check → quota check → writes (`client_fp`, `budget`, webhook target, `SADD` active, idem record with TTL, `request.created` event); returns `OK` / `REPLAYED` / `IDEM_CONFLICT` / `QUOTA_EXCEEDED`
+     - `_common.lua`: `append_event`
+     - `ClientRequestSpec`, `CreateResult` and `StateStore.submit_request` in `das/state/store.py`; `create_request(prompt)` callers keep working
+     - _Requirements: 3.1, 3.2, 4.2, 4.3, 4.4, 4.5, 5.4, 6.1, 8.1_
+-  - [ ] 4.4 Write property test for idempotent create
++  - [x] 4.4 Write property test for idempotent create
+     - **Property 2: Idempotent create**
+     - **Validates: Requirements 4.2, 4.3, 4.4, 4.6, 4.7**

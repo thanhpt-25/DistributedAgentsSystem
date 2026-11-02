@@ -1,0 +1,41 @@
+{
+  "rabbitmq_version": "4.1.0",
+  "vhosts": [{ "name": "/" }],
+  "exchanges": [
+    { "name": "das.jobs", "vhost": "/", "type": "direct", "durable": true, "auto_delete": false, "internal": false, "arguments": {} },
+    { "name": "das.dlx", "vhost": "/", "type": "fanout", "durable": true, "auto_delete": false, "internal": false, "arguments": {} }
+  ],
+  "queues": [
+    { "name": "das.results", "vhost": "/", "durable": true, "auto_delete": false, "arguments": { "x-queue-type": "quorum" } },
+    { "name": "das.dlq", "vhost": "/", "durable": true, "auto_delete": false, "arguments": { "x-queue-type": "quorum" } },
+    { "name": "das.dlq.events", "vhost": "/", "durable": true, "auto_delete": false, "arguments": { "x-queue-type": "quorum" } },
+    { "name": "das.jobs.research", "vhost": "/", "durable": true, "auto_delete": false, "arguments": { "x-queue-type": "quorum", "x-dead-letter-exchange": "das.dlx" } },
+    { "name": "das.jobs.summarize", "vhost": "/", "durable": true, "auto_delete": false, "arguments": { "x-queue-type": "quorum", "x-dead-letter-exchange": "das.dlx" } },
+    { "name": "das.jobs.code-review", "vhost": "/", "durable": true, "auto_delete": false, "arguments": { "x-queue-type": "quorum", "x-dead-letter-exchange": "das.dlx" } }
+  ],
+  "bindings": [
+    { "source": "das.dlx", "vhost": "/", "destination": "das.dlq", "destination_type": "queue", "routing_key": "", "arguments": {} },
+    { "source": "das.dlx", "vhost": "/", "destination": "das.dlq.events", "destination_type": "queue", "routing_key": "", "arguments": {} },
+    { "source": "das.jobs", "vhost": "/", "destination": "das.jobs.research", "destination_type": "queue", "routing_key": "research", "arguments": {} },
+    { "source": "das.jobs", "vhost": "/", "destination": "das.jobs.summarize", "destination_type": "queue", "routing_key": "summarize", "arguments": {} },
+    { "source": "das.jobs", "vhost": "/", "destination": "das.jobs.code-review", "destination_type": "queue", "routing_key": "code-review", "arguments": {} }
+  ],
+  "policies": [
+    {
+      "vhost": "/",
+      "name": "das-jobs",
+      "pattern": "^das\\.jobs\\.",
+      "apply-to": "queues",
+      "priority": 0,
+      "definition": { "delivery-limit": 2, "dead-letter-exchange": "das.dlx" }
+    },
+    {
+      "vhost": "/",
+      "name": "das-dlq",
+      "pattern": "^das\\.dlq$",
+      "apply-to": "queues",
+      "priority": 0,
+      "definition": { "delivery-limit": -1 }
+    }
+  ]
+}

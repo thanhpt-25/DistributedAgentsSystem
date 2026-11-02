@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"] # every branch; tag pushes do not trigger
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.13.6"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  fast:
+    name: Fast_Job
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: uv sync --locked
+        id: install
+        run: uv sync --locked
+
+      - name: uv run ruff check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: uv run ruff check
+
+      - name: uv run mypy
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: uv run mypy
+
+      - name: uv run lint-imports
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: uv run lint-imports
+
+      # Hypothesis profile "default" is used on purpose: the "ci" profile sets
+      # derandomize=True, which overrides --hypothesis-seed. The .hypothesis
+      # directory is never cached, so every run starts from the logged seed.
+      - name: uv run pytest tests/unit tests/property
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          HYPOTHESIS_SEED="$(od -An -N4 -tu4 /dev/urandom | tr -d ' \n')"
+          echo "Hypothesis seed: ${HYPOTHESIS_SEED}"
+          echo "Reproduce locally: uv run pytest tests/unit tests/property --hypothesis-seed=${HYPOTHESIS_SEED}"
+          export PYTEST_ADDOPTS="--hypothesis-seed=${HYPOTHESIS_SEED}"
+          uv run pytest tests/unit tests/property
+
+  integration:
+    name: Integration_Job
+    needs: fast
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DAS_REQUIRE_DOCKER: "1" # a Docker-related skip is reported as a failure
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: uv sync --locked
+        id: install
+        run: uv sync --locked
+      - name: uv run pytest tests/integration --ignore=tests/integration/e2e
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 15
+        run: uv run pytest tests/integration --ignore=tests/integration/e2e
+      # Repeat_Run_Check: runs even when the suite step above fails. With -v the
+      # log shows PASSED/FAILED for each of the 20 runs ([k-20]).
+      - name: uv run pytest "tests/integration/test_rabbitmq_broker.py::test_reconnect_restores_subscriptions" --count 20 -v
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 12
+        run: uv run pytest "tests/integration/test_rabbitmq_broker.py::test_reconnect_restores_subscriptions" --count 20 -v
+
+  e2e:
+    name: E2E_Job
+    needs: fast
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DAS_REQUIRE_DOCKER: "1" # a Docker-related skip is reported as a failure
+    # DAS_E2E_LOG_DIR is set per step: the runner context is not available in
+    # jobs.<job_id>.env, only in steps.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: uv sync --locked
+        id: install
+        run: uv sync --locked
+      - name: Check Docker Compose >= 2.30
+        run: |
+          raw="$(docker compose version --short 2>/dev/null || docker compose version 2>/dev/null || true)"
+          echo "Docker Compose version found: ${raw:-unknown}"
+          version="$(printf '%s\n' "$raw" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true)"
+          if [ -z "$version" ]; then
+            echo "::error::Docker Compose >= 2.30 is required (found: unknown)"
+            exit 1
+          fi
+          major="${version%%.*}"
+          rest="${version#*.}"
+          minor="${rest%%.*}"
+          if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 30 ]; }; then
+            echo "::error::Docker Compose >= 2.30 is required (found: ${version})"
+            exit 1
+          fi
+          echo "Docker Compose ${version} satisfies >= 2.30"
+      - name: uv run pytest tests/integration/e2e
+        timeout-minutes: 24
+        env:
+          DAS_E2E_LOG_DIR: ${{ runner.temp }}/e2e-logs # fixtures write compose logs here
+        run: uv run pytest tests/integration/e2e
+      # Fallback for when pytest was stopped before the fixtures' finally blocks
+      # ran: docker ps -a also lists stopped containers of each Compose project.
+      - name: Collect container logs
+        if: ${{ failure() || cancelled() }}
+        env:
+          DAS_E2E_LOG_DIR: ${{ runner.temp }}/e2e-logs
+        run: |
+          mkdir -p "$DAS_E2E_LOG_DIR"
+          for project in das-e2e das-e2e-obs; do
+            for id in $(docker ps -aq --filter "label=com.docker.compose.project=${project}"); do
+              name="$(docker inspect --format '{{.Name}}' "$id" | tr -d '/')"
+              docker logs --timestamps "$id" > "${DAS_E2E_LOG_DIR}/container-${project}-${name}.log" 2>&1 || true
+            done
+          done
+          ls -la "$DAS_E2E_LOG_DIR"
+      - name: Upload container logs
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-logs
+          if-no-files-found: warn
+      - name: Tear down Compose stacks
+        if: ${{ always() }}
+        run: |
+          for project in das-e2e das-e2e-obs; do
+            docker compose -p "$project" down -v --remove-orphans || true
+            docker ps -aq --filter "label=com.docker.compose.project=${project}" | xargs -r docker rm -f || true
+            docker volume ls -q --filter "label=com.docker.compose.project=${project}" | xargs -r docker volume rm || true
+          done

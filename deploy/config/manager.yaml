@@ -1,0 +1,42 @@
+# Manager_Agent sample Agent_Config (mounted at /etc/das/config.yaml).
+#
+# Supplied by the environment (see deploy/docker-compose.yml and .env.example):
+#   DAS__RABBITMQ__URL             amqp://<user>:<pass>@<host>:5672/
+#   DAS__RABBITMQ__MANAGEMENT_URL  http://<host>:15672 (das-jobs policy)
+#   DAS__REDIS__URL                redis://<host>:6379/0
+#   DAS__GRPC__ADVERTISE_HOST      this container's reachable host name (per replica)
+#   DAS__LLM__PROVIDER, DAS__LLM__MODEL, and DAS__LLM__API_KEY or DAS__LLM__BASE_URL
+role: manager
+health_port: 8081
+
+transports:
+  jobs: rabbitmq
+  control: grpc
+
+grpc:
+  bind: "0.0.0.0:50051"
+  advertise_port: 50051
+
+llm:
+  temperature: 0.2
+  max_output_tokens: 4096
+  timeout: 60
+  retry_count: 3
+
+limits:
+  max_prompt_length: 32000
+  max_jobs: 10
+  planning_retries: 2
+  lease_duration: 30
+  # das-jobs policy delivery-limit = max_attempts - 1 (deploy/rabbitmq/definitions.json uses 2).
+  max_attempts: 3
+  base_backoff: 2
+  max_backoff: 60
+  capability_wait: 60
+  job_timeout: 300
+  heartbeat_interval: 5
+  # Keep below stop_grace_period in docker-compose.yml.
+  shutdown_timeout: 30
+  request_reply_timeout: 30
+  startup_timeout: 60
+  startup_retry_interval: 2

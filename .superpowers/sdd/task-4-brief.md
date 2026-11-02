@@ -1,0 +1,210 @@
+### Task 4: Webhook signing and retry schedule (spec task 1.5)
+
+**Files:**
+- Create: `das/client/webhook.py`
+- Create: `tests/fixtures/webhook_vectors.json`
+- Test: `tests/unit/test_client_webhook.py`
+
+**Interfaces:**
+- Consumes: `das.manager.backoff.backoff(attempt: int, base: float, max_backoff: float) -> float`.
+- Produces:
+  - `SIGNATURE_PREFIX = "v1="`
+  - `webhook_body(request_id: str, event_id: str, event_type: str, data: dict[str, Any]) -> bytes`
+  - `sign(secret: bytes, timestamp: int, body: bytes) -> str`
+  - `verify(secret: bytes, timestamp: str, body: bytes, signature: str, now: float, tolerance: int) -> bool`
+  - `next_due(now: float, attempts: int, base: float, max_backoff: float, rand: float) -> float`
+  - `tests/fixtures/webhook_vectors.json`, reused by the client package in spec task 9.5.
+
+- [ ] **Step 1: Create the test vectors**
+
+Create `tests/fixtures/webhook_vectors.json`. The signatures were computed as `"v1=" + hex(HMAC-SHA256(secret_utf8, f"{timestamp}." + body_utf8))`:
+
+```json
+{
+  "description": "Webhook signature vectors (Phase 4 Req 8.4, 9.7). Shared by das.client.webhook and das_client tests.",
+  "vectors": [
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": 1793000000,
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=8847d8f3b0002096373ae63db4f4d3fc79ffa69566fb6d1d53baf77ed40095e7"
+    },
+    {
+      "secret": "whsec_test_0123456789",
+      "timestamp": 1793000000,
+      "body": "",
+      "signature": "v1=4de65a69d4ed28cb8f56a4fdec85f30f14bc6d4ff5599e5ba20cb9df88b0ffdd"
+    },
+    {
+      "secret": "another-secret",
+      "timestamp": 1793000000,
+      "body": "{\"data\":{\"status\":\"Completed\"},\"event_id\":\"1793000000000-0\",\"request_id\":\"r1\",\"type\":\"request.completed\"}",
+      "signature": "v1=f36ca3883cb4aa25abbeefd2dd01146187b8eade8349bf51ae10af684724e464"
+    }
+  ]
+}
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Create `tests/unit/test_client_webhook.py`:
+
+```python
+"""Webhook signing, verification and retry schedule (Phase 4 Req 8.4, 8.6, 9.7)."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from das.client.webhook import next_due, sign, verify, webhook_body
+
+VECTORS: list[dict[str, Any]] = json.loads(
+    (Path(__file__).resolve().parents[1] / "fixtures" / "webhook_vectors.json").read_text()
+)["vectors"]
+SECRET = b"whsec_test_0123456789"
+TS = 1793000000
+BODY = b'{"data":{"status":"Completed"},"event_id":"1793000000000-0","request_id":"r1","type":"request.completed"}'
+
+
+@pytest.mark.parametrize("v", VECTORS)
+def test_sign_matches_vectors(v: dict[str, Any]) -> None:
+    assert sign(v["secret"].encode(), v["timestamp"], v["body"].encode()) == v["signature"]
+
+
+@pytest.mark.parametrize("v", VECTORS)
+def test_verify_accepts_vectors(v: dict[str, Any]) -> None:
+    ts = v["timestamp"]
+    assert verify(v["secret"].encode(), str(ts), v["body"].encode(), v["signature"], now=ts, tolerance=300)
+
+
+def test_webhook_body_is_canonical_json() -> None:
+    assert webhook_body("r1", "1793000000000-0", "request.completed", {"status": "Completed"}) == BODY
+
+
+def test_verify_rejects_changes() -> None:
+    good = sign(SECRET, TS, BODY)
+    assert verify(SECRET, str(TS), BODY, good, now=TS, tolerance=300)
+    assert not verify(SECRET, str(TS), BODY + b" ", good, now=TS, tolerance=300)
+    assert not verify(SECRET, str(TS + 1), BODY, good, now=TS, tolerance=300)
+    assert not verify(b"wrong", str(TS), BODY, good, now=TS, tolerance=300)
+    assert not verify(SECRET, str(TS), BODY, good.removeprefix("v1="), now=TS, tolerance=300)
+    flipped = good[:-1] + ("1" if good[-1] == "0" else "0")
+    assert not verify(SECRET, str(TS), BODY, flipped, now=TS, tolerance=300)
+
+
+def test_verify_tolerance_window() -> None:
+    good = sign(SECRET, TS, BODY)
+    assert verify(SECRET, str(TS), BODY, good, now=TS + 300, tolerance=300)
+    assert verify(SECRET, str(TS), BODY, good, now=TS - 300, tolerance=300)
+    assert not verify(SECRET, str(TS), BODY, good, now=TS + 301, tolerance=300)
+    assert not verify(SECRET, str(TS), BODY, good, now=TS - 301, tolerance=300)
+
+
+@pytest.mark.parametrize("ts", ["", "12a", "+1793000000", " 1793000000", "1793000000 ", "1.5", "١٢٣"])
+def test_verify_rejects_malformed_timestamps(ts: str) -> None:
+    assert not verify(SECRET, ts, BODY, sign(SECRET, TS, BODY), now=TS, tolerance=300)
+
+
+def test_verify_handles_non_ascii_signature() -> None:
+    assert not verify(SECRET, str(TS), BODY, "v1=é", now=TS, tolerance=300)
+
+
+@pytest.mark.parametrize(("rand", "delay"), [(0.0, 24.0), (0.5, 30.0), (1.0, 36.0)])
+def test_next_due_jitter(rand: float, delay: float) -> None:
+    assert next_due(1000.0, 1, 30.0, 3600.0, rand) == pytest.approx(1000.0 + delay)
+
+
+def test_next_due_is_capped_by_max_backoff() -> None:
+    assert next_due(1000.0, 10, 30.0, 3600.0, 1.0) == pytest.approx(1000.0 + 3600.0 * 1.2)
+
+
+@pytest.mark.parametrize("rand", [-0.1, 1.1])
+def test_next_due_rejects_rand_out_of_range(rand: float) -> None:
+    with pytest.raises(ValueError):
+        next_due(1000.0, 1, 30.0, 3600.0, rand)
+```
+
+- [ ] **Step 3: Run test to verify it fails**
+
+Run: `uv run pytest tests/unit/test_client_webhook.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'das.client.webhook'`
+
+- [ ] **Step 4: Write the implementation**
+
+Create `das/client/webhook.py`:
+
+```python
+"""Webhook body, signing and retry schedule (Phase 4 Req 8.4, 8.6, 9.7). Pure.
+
+The Client_Package keeps a copy of :func:`sign` and :func:`verify`; both copies are
+checked against ``tests/fixtures/webhook_vectors.json`` so they cannot drift.
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+from typing import Any, Final
+
+from das.manager.backoff import backoff
+
+SIGNATURE_PREFIX: Final = "v1="
+#: Retry delays are ``backoff(attempts) * (JITTER_LOW + JITTER_SPAN * rand)``: 0.8x to 1.2x.
+JITTER_LOW: Final = 0.8
+JITTER_SPAN: Final = 0.4
+
+
+def webhook_body(request_id: str, event_id: str, event_type: str, data: dict[str, Any]) -> bytes:
+    """Canonical JSON body of a Webhook_Delivery (Req 8.4)."""
+    obj = {"request_id": request_id, "event_id": event_id, "type": event_type, "data": data}
+    text = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    return text.encode("utf-8")
+
+
+def sign(secret: bytes, timestamp: int, body: bytes) -> str:
+    """``DAS-Webhook-Signature`` value: ``v1=`` + hex HMAC-SHA256 of ``"{timestamp}.{body}"``."""
+    mac = hmac.new(secret, f"{timestamp}.".encode("ascii") + body, hashlib.sha256)
+    return SIGNATURE_PREFIX + mac.hexdigest()
+
+
+def verify(secret: bytes, timestamp: str, body: bytes, signature: str, now: float, tolerance: int) -> bool:
+    """True iff ``signature`` signs ``body`` at ``timestamp``, and ``timestamp`` is near ``now``.
+
+    "Near" means at most ``tolerance`` seconds away. ``timestamp`` is the header text and
+    must be ASCII digits only. The comparison runs in constant time.
+    """
+    if not (timestamp.isascii() and timestamp.isdigit()):
+        return False
+    ts = int(timestamp)
+    if abs(now - ts) > tolerance:
+        return False
+    expected = sign(secret, ts, body).encode("ascii")
+    return hmac.compare_digest(expected, signature.encode("utf-8", "surrogatepass"))
+
+
+def next_due(now: float, attempts: int, base: float, max_backoff: float, rand: float) -> float:
+    """Next attempt time after ``attempts`` failed attempts (Req 8.6). ``rand`` is in [0, 1]."""
+    if not 0.0 <= rand <= 1.0:
+        raise ValueError(f"rand must be in [0, 1], got {rand}")
+    return now + backoff(attempts, base, max_backoff) * (JITTER_LOW + JITTER_SPAN * rand)
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `uv run pytest tests/unit/test_client_webhook.py -v`
+Expected: PASS (all tests)
+
+- [ ] **Step 6: Lint and type-check**
+
+Run: `uv run ruff check das/client tests/unit/test_client_webhook.py && uv run mypy`
+Expected: `All checks passed!` and `Success: no issues found`
+
+- [ ] **Step 7: Tick the spec task**
+
+In `.kiro/specs/das-client-api/tasks.md` tick `1.5 Implement webhook signing` and the parent `1. Pure core das/client`.
+
+---
+

@@ -1,0 +1,26 @@
+// gRPC control plane for the Distributed Agent System (Requirement 8.3).
+//
+// Regenerate the Python stubs from the repository root with:
+//   python -m grpc_tools.protoc -I das/transport/proto \
+//     --python_out=das/transport/proto --pyi_out=das/transport/proto \
+//     --grpc_python_out=das/transport/proto das/transport/proto/das.proto
+// then make the import in das_pb2_grpc.py package-relative
+// (`from . import das_pb2 as das__pb2`).
+syntax = "proto3";
+
+package das.v1;
+
+// MessageCodec bytes; identical to what the RabbitMQ adapter sends (Req 9.3).
+message Frame { bytes envelope = 1; }
+
+message Ack {
+  bool ok = 1;
+  string error = 2;
+}
+
+service AgentControl {
+  // publish: one-way, acknowledged when the handler settles the delivery.
+  rpc Send(Frame) returns (Ack);
+  // request-reply: the handler's return value is the reply Frame.
+  rpc Call(Frame) returns (Frame);
+}
