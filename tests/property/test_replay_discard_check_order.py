@@ -46,6 +46,12 @@ class Scenario:
     job_attempt: int
     attempt_delta: int | None  # record attempt = job_attempt + delta; None = unknown
     lease: str  # "none", "expired", "active"
+    request_error: str = "none"  # error stored on a Failed Request: "none" (ordinary) or a budget stop
+
+
+def stored_error(sc: Scenario) -> str:
+    """The error a Failed Request of the scenario carries."""
+    return "job a failed" if sc.request_error == "none" else sc.request_error
 
 
 def biased(passing: st.SearchStrategy, failing: st.SearchStrategy) -> st.SearchStrategy:
@@ -72,6 +78,7 @@ scenarios = st.builds(
     job_attempt=st.integers(min_value=1, max_value=3),
     attempt_delta=biased(st.just(0), st.none() | st.sampled_from([-1, 0, 1])),
     lease=st.sampled_from(["none", "expired", "active"]),
+    request_error=biased(st.just("none"), st.sampled_from(["budget_exceeded", "budget_unenforceable"])),
 )
 
 
@@ -95,7 +102,7 @@ async def build(store: StateStore, sc: Scenario) -> str:
             )
             assert (await store.apply_transition(lease, TransitionBatch(jobs={"a": job}))).ok
         if sc.request == "Failed":
-            assert (await store.fail_request(lease, "job a failed", FINAL)).ok
+            assert (await store.fail_request(lease, stored_error(sc), FINAL)).ok
         elif sc.request != "Running":
             await r.hset(keys.request(rid), "status", sc.request)
         await r.delete(keys.lease(rid))
@@ -130,7 +137,7 @@ def model_inputs(sc: Scenario):
     )
     if sc.request in ("none", "missing"):
         return rec, None, None, sc.lease == "active"
-    req = RequestView(RequestStatus(sc.request))
+    req = RequestView(RequestStatus(sc.request), stored_error(sc) if sc.request == "Failed" else None)
     job = None
     if sc.job not in ("none", "missing"):
         job = JobRecord(job=PLAN.jobs[0], state=JobState(sc.job), attempt=sc.job_attempt)

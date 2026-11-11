@@ -29,6 +29,7 @@ SCRIPT_NAMES: Final = (
     "rate_check",
     "claim_webhook",
     "complete_webhook",
+    "stream_acquire",
 )
 
 

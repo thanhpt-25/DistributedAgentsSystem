@@ -35,6 +35,7 @@ ReplayOutcome = Literal[
     "not_replayable",
     "request_gone",
     "request_state",
+    "budget_exceeded",
     "job_state",
     "stale_attempt",
     "lease_held",
@@ -48,10 +49,16 @@ REPLAY_CHECK_ORDER: tuple[ReplayOutcome, ...] = (
     "not_replayable",
     "request_gone",
     "request_state",
+    "budget_exceeded",
     "job_state",
     "stale_attempt",
     "lease_held",
 )
+
+#: Errors a Request stores when its budget stopped it (``das.manager.machine.BUDGET_EXCEEDED`` and
+#: ``BUDGET_UNENFORCEABLE``; ops cannot import the Manager). Replaying such a Request would spend the
+#: budget again, so it is refused (Phase 4 Req 5.10).
+BUDGET_FAILURES: frozenset[str] = frozenset({"budget_exceeded", "budget_unenforceable"})
 
 _REPLAYABLE_REQUEST: frozenset[RequestStatus] = frozenset(
     {RequestStatus.RUNNING, RequestStatus.FAILED}
@@ -72,9 +79,13 @@ class DeadLetterView(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RequestView:
-    """Current state of the Request referenced by a Dead_Letter_Record."""
+    """Current state of the Request referenced by a Dead_Letter_Record.
+
+    ``error`` is the stored error of a Failed Request (``None`` when it has none).
+    """
 
     status: RequestStatus
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +133,8 @@ def decide_replay(
         return ReplayDecision("request_gone")
     if req.status not in _REPLAYABLE_REQUEST:
         return ReplayDecision("request_state", str(req.status))
+    if req.status is RequestStatus.FAILED and req.error in BUDGET_FAILURES:
+        return ReplayDecision("budget_exceeded")
     if job is None or job.state is not JobState.FAILED:
         return ReplayDecision("job_state", None if job is None else str(job.state))
     if rec.attempt is None or rec.attempt != job.attempt:

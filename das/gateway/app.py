@@ -28,19 +28,23 @@ from __future__ import annotations
 
 import asyncio
 import heapq
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Final, TypeVar
 
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, SecretStr
 from redis.asyncio import Redis
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from das.client.budget import BudgetError, budget_status, budget_view, resolve_budget
+from das.client.settings import ClientSettings
 from das.clock import Clock, SystemClock
 from das.codec import new_message
+from das.config.schema import ClientLimitsConfig, EventsConfig, WebhookConfig
 from das.gateway.admin import (
     create_admin_router,
     install_admin,
@@ -49,9 +53,26 @@ from das.gateway.admin import (
 )
 from das.gateway.auth import api_key_auth
 from das.gateway.cursor_key import CursorKeyProvider
+from das.gateway.events import register_events_route
 from das.gateway.http_metrics import HttpMetricsMiddleware, route_templates
+from das.gateway.limits import rate_limit
 from das.gateway.listing import register_list_route
+from das.gateway.openapi import (
+    CANCEL_RESPONSES,
+    QUERY_RESPONSES,
+    SUBMIT_RESPONSES,
+    V1_RESPONSES,
+    published_schema,
+)
+from das.gateway.submit import (
+    InvalidRequest,
+    above_limit_body,
+    client_spec,
+    parse_budget,
+    parse_idempotency_key,
+)
 from das.gateway.validation import validate_prompt
+from das.gateway.webhooks import webhook_senders
 from das.models import ControlPayload, RequestStatus
 from das.models.agent import AgentRecord
 from das.observability import bind_request, get_logger
@@ -100,6 +121,8 @@ class StoreUnavailable(Exception):
 
 class SubmitBody(BaseModel):
     prompt: str
+    #: Raw ``budget`` value: parsed by ``parse_budget`` so a bad field is a 400 naming it (Phase 4 Req 5.1).
+    budget: Any = None
 
 
 async def _bounded(op: Awaitable[T], timeout: float = STORE_TIMEOUT) -> T:
@@ -151,7 +174,9 @@ def request_view(
 
     Every v1 field keeps its name, type and meaning (Req 9.13, 19.6); Phase 2 adds
     ``token_usage``, ``estimated_cost`` (null without a Price_Table, Req 10.7) and
-    ``replay_history``. ``snap`` must be loaded with ``include_usage=True``.
+    ``replay_history``. Phase 4 adds ``budget`` (Req 5.9) and ``webhook`` (Req 8.9), both ``null``
+    when the Request has none. ``snap`` must be loaded with ``include_usage=True`` and
+    ``include_client=True``.
     """
     body: dict[str, Any] = {
         "request_id": snap.request_id,
@@ -172,6 +197,20 @@ def request_view(
         else None
     )
     body["replay_history"] = [e.model_dump(mode="json") for e in snap.replay_history]
+    body["budget"] = (
+        budget_view(snap.budget, budget_status(records, snap.budget, price_table))
+        if snap.budget is not None
+        else None
+    )
+    body["webhook"] = (
+        {
+            "state": snap.webhook.state,
+            "attempts": snap.webhook.attempts,
+            "last_status": snap.webhook.last_status,
+        }
+        if snap.webhook is not None
+        else None
+    )
     return body
 
 
@@ -209,6 +248,11 @@ def create_app(
     clock: Clock | None = None,
     cursor_secret: SecretStr | str | None = None,
     agent_id: str | None = None,
+    client_limits: ClientLimitsConfig | None = None,
+    events: EventsConfig | None = None,
+    events_client: Redis | None = None,
+    webhook: WebhookConfig | None = None,
+    webhook_secrets: Mapping[str, SecretStr] | None = None,
 ) -> FastAPI:
     """Build the Gateway_API with injected dependencies.
 
@@ -222,6 +266,16 @@ def create_app(
     it the key shared at ``das:gateway:cursor_key`` is used (design D10). The
     provider is exposed as ``app.state.cursor_keys``. ``agent_id`` is the Gateway's
     own agent ID: drain/undrain naming it is rejected with 409 (Req 17.11).
+    ``client_limits`` (``client_limits`` config, Phase 4 Req 1) sets each key's rate limit; without
+    it the defaults apply. Every ``/v1`` and admin call takes one token after key auth (Req 2.1, 2.5).
+    ``events`` (``events`` config) sets the Event_Stream length stored with each new Request (Req 6.5)
+    and the SSE limits (Req 7.5, 7.7). ``events_client`` is the dedicated Redis client for the SSE
+    endpoint's blocking reads (its socket timeout must exceed the block time); without one the
+    store's client is used. The replica's open-stream gate is ``app.state.event_gate``.
+    ``webhook`` and ``webhook_secrets`` (``webhook`` config and ``webhook_secrets``, Phase 4 Req 8)
+    configure the Webhook_Sender, whose ``webhook.workers`` tasks run for the app's lifespan, so the
+    server must run ASGI lifespan events for deliveries to be sent; secrets are looked up by name at
+    send time (Req 8.8).
     """
     tracer = tracer or NoopTracer()
     clock = clock or SystemClock()
@@ -243,7 +297,23 @@ def create_app(
     check = health_check or default_health
     api_keys = tuple(api_keys)
     admin_api_keys = tuple(admin_api_keys)
-    app = FastAPI(title="das-gateway", docs_url=None, redoc_url=None, openapi_url=None)
+    webhook_config = webhook if webhook is not None else WebhookConfig()
+    senders_secrets = webhook_secrets if webhook_secrets is not None else {}
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        async with webhook_senders(
+            store=store,
+            secrets=senders_secrets,
+            config=webhook_config,
+            clock=clock,
+            metrics=lambda: metrics,
+        ):
+            yield
+
+    app = FastAPI(
+        title="das-gateway", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -277,39 +347,104 @@ def create_app(
             except Exception as exc:
                 log.warning("cancel_request notify failed", error=type(exc).__name__)
 
-    v1 = APIRouter(prefix="/v1", dependencies=[Depends(api_key_auth(api_keys, admin_api_keys))])
+    limits_config = client_limits if client_limits is not None else ClientLimitsConfig()
+    events_config = events if events is not None else EventsConfig()
+    enforce_rate = rate_limit(store=store, bounded=_bounded, metrics=lambda: metrics)
+    v1 = APIRouter(
+        prefix="/v1",
+        dependencies=[
+            Depends(api_key_auth(api_keys, admin_api_keys, limits_config)),
+            Depends(enforce_rate),
+        ],
+        responses=V1_RESPONSES,
+    )
 
-    @v1.post("/requests", status_code=status.HTTP_202_ACCEPTED)
-    async def submit(body: SubmitBody) -> Any:
+    @v1.post("/requests", status_code=status.HTTP_202_ACCEPTED, responses=SUBMIT_RESPONSES)
+    async def submit(
+        request: Request,
+        body: SubmitBody,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> Any:
+        settings: ClientSettings = request.state.client_settings
         with tracer.span("gateway.submit") as span:
             problem = validate_prompt(body.prompt, max_prompt_length)
             if problem is not None:
                 span.fail(problem.error)
                 return _error(status.HTTP_400_BAD_REQUEST, problem.to_body())
-            # Persisted in the same atomic write that creates the Request (Req 6.1).
-            rid = await _bounded(
-                store.create_request(body.prompt, trace_context=_store_context(tracer))
+            try:
+                key = parse_idempotency_key(idempotency_key)
+                client_budget = parse_budget(body.budget)
+                effective_budget = resolve_budget(client_budget, settings.default_budget)
+            except InvalidRequest as exc:
+                span.fail("invalid_request")
+                return _error(status.HTTP_400_BAD_REQUEST, exc.to_body())
+            except BudgetError as exc:
+                metrics.client_rejected("budget_above_limit")
+                span.fail("budget_above_limit")
+                return _error(status.HTTP_400_BAD_REQUEST, above_limit_body(exc))
+            spec = client_spec(
+                settings,
+                prompt=body.prompt,
+                effective_budget=effective_budget,
+                client_budget=client_budget,
+                idempotency_key=key,
+                limits=limits_config,
+                events=events_config,
             )
+            # Persisted in the same atomic write that creates the Request (Req 6.1); the same
+            # script answers a replay or a quota rejection without writing (Req 4.2-4.5, 3.2).
+            result = await _bounded(
+                store.submit_request(body.prompt, spec, trace_context=_store_context(tracer))
+            )
+            if result.outcome == "quota_exceeded":
+                metrics.client_rejected("quota_exceeded")
+                span.fail("quota_exceeded")
+                return _error(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    {"error": "quota_exceeded", "limit": result.limit},
+                )
+            if result.outcome == "idempotency_conflict":
+                metrics.client_rejected("idempotency_key_reused")
+                span.fail("idempotency_key_reused")
+                return _error(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, {"error": "idempotency_key_reused"}
+                )
+            rid = result.request_id
+            assert rid is not None  # created and replayed always carry the Request_ID
             span.set_attributes({"das.request_id": rid})
-        metrics.request_submitted()  # only after create_request returned OK (Req 2.1)
+        if result.outcome == "replayed":
+            metrics.idempotent_replay()  # not a new Request: no das_requests_submitted_total (Req 4.3)
+            with bind_request(rid):
+                log.info("request replayed")
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content={"request_id": rid},
+                headers={"Idempotent-Replayed": "true"},
+            )
+        metrics.request_submitted()  # only after submit_request created the Request (Req 2.1)
         with bind_request(rid):
             log.info("request created")
         return {"request_id": rid}
 
-    @v1.get("/requests/{request_id}")
+    @v1.get("/requests/{request_id}", responses=QUERY_RESPONSES)
     async def get_request(request_id: str) -> Any:
-        # One MULTI/EXEC including every UsageRecord: a failed or partial read is a
-        # 503, never a summary of partial records (Req 9.12).
+        # One MULTI/EXEC including every UsageRecord, the Webhook_Delivery and the budget: a
+        # failed or partial read is a 503, never a summary of partial records (Req 9.12).
         snap = await _bounded(
-            store.load_snapshot(request_id, include_transitions=True, include_usage=True)
+            store.load_snapshot(
+                request_id, include_transitions=True, include_usage=True, include_client=True
+            )
         )
         if snap is None:
             return _error(status.HTTP_404_NOT_FOUND, NOT_FOUND)
         return request_view(snap, price_table)
 
-    @v1.post("/requests/{request_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
+    @v1.post(
+        "/requests/{request_id}/cancel", status_code=status.HTTP_202_ACCEPTED, responses=CANCEL_RESPONSES
+    )
     async def cancel(request_id: str, background: BackgroundTasks) -> Any:
-        result = await _bounded(store.cancel_request(request_id))
+        # The Price_Table lets a budgeted Request's request.cancelled carry its Budget_Used (Req 5.9).
+        result = await _bounded(store.cancel_request(request_id, prices=price_table))
         if result.status is StoreStatus.NOT_FOUND:
             return _error(status.HTTP_404_NOT_FOUND, NOT_FOUND)
         if result.status is StoreStatus.TERMINAL:
@@ -333,10 +468,32 @@ def create_app(
     # GET /v1/requests (Req 15): same API_Key / Admin_API_Key auth as the rest of /v1.
     register_list_route(v1, store=store, cursor_keys=cursor_keys, bounded=_bounded)
 
+    # GET /v1/requests/{id}/events (Phase 4 Req 7): same auth and rate limit as the rest of /v1.
+    event_gate = register_events_route(
+        v1,
+        store=store,
+        bounded=_bounded,
+        metrics=lambda: metrics,
+        clock=clock,
+        config=events_config,
+        view=lambda snap: request_view(snap, price_table),
+        events_client=events_client,
+    )
+    app.state.event_gate = event_gate
+
+    @v1.get("/openapi.json", include_in_schema=False)
+    async def openapi_document() -> Any:
+        """The client API's OpenAPI schema, behind the same key check and rate limit (Phase 4 Req 11.4)."""
+        if getattr(app.state, "published_schema", None) is None:
+            app.state.published_schema = published_schema(app)  # every route is registered by now
+        return JSONResponse(app.state.published_schema)
+
     app.include_router(v1)
 
     # Admin_API (Req 11): router-level Admin_API_Key auth plus Audit_Entry middleware.
-    admin = create_admin_router(api_keys, admin_api_keys)
+    admin = create_admin_router(
+        api_keys, admin_api_keys, client_limits=limits_config, rate_limit=enforce_rate
+    )
     register_dlq_routes(
         admin,
         store=store,
@@ -368,6 +525,7 @@ def create_app(
     templates = route_templates(app.routes)
     recorder = metrics_factory(templates) if metrics_factory is not None else NoopRecorder()
     metrics = GatewayMetrics(recorder)
+    metrics.sse_streams(lambda: event_gate.open)
     app.state.metrics_recorder = recorder
     app.state.gateway_metrics = metrics
     app.state.route_templates = templates

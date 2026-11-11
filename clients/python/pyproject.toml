@@ -1,0 +1,29 @@
+[project]
+name = "das-client"
+version = "0.1.0"
+description = "Python client for the DAS Gateway API: submit, query, cancel, events, wait and webhook verification"
+readme = "README.md"
+# The client supports more Python versions than the server (3.12 only), so it is not a uv workspace
+# member: a member would inherit the server's requires-python. See tests/unit/test_client_package_static.py.
+requires-python = ">=3.10,<3.14"
+# One runtime dependency, exactly pinned, the same pin as the server (Phase 4 Req 9.1).
+dependencies = ["httpx==0.28.1"]
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/das_client"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+# Lint for the oldest supported Python, with the server's rule set and line length.
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F"]

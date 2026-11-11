@@ -27,6 +27,7 @@ from fakeredis.aioredis import FakeRedis
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from das.config.schema import ClientLimitsConfig, ClientSettingsConfig
 from das.gateway.app import create_app
 from das.models.dlq import DEAD_LETTER_REASONS, RECORD_STATUSES, DeadLetterFields
 from das.registry import AgentRegistry
@@ -35,6 +36,7 @@ from tests.fixtures.redis_time import FakeRedisTime
 
 API_KEY = "client-api-key-0001"
 ADMIN_KEY = "operator-admin-key-0001"
+NO_RATE_LIMIT = ClientLimitsConfig(default=ClientSettingsConfig(rate=0.0))
 ADMIN = {"X-API-Key": ADMIN_KEY}
 T0 = 1_700_000_000_000
 
@@ -188,7 +190,13 @@ async def _run(recs: list[Rec], qs: list[Query]) -> None:
         with FakeRedisTime() as clock:
             await _seed(store, clock, recs)
         app = create_app(
-            store, AgentRegistry(redis), None, [API_KEY], 10, admin_api_keys=[ADMIN_KEY]
+            store,
+            AgentRegistry(redis),
+            None,
+            [API_KEY],
+            10,
+            admin_api_keys=[ADMIN_KEY],
+            client_limits=NO_RATE_LIMIT,  # a walk makes hundreds of calls at one fake instant
         )
         ordered = sorted(recs, key=lambda x: (x.offset_ms, x.dlid), reverse=True)
         async with httpx.AsyncClient(

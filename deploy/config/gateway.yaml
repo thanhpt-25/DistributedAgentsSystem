@@ -5,6 +5,8 @@
 #   DAS__GRPC__ADVERTISE_HOST    this container's reachable host name
 #   DAS__API_KEYS                comma-separated API keys (secret: env or secrets_file only)
 #   DAS__ADMIN_API_KEYS          comma-separated Admin_API keys (secret: env or secrets_file only)
+#   DAS__WEBHOOK_SECRETS__<NAME> one webhook signing secret per name, 16+ characters (secret: env or secrets_file
+#                                only); see the webhook example below
 #   DAS__TRACING__*              tracing switch and OTLP endpoint (observability profile)
 role: gateway
 http_port: 8080
@@ -27,3 +29,45 @@ limits:
   shutdown_timeout: 30
   startup_timeout: 60
   startup_retry_interval: 2
+
+# --- Client API (rate limits, quotas, budgets, event streams, webhooks) ---------------------------------------
+# Every value in the three sections below is the built-in default, written out so it can be seen and changed;
+# leaving a section out changes nothing (a test keeps this file equal to the defaults). Limits are kept per API key
+# in Redis, so they hold across every Gateway replica. A field set to 0 where noted turns that limit off.
+client_limits:
+  default:
+    rate: 60.0                # requests per second per API key; 0 = no limit (429 rate_limited, with Retry-After)
+    burst: 120                # how many requests may arrive at once before the rate applies
+    max_active_requests: 100  # Requests a key may have unfinished at once; 0 = no quota (429 quota_exceeded)
+    max_streams: 10           # event streams a key may hold open at once; 0 = no cap (429 too_many_streams)
+    # BEGIN EXAMPLE default budget (a cap: a submit may ask for less, never more; max_cost needs a Price_Table)
+    # default_budget:
+    #   max_total_tokens: 200000
+    #   max_cost: "5.00"
+    # END EXAMPLE default budget
+  idempotency_ttl: 86400      # seconds an Idempotency-Key is remembered (60 to 604800)
+  allow_insecure_webhooks: false  # true allows http:// webhook URLs; for testing only
+  # Per-key settings, matched by Key_Fingerprint; a field left out is inherited from `default`.
+  # The fingerprint is the first 8 hex characters of sha256(api_key): printf %s "$KEY" | shasum -a 256 | cut -c1-8
+  # (Linux: sha256sum). The one below is the fingerprint of the placeholder key `change-me-api-key`.
+  # The webhook secret named below is set as DAS__WEBHOOK_SECRETS__PARTNER (see deploy/.env.example).
+  # BEGIN EXAMPLE per-key override
+  # overrides:
+  #   - fingerprint: "484857e0"
+  #     rate: 600.0
+  #     burst: 1200
+  #     webhook_url: https://hooks.example.com/das
+  #     webhook_secret_name: partner
+  # END EXAMPLE per-key override
+
+events:
+  max_len: 1000          # events kept per Request (100 to 100000); the oldest are dropped beyond it
+  max_connections: 500   # event streams one Gateway replica serves at once (503 too_many_streams beyond it)
+  keepalive: 15.0        # seconds of silence before a ": keepalive" comment is sent (up to 300)
+
+webhook:
+  workers: 2             # delivery workers per Gateway replica; 0 turns the sender off on that replica
+  timeout: 10.0          # seconds to wait for the receiver's answer
+  base_backoff: 30.0     # seconds before the first retry; it doubles each attempt, up to max_backoff, with jitter
+  max_backoff: 3600.0
+  max_attempts: 8        # a delivery that failed this many times is marked failed; receivers: dedupe on DAS-Webhook-Id

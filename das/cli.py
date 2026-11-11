@@ -487,6 +487,19 @@ async def run_agent(
 
         llm = build_llm_provider(config)
     redis = _redis_client(config)
+    # SSE blocking reads would hold a connection of the shared client, whose 2 s socket timeout is
+    # also shorter than a read: the Gateway gets its own pool, sized to its stream cap (Phase 4 Req 7.7).
+    events_redis: Any = None
+    if role == "gateway":
+        from das.gateway.app import build_redis_client
+        from das.gateway.events import EVENTS_SOCKET_TIMEOUT
+
+        assert config.redis is not None
+        events_redis = build_redis_client(
+            config.redis.url,
+            max_connections=config.events.max_connections,
+            socket_timeout=EVENTS_SOCKET_TIMEOUT,
+        )
     registry = AgentRegistry(redis)
     store = StateStore(redis)
     resolver = registry_endpoint_resolver(registry)
@@ -530,8 +543,14 @@ async def run_agent(
             tracer=tracer,
             clock=ops_clock,
             agent_id=agent_id,
+            client_limits=config.client_limits,
+            events=config.events,
+            events_client=events_redis,
+            webhook=config.webhook,
+            webhook_secrets=config.webhook_secrets,
         )
-        server = HealthServer(app, config.http_port)
+        # lifespan on: the Webhook_Sender workers start and stop with the Gateway's server.
+        server = HealthServer(app, config.http_port, lifespan="on")
         ops = HealthServer(
             create_ops_app(
                 metrics=app.state.metrics_recorder,
@@ -642,6 +661,8 @@ async def run_agent(
         watchdog.start()
         async with contextlib.AsyncExitStack() as stack:
             stack.push_async_callback(_close_quietly, REDIS_DEPENDENCY, redis.aclose)
+            if events_redis is not None:
+                stack.push_async_callback(_close_quietly, "events redis", events_redis.aclose)
             await connect_with_retry(
                 REDIS_DEPENDENCY,
                 redis.ping,

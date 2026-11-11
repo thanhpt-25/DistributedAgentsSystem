@@ -156,6 +156,8 @@ async def _dump(r: FakeRedis) -> dict[str, tuple[str, Any, bool]]:
     """Every key with its type, full contents, and whether it has an expiry."""
     out: dict[str, tuple[str, Any, bool]] = {}
     for key in sorted(await r.keys("*")):
+        if key.startswith("das:client:") and key.endswith(":bucket"):
+            continue  # each authenticated call takes a rate-limit token (Phase 4 Req 2.1)
         kind = await r.type(key)
         if kind == "string":
             val: Any = await r.get(key)

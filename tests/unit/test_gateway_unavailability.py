@@ -91,7 +91,7 @@ class HangingStore:
     async def _hang(self, *_: Any, **__: Any) -> Any:
         await asyncio.Event().wait()
 
-    create_request = load_snapshot = cancel_request = _hang
+    rate_check = submit_request = load_snapshot = cancel_request = _hang
 
 
 class RaisingStore:
@@ -100,7 +100,7 @@ class RaisingStore:
     async def _boom(self, *_: Any, **__: Any) -> Any:
         raise RuntimeError("unexpected")
 
-    create_request = load_snapshot = cancel_request = _boom
+    rate_check = submit_request = load_snapshot = cancel_request = _boom
 
 
 @pytest.mark.parametrize(("method", "path"), CALLS)
@@ -188,6 +188,8 @@ async def _seed_terminal(store: StateStore, status: RequestStatus) -> str:
 async def _keyspace(r: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k in sorted(await r.keys("*")):
+        if k.startswith("das:client:") and k.endswith(":bucket"):
+            continue  # every authenticated call takes a rate-limit token (Phase 4 Req 2.1)
         kind = await r.type(k)
         if kind == "hash":
             out[k] = await r.hgetall(k)

@@ -61,6 +61,7 @@ DlqAdminOutcome = Literal[
     "not_replayable",
     "request_state",
     "request_gone",
+    "budget_exceeded",
     "job_state",
     "stale_attempt",
     "lease_held",
@@ -71,6 +72,11 @@ LeaseLossReason = Literal["held_by_other", "store_unreachable"]
 RetentionKind = Literal["request", "inbox", "dlq_record"]
 #: Same values as ``das.client.budget.ExceededKind`` (Phase 4 Req 10.2).
 BudgetExceededKind = Literal["tokens", "cost", "unenforceable"]
+#: Gateway rejections of client calls (Phase 4 Req 10.1); never a fingerprint, Request_ID or URL (10.3).
+ClientRejectionReason = Literal[
+    "rate_limited", "quota_exceeded", "too_many_streams", "budget_above_limit", "idempotency_key_reused"
+]
+WebhookOutcome = Literal["delivered", "retry", "failed"]
 RegistryRole = Literal["manager", "worker"]
 RegistryStatus = Literal["Available", "Unavailable", "Draining"]
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "_other"]
@@ -93,6 +99,8 @@ LEASE_KINDS: frozenset[str] = _values(LeaseKind)
 LEASE_LOSS_REASONS: frozenset[str] = _values(LeaseLossReason)
 RETENTION_KINDS: frozenset[str] = _values(RetentionKind)
 BUDGET_EXCEEDED_KINDS: frozenset[str] = _values(BudgetExceededKind)
+CLIENT_REJECTION_REASONS: frozenset[str] = _values(ClientRejectionReason)
+WEBHOOK_OUTCOMES: frozenset[str] = _values(WebhookOutcome)
 REGISTRY_ROLES: frozenset[str] = _values(RegistryRole)
 REGISTRY_STATUSES: frozenset[str] = _values(RegistryStatus)
 HTTP_METHODS: frozenset[str] = _values(HttpMethod)
@@ -230,6 +238,16 @@ CATALOG: tuple[MetricSpec, ...] = (
     _spec(
         "das_budget_exceeded_total", "counter", "Requests failed by a budget stop, by exceeded kind.",
         ("kind",), kind=BUDGET_EXCEEDED_KINDS,
+    ),
+    _spec(
+        "das_client_rejections_total", "counter", "Client calls the Gateway_API rejected, by reason.",
+        ("reason",), reason=CLIENT_REJECTION_REASONS,
+    ),
+    _spec("das_idempotent_replays_total", "counter", "Submits answered from an idempotency record."),
+    _spec("das_sse_streams", "gauge", "Event streams open on this Gateway_API replica."),
+    _spec(
+        "das_webhook_deliveries_total", "counter", "Webhook delivery attempts, by outcome.",
+        ("outcome",), outcome=WEBHOOK_OUTCOMES,
     ),
 )
 
@@ -612,6 +630,22 @@ class GatewayMetrics(_RequestFinishMixin):
 
     def dlq_admin_action(self, action: DlqAction, outcome: DlqAdminOutcome) -> None:
         self._r.inc("das_dlq_admin_actions_total", {"action": action, "outcome": outcome})
+
+    def client_rejected(self, reason: ClientRejectionReason) -> None:
+        """A client call answered 429/422/400 by a Phase 4 limit (Phase 4 Req 10.1)."""
+        self._r.inc("das_client_rejections_total", {"reason": reason})
+
+    def idempotent_replay(self) -> None:
+        """A submit answered from an idempotency record; not a new Request (Phase 4 Req 4.3)."""
+        self._r.inc("das_idempotent_replays_total")
+
+    def sse_streams(self, fn: Callable[[], float]) -> None:
+        """Gauge of the event streams open on this replica, read when scraped (Phase 4 Req 10.1)."""
+        self._r.set_function("das_sse_streams", fn)
+
+    def webhook_delivery(self, outcome: WebhookOutcome) -> None:
+        """One delivery attempt ended ``delivered``, ``retry`` or ``failed`` (Phase 4 Req 10.1)."""
+        self._r.inc("das_webhook_deliveries_total", {"outcome": outcome})
 
 
 class ManagerMetrics(_RequestFinishMixin):

@@ -1352,12 +1352,31 @@
     },
     {
       "allowed": {
+        "reason": [
+          "budget_above_limit",
+          "idempotency_key_reused",
+          "quota_exceeded",
+          "rate_limited",
+          "too_many_streams"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Client calls the Gateway_API rejected, by reason.",
+      "labels": [
+        "reason"
+      ],
+      "name": "das_client_rejections_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
         "action": [
           "discard",
           "replay"
         ],
         "outcome": [
           "accepted",
+          "budget_exceeded",
           "job_state",
           "lease_held",
           "not_found",
@@ -1943,6 +1962,14 @@
     },
     {
       "allowed": {},
+      "buckets_key": null,
+      "help": "Submits answered from an idempotency record.",
+      "labels": [],
+      "name": "das_idempotent_replays_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
       "buckets_key": "attempts",
       "help": "Attempt count of Jobs reaching a terminal state.",
       "labels": [
@@ -2234,6 +2261,30 @@
     {
       "allowed": {},
       "buckets_key": null,
+      "help": "Event streams open on this Gateway_API replica.",
+      "labels": [],
+      "name": "das_sse_streams",
+      "type": "gauge"
+    },
+    {
+      "allowed": {
+        "outcome": [
+          "delivered",
+          "failed",
+          "retry"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Webhook delivery attempts, by outcome.",
+      "labels": [
+        "outcome"
+      ],
+      "name": "das_webhook_deliveries_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
       "help": "Configured concurrency limit of this Worker_Agent.",
       "labels": [],
       "name": "das_worker_concurrency_limit",
@@ -2284,6 +2335,10 @@
       ],
       [
         "GET",
+        "/v1/openapi.json"
+      ],
+      [
+        "GET",
         "/v1/requests"
       ],
       [
@@ -2297,6 +2352,10 @@
       [
         "POST",
         "/v1/requests/{request_id}/cancel"
+      ],
+      [
+        "GET",
+        "/v1/requests/{request_id}/events"
       ]
     ],
     "health": [

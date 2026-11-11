@@ -130,6 +130,9 @@ services:
       DAS__API_KEYS: ${DAS_GATEWAY_API_KEYS:?set DAS_GATEWAY_API_KEYS in deploy/.env}
       # Passed through by name; unset leaves the Admin_API disabled (403 admin_disabled).
       DAS__ADMIN_API_KEYS:
+      # A webhook signing secret, passed by name; leave it unset in deploy/.env until you have a real value
+      # (an empty one stops the Gateway). Copy this line for each further name; see deploy/config/gateway.yaml.
+      DAS__WEBHOOK_SECRETS__PARTNER:
     volumes:
       - ./config/gateway.yaml:/etc/das/config.yaml:ro
     healthcheck:

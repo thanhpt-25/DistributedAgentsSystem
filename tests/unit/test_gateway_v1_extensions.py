@@ -108,7 +108,7 @@ async def test_submitted_counter_only_on_ok(client, recorders: Recorders):
 
 async def test_submitted_counter_unchanged_on_store_failure(fake_redis, recorders: Recorders):
     class FailingStore(StateStore):
-        async def create_request(self, prompt, trace_context=None):  # type: ignore[override]
+        async def submit_request(self, prompt, client, trace_context=None):  # type: ignore[override]
             raise ConnectionError("down")
 
     app = create_app(

@@ -56,10 +56,16 @@ async def failed_request(store: StateStore):
 
 
 async def everything(store: StateStore) -> dict:
-    """Every key in Redis with its content (to assert that nothing changed)."""
+    """Every key in Redis with its content (to assert that nothing changed).
+
+    Rate-limit buckets are left out: every authenticated Gateway call takes a token
+    (Phase 4 Req 2.1), so a rejected call still changes its caller's bucket.
+    """
     r = store.client
     out = {}
     for k in sorted(await r.keys("*")):
+        if k.startswith("das:client:") and k.endswith(":bucket"):
+            continue
         t = await r.type(k)
         if t == "hash":
             out[k] = await r.hgetall(k)

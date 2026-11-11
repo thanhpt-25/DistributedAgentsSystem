@@ -24,6 +24,8 @@ from fastapi import HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
 from pydantic import SecretStr
 
+from das.client.settings import resolve_settings
+from das.config.schema import ClientLimitsConfig
 from das.ops.keys import KeyClass, classify_key, key_fingerprint
 
 API_KEY_HEADER: Final = "X-API-Key"
@@ -68,23 +70,39 @@ def _reject(code: int, body: dict[str, str]) -> HTTPException:
     return HTTPException(status_code=code, detail=dict(body), headers=headers)
 
 
+def _identify(request: Request, api_key: str, client_limits: ClientLimitsConfig) -> None:
+    """Record a matched key's Key_Fingerprint and Client_Settings, once per call.
+
+    The audit context (Req 11.8) and the rate limit (Phase 4 Req 1.2, 2.1) read the same
+    fingerprint, so they cannot disagree. Only the 8-hex fingerprint is kept, never the key.
+    """
+    fingerprint = key_fingerprint(api_key.encode("utf-8"))
+    audit_context(request)["key_fingerprint"] = fingerprint
+    request.state.client_settings = resolve_settings(fingerprint, client_limits)
+
+
 def api_key_auth(
     keys: Iterable[SecretStr | str],
     admin_keys: Iterable[SecretStr | str] = (),
-) -> Callable[[str | None], Awaitable[None]]:
+    client_limits: ClientLimitsConfig | None = None,
+) -> Callable[..., Awaitable[None]]:
     """Dependency for the ``/v1`` router: API_Key or Admin_API_Key, same response.
 
-    Empty configured keys are ignored; with no usable keys every call is rejected.
+    Empty configured keys are ignored; with no usable keys every call is rejected. A matched
+    key leaves its Client_Settings on ``request.state.client_settings`` for the rate limit.
     """
     api = _configured(keys)
     admin = _configured(admin_keys)
+    limits = client_limits if client_limits is not None else ClientLimitsConfig()
 
     async def require_api_key(
+        request: Request,
         api_key: str | None = Security(_header_scheme),
     ) -> None:
         kind, _ = classify_key(api_key, api, admin)
-        if kind is KeyClass.NONE:
+        if kind is KeyClass.NONE or not api_key:
             raise _reject(status.HTTP_401_UNAUTHORIZED, UNAUTHORIZED_BODY)
+        _identify(request, api_key, limits)
 
     return require_api_key
 
@@ -101,23 +119,25 @@ def audit_context(request: Request) -> dict[str, Any]:
 def admin_key_auth(
     keys: Iterable[SecretStr | str],
     admin_keys: Iterable[SecretStr | str],
+    client_limits: ClientLimitsConfig | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Dependency for the ``/v1/admin`` router (Req 11.2-11.5).
 
     Records the Key_Fingerprint of a matched key in the audit context, so the
-    Audit_Entry carries it even when the call is rejected with 403 (Req 11.8).
+    Audit_Entry carries it even when the call is rejected with 403 (Req 11.8). It also
+    leaves the key's Client_Settings on ``request.state`` for the rate limit.
     """
     api = _configured(keys)
     admin = _configured(admin_keys)
+    limits = client_limits if client_limits is not None else ClientLimitsConfig()
 
     async def require_admin_key(
         request: Request,
         api_key: str | None = Security(_header_scheme),
     ) -> None:
         kind, _ = classify_key(api_key, api, admin)
-        ctx = audit_context(request)
         if kind is not KeyClass.NONE and api_key:
-            ctx["key_fingerprint"] = key_fingerprint(api_key.encode("utf-8"))
+            _identify(request, api_key, limits)
         if kind is KeyClass.NONE:
             raise _reject(status.HTTP_401_UNAUTHORIZED, UNAUTHORIZED_BODY)
         if kind is KeyClass.API:

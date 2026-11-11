@@ -44,11 +44,14 @@ from das.models.dlq import (
     RequestTransitionEntry,
 )
 from das.models.usage import UsageRecord
+from das.observability import get_logger
 from das.observability.trace_context import TraceContext
 from das.ops.cost import PriceTable
 from das.ops.replay import DiscardOutcome, ReplayOutcome
 from das.state import keys
 from das.state.scripts import register_all
+
+log = get_logger(__name__)
 
 INBOX_JOB_RESULT: Final = "job_result"
 INBOX_UNACKED_EXHAUSTED: Final = "unacked_delivery_exhausted"
@@ -413,10 +416,26 @@ class StoredRequest:
     # Phase 4 fields (absent on Requests created without a client, Phase 4 Req 5.4).
     budget: Budget | None = None  # Effective_Budget
     client_fp: str | None = None
+    # Only with ``load_snapshot(include_client=True)`` (Phase 4 Req 8.9, 7.1).
+    webhook: WebhookState | None = None  # None: no Webhook_Delivery exists
+    last_event_id: str | None = None  # newest Event_ID; None when the Event_Stream is empty
 
 
 def _s(value: Any) -> str:
     return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+
+
+#: Fields of the Webhook_Delivery hash a Request view shows (Phase 4 Req 8.9).
+_WEBHOOK_FIELDS: Final = ("state", "attempts", "last_status")
+
+
+def _webhook_state(raw: Sequence[Any]) -> WebhookState | None:
+    """``HMGET`` reply over :data:`_WEBHOOK_FIELDS` as a state, or ``None`` without a delivery."""
+    if raw[0] is None:
+        return None
+    return WebhookState(
+        state=_s(raw[0]), attempts=_opt_int(_opt(raw[1])) or 0, last_status=_opt(raw[2]) or None
+    )
 
 
 def _opt(value: Any) -> str | None:
@@ -527,6 +546,63 @@ class StateStore:
         if _s(reply[0]) == "OK":
             return None
         return float(_s(reply[1]))
+
+    async def acquire_stream(
+        self, fingerprint: str, member: str, max_streams: int, ttl: float
+    ) -> bool:
+        """Register an open Event_Stream connection unless the client already holds ``max_streams``.
+
+        ``member`` is unique per connection; it expires ``ttl`` seconds after its last
+        :meth:`renew_stream`, so a crashed Gateway's connections stop counting by themselves
+        (Phase 4 Req 7.7, 7.8). Expired members are pruned first.
+        """
+        reply = await self._run(
+            "stream_acquire",
+            [keys.client_streams(fingerprint)],
+            [member, int(max_streams), f"{ttl:.17g}"],
+        )
+        return _s(reply[0]) == "OK"
+
+    async def renew_stream(self, fingerprint: str, member: str, ttl: float) -> None:
+        """Push a live connection's expiry ``ttl`` seconds out; re-adds it when it was pruned."""
+        key = keys.client_streams(fingerprint)
+        now = await self.server_time()
+        async with self._r.pipeline(transaction=True) as pipe:
+            pipe.zadd(key, {member: now + ttl})
+            pipe.pexpire(key, int(ttl * 1000) + 60_000)
+            await pipe.execute()
+
+    async def release_stream(self, fingerprint: str, member: str) -> None:
+        """Forget a connection that ended; unknown members are ignored (Phase 4 Req 7.8)."""
+        await self._r.zrem(keys.client_streams(fingerprint), member)
+
+    async def read_events(
+        self,
+        rid: str,
+        after: str,
+        *,
+        block_ms: int | None = None,
+        count: int = 100,
+        client: Any = None,
+    ) -> list[tuple[str, dict[str, str]]]:
+        """Events with an Event_ID greater than ``after``, oldest first (Phase 4 Req 7.3).
+
+        ``block_ms`` waits up to that long for a new Event (``None``: return at once). A blocking
+        read holds its connection, so the SSE endpoint passes ``client``, a dedicated pool with a
+        socket timeout longer than the block, instead of using the shared one.
+        """
+        reply = await (client or self._r).xread({keys.events(rid): after}, count=count, block=block_ms)
+        if not reply:
+            return []
+        return [
+            (_s(event_id), {_s(k): _s(v) for k, v in fields.items()})
+            for event_id, fields in reply[0][1]
+        ]
+
+    async def first_event_id(self, rid: str) -> str | None:
+        """Event_ID of the oldest retained Event, or ``None`` when the Event_Stream is empty."""
+        entries = await self._r.xrange(keys.events(rid), "-", "+", count=1)
+        return _s(entries[0][0]) if entries else None
 
     async def claimable_request_ids(self, limit: int = 100) -> list[str]:
         """Pending Requests plus Requests whose lease expiry has passed (for ClaimLoop)."""
@@ -657,8 +733,15 @@ class StateStore:
         A budgeted Request's ``request.cancelled`` carries its Budget_Used, computed with
         ``prices`` from the stored Budget and UsageRecords read in the same pipeline as
         the Job records on every attempt, so a retry after CONFLICT never sends a stale
-        view next to fresh usage totals.
+        view next to fresh usage totals. That read is fenced by the script's Job-record
+        compare-and-set: every UsageRecord append comes with a Job change, so usage that
+        changed after the read makes the script answer CONFLICT.
+
+        Corrupt stored budget or usage data never blocks a cancel (Phase 1 Req 1.6): the
+        Request is cancelled, ``request.cancelled`` is written without ``budget``, and one
+        warning names the Request (never the stored value).
         """
+        budget_warned = False
         for _ in range(max_retries):
             async with self._r.pipeline(transaction=True) as pipe:
                 pipe.hgetall(keys.jobs(rid))
@@ -671,11 +754,20 @@ class StateStore:
             dlids = sorted(_s(m) for m in members)
             budget_json = ""
             if raw_budget:
-                budget = Budget.from_json_obj(json.loads(_s(raw_budget)))
-                usage = [UsageRecord.model_validate_json(_s(item)) for item in raw_usage]
-                budget_json = _budget_view_json(
-                    budget_view(budget, budget_status(usage, budget, prices))
-                )
+                try:
+                    budget = Budget.from_json_obj(json.loads(_s(raw_budget)))
+                    usage = [UsageRecord.model_validate_json(_s(item)) for item in raw_usage]
+                    budget_json = _budget_view_json(
+                        budget_view(budget, budget_status(usage, budget, prices))
+                    )
+                except (ValueError, TypeError, AttributeError) as exc:
+                    if not budget_warned:
+                        log.warning(
+                            "cancel_request: budget view skipped, stored budget or usage is corrupt",
+                            request_id=rid,
+                            error=type(exc).__name__,
+                        )
+                        budget_warned = True
             args: list[str] = [rid, json.dumps(dlids), budget_json]
             for job_id, current in raw.items():
                 record = JobRecord.model_validate_json(current)
@@ -1318,12 +1410,7 @@ class StateStore:
 
     async def get_webhook(self, rid: str) -> WebhookState | None:
         """Webhook_Delivery state of a Request, or ``None`` when it has none (Phase 4 Req 8.2)."""
-        raw = await self._r.hmget(keys.webhook(rid), "state", "attempts", "last_status")
-        if raw[0] is None:
-            return None
-        return WebhookState(
-            state=_s(raw[0]), attempts=_opt_int(_opt(raw[1])) or 0, last_status=_opt(raw[2]) or None
-        )
+        return _webhook_state(await self._r.hmget(keys.webhook(rid), *_WEBHOOK_FIELDS))
 
     async def claim_webhook(self, lease_seconds: float) -> WebhookClaim | None:
         """Claim the next due Webhook_Delivery for ``lease_seconds`` (Phase 4 Req 8.3).
@@ -1403,9 +1490,18 @@ class StateStore:
         return [UsageRecord.model_validate_json(_s(item)) for item in raw]
 
     async def load_snapshot(
-        self, rid: str, include_transitions: bool = False, include_usage: bool = False
+        self,
+        rid: str,
+        include_transitions: bool = False,
+        include_usage: bool = False,
+        include_client: bool = False,
     ) -> StoredRequest | None:
-        """Read the whole Request state consistently (one MULTI/EXEC)."""
+        """Read the whole Request state consistently (one MULTI/EXEC).
+
+        ``include_client`` adds the Request's Webhook_Delivery state and the Event_ID of its
+        newest Event to the same MULTI, so the view and an event stream's first frame never
+        mix two moments (Phase 4 Req 8.9, 7.1).
+        """
         async with self._r.pipeline(transaction=True) as pipe:
             pipe.hgetall(keys.request(rid))
             pipe.hgetall(keys.jobs(rid))
@@ -1416,7 +1512,13 @@ class StateStore:
                 pipe.lrange(keys.transitions(rid), 0, -1)
             if include_usage:
                 pipe.lrange(keys.usage(rid), 0, -1)
+            if include_client:
+                pipe.hmget(keys.webhook(rid), *_WEBHOOK_FIELDS)
+                pipe.xrevrange(keys.events(rid), count=1)
             replies = await pipe.execute()
+        # Optional replies follow the five fixed ones, in the order they were queued.
+        usage_at = 5 + int(include_transitions)
+        client_at = usage_at + int(include_usage)
         req_raw, jobs_raw, results_raw, timers_raw, lease_raw = replies[:5]
         if not req_raw:
             return None
@@ -1441,7 +1543,11 @@ class StateStore:
             transitions, request_transitions = _split_transitions(replies[5])
         usage = None
         if include_usage:
-            usage = [UsageRecord.model_validate_json(_s(x)) for x in replies[-1]]
+            usage = [UsageRecord.model_validate_json(_s(x)) for x in replies[usage_at]]
+        webhook = _webhook_state(replies[client_at]) if include_client else None
+        last_event_id = (
+            _s(replies[client_at + 1][0][0]) if include_client and replies[client_at + 1] else None
+        )
         history_raw = req.get(keys.F_REPLAY_HISTORY)
         replay_history = (
             [ReplayHistoryEntry.model_validate(x) for x in json.loads(history_raw)]
@@ -1476,6 +1582,8 @@ class StateStore:
             usage=usage,
             budget=Budget.from_json_obj(json.loads(budget_raw)) if (budget_raw := req.get(keys.F_BUDGET)) else None,
             client_fp=req.get(keys.F_CLIENT_FP) or None,
+            webhook=webhook,
+            last_event_id=last_event_id,
         )
 
 

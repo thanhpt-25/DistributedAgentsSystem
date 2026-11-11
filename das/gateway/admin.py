@@ -11,6 +11,7 @@ done by :class:`das.gateway.audit.AuditMiddleware`, which
 - ``GET /v1/admin/dlq``                     200 page | 400 ``invalid_query`` | 503
 - ``GET /v1/admin/dlq/{dead_letter_id}``    200 detail | 404 | 503
 - ``POST /v1/admin/dlq/{id}/replay``        202 | 404 | 409 ``<code>`` + ``current_state`` | 503
+  (a Request that failed by its budget: 409 ``{"error": "budget_exceeded"}``, Phase 4 Req 5.10)
 - ``POST /v1/admin/dlq/{id}/discard``       200 (idempotent) | 404 | 409 | 503
 
 :func:`register_agent_routes` adds drain/undrain (Req 17):
@@ -39,7 +40,7 @@ from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
 from das.codec import AgentControlPayload, AgentControlReplyMessage, new_message
-from das.config.schema import CAPABILITY_PATTERN
+from das.config.schema import CAPABILITY_PATTERN, ClientLimitsConfig
 from das.gateway.audit import ADMIN_PREFIX, AuditMiddleware
 from das.gateway.auth import admin_key_auth
 from das.gateway.cursor_key import CursorKeyProvider
@@ -93,12 +94,19 @@ _TIMESTAMP_FIELDS: Final = ("dead_lettered_at", "status_changed_at", "discarded_
 def create_admin_router(
     api_keys: Iterable[SecretStr | str],
     admin_api_keys: Iterable[SecretStr | str],
+    *,
+    client_limits: ClientLimitsConfig | None = None,
+    rate_limit: Callable[..., Awaitable[None]] | None = None,
 ) -> APIRouter:
-    """``/v1/admin`` router guarded by :func:`admin_key_auth`."""
-    return APIRouter(
-        prefix=ADMIN_PREFIX,
-        dependencies=[Depends(admin_key_auth(api_keys, admin_api_keys))],
-    )
+    """``/v1/admin`` router guarded by :func:`admin_key_auth`, then by ``rate_limit`` (Phase 4 Req 2.5).
+
+    The key check runs first, so a 401/403 never consumes a token; a 429 is still audited.
+    """
+    dependencies = [Depends(admin_key_auth(api_keys, admin_api_keys, client_limits))]
+    if rate_limit is not None:
+        dependencies.append(Depends(rate_limit))
+    # Operator routes stay out of the schema a client key can read (Phase 4 Req 11.4).
+    return APIRouter(prefix=ADMIN_PREFIX, dependencies=dependencies, include_in_schema=False)
 
 
 def install_admin(
@@ -334,6 +342,11 @@ def register_dlq_routes(
         metrics().dlq_admin_action("replay", outcome)
         if result.outcome == "not_found":
             return _not_found()
+        if result.outcome == "budget_exceeded":
+            # No current_state: the body is exactly the one of Phase 4 Req 5.10.
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT, content={"error": "budget_exceeded"}
+            )
         if not result.accepted:
             return _conflict(result.outcome, result.current_state)
         return JSONResponse(

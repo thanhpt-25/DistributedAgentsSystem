@@ -1,7 +1,8 @@
 -- replay_dead_letter: accept or reject a Replay of one Dead_Letter_Record (Req 13.1-13.3,
 -- 13.6-13.8; design D7, D8). Checks follow das.ops.replay.decide_replay, first violated
 -- condition wins: NOT_FOUND, RECORD_NOT_PENDING, NOT_REPLAYABLE, REQUEST_GONE,
--- REQUEST_STATE, JOB_STATE, STALE_ATTEMPT, LEASE_HELD (Failed Request only).
+-- REQUEST_STATE, BUDGET_EXCEEDED (Failed Request whose error is budget_exceeded or
+-- budget_unenforceable), JOB_STATE, STALE_ATTEMPT, LEASE_HELD (Failed Request only).
 -- A rejection writes nothing.
 -- KEYS[1] das:dlq:{dlid}, KEYS[2] request hash, KEYS[3] jobs hash, KEYS[4] lease hash,
 -- KEYS[5] inbox stream, KEYS[6] transitions list, KEYS[7] pending_replays set,
@@ -46,6 +47,14 @@ if not status then
 end
 if status ~= 'Running' and status ~= 'Failed' then
   return { 'REQUEST_STATE', status }
+end
+-- A Request stopped by its budget would spend it again (Phase 4 Req 5.10); the same list as
+-- das.ops.replay.BUDGET_FAILURES.
+if status == 'Failed' then
+  local err = redis.call('HGET', KEYS[2], 'error')
+  if err == 'budget_exceeded' or err == 'budget_unenforceable' then
+    return { 'BUDGET_EXCEEDED' }
+  end
 end
 local job_id = rec[4]
 local job_json = nil

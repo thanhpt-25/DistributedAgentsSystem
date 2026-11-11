@@ -283,7 +283,7 @@ Script changes:
 
 **SSE (`events.py`).**
 - It uses `StreamingResponse(media_type="text/event-stream")` with `Cache-Control: no-cache` and `X-Accel-Buffering: no`.
-- The per-key open-stream count is a Redis counter `das:client:{fp}:streams`. It's incremented with a 1-hour TTL refreshed on every keepalive, and decremented in `finally`, so a crashed Gateway's counts expire.
+- The per-key open streams are a Redis sorted set `das:client:{fp}:streams`: one member per connection, scored by its expiry in Redis time. `stream_acquire.lua` prunes expired members, refuses at `max_streams` and adds the member in one atomic step. A live stream renews its member about every third of its TTL (`max(30 s, 3 x events.keepalive)`) and removes it in `finally`. This replaces the first draft's counter with a TTL: a counter cannot tell a crashed Gateway's stale +1 from a live stream, so while any stream of the key kept refreshing the TTL the stale count would never expire; a member per connection expires on its own.
 - The per-replica count is an in-process counter.
 - Each stream uses one connection from a dedicated `redis.asyncio` pool of size `events.max_connections`. A blocking `XREAD` would otherwise hold a connection in the shared pool.
 - The snapshot is read with `load_snapshot` and `XREVRANGE + - COUNT 1` in one MULTI.
@@ -324,11 +324,11 @@ clients/python/
 - `events()` reconnects up to `max_retries` times in a row, resetting after any received event.
 - `wait()` falls back to polling `get` every 1 s when `events()` raises a transport error.
 - Models are built with `from_json(cls, data)`, which picks known fields and ignores the rest (Req 9.9).
-- The contract test lives in the main repo, in `tests/contract/test_client_contract.py`. It installs the client as a path dependency in the dev group and runs it against `create_app(...)` with fakeredis through `httpx.ASGITransport`. The repo gets a workspace entry so `uv sync` installs both packages.
+- The contract test lives in the main repo, in `tests/contract/test_client_contract.py`. It installs the client as a path dependency in the dev group and runs it against `create_app(...)` with fakeredis through `httpx.ASGITransport`. The root dev group installs the client as an editable **path source** (`[tool.uv.sources] das-client = { path = "clients/python", editable = true }`), so `uv sync` installs both packages. It is deliberately not a uv workspace member: a member inherits the server's `requires-python = "==3.12.*"`, the lock keeps that range, and uv then refuses `--python 3.10` and `--python 3.13` for the client (checked with uv 0.9.28). The client's own tests therefore run in an isolated environment (see §8).
 
 ### 8. CI
 
-`.github/workflows/ci.yml` gains a `client` job with a Python 3.10 and 3.13 matrix: `uv run --project clients/python pytest`. The fast job also runs `tests/contract`.
+`.github/workflows/ci.yml` gains a `client` job with a matrix of every Python the package claims, 3.10, 3.11, 3.12 and 3.13 (not only the two ends: the fast job never runs the client's own suite, so without 3.12 nothing would test it on the server's interpreter). Each matrix entry runs `uv run --isolated --no-project --with-editable clients/python --with pytest==9.1.1 --with pytest-asyncio==1.4.0 --with respx==0.23.1 pytest clients/python/tests -c clients/python/pyproject.toml --rootdir clients/python` (the root project is skipped because its lock is Python 3.12 only; see §7). The Python comes from `UV_PYTHON`, which `astral-sh/setup-uv` sets from its `python-version` input, so the command is the same for every entry and equals the README block. The job runs on every trigger and does not wait for the fast job. The fast job also runs `tests/contract`, in its existing pytest step. `test_ci_workflow_static.py` checks the matrix against the `requires-python` range and the tool pins against the root dev group.
 
 ## Data Models
 

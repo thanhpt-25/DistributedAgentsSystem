@@ -86,82 +86,86 @@ Implement Phase 4 in Python 3.12 (asyncio) on top of Phases 1–3, keeping the p
     - Unit tests: planning check, takeover reaches the same budget decision, metric counted once, Terminal_Event of a budgeted Request has `budget`
     - _Requirements: 5.5, 10.2_
 
-- [ ] 6. Checkpoint - Ensure all tests pass
+- [x] 6. Checkpoint - Ensure all tests pass
 
-- [ ] 7. Gateway_API
-  - [ ] 7.1 Add client settings and the rate-limit dependency
+- [x] 7. Gateway_API
+  - [x] 7.1 Add client settings and the rate-limit dependency
     - `auth.py` stores `ClientSettings` on `request.state`; `limits.py` `rate_limit` dependency on `/v1` and admin routers; 429 with `Retry-After`; 503 on store failure; `/healthz` exempt
     - _Requirements: 2.1, 2.2, 2.5, 2.6_
-  - [ ] 7.2 Extend submit
+  - [x] 7.2 Extend submit
     - `SubmitBody.budget` (an empty budget is stored as no budget), `Idempotency-Key` validation, `resolve_budget`, `CreateResult` mapping to 202 / 200 (`Idempotent-Replayed: true`) / 422 / 429 / 400; replays not counted as submitted
     - _Requirements: 3.2, 4.1, 4.3, 4.4, 4.5, 5.1, 5.2_
-  - [ ] 7.3 Extend the query view and cancel
+  - [x] 7.3 Extend the query view and cancel
     - `budget` and `webhook` fields, read in the same MULTI as the snapshot
     - `POST /v1/requests/{id}/cancel` passes the Gateway's Price_Table to `StateStore.cancel_request(rid, prices=...)`, which recomputes Budget_Used on every retry, so the `request.cancelled` event of a budgeted Request carries it (Req 6.1)
     - Read the Request, its Webhook_Delivery, its budget and its last Event_ID with one combined store read (one MULTI), not separate calls
     - Harden `StateStore.cancel_request`: corrupt stored budget or usage data must not block cancellation (Phase 1 Req 1.6); log a warning and emit the Terminal_Event without `budget`. Add a docstring note that Budget_Used is fenced by the Job-record compare-and-set (every usage append comes with a Job change). Test `cancel_request(prices=...)` with a `max_cost` Budget
     - _Requirements: 5.9, 8.9, 11.1_
-  - [ ] 7.4 Implement the SSE endpoint
+  - [x] 7.4 Implement the SSE endpoint
     - `das/gateway/events.py` per design §5: snapshot first, `Last-Event-ID` and resync, `XREAD BLOCK` on a dedicated pool, keepalive via `Clock`, close after terminal, per-key Redis counter with TTL and per-replica cap, release in `finally`
     - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8, 7.9_
-  - [ ] 7.5 Write unit tests for the SSE endpoint
+  - [x] 7.5 Write unit tests for the SSE endpoint
     - Snapshot first; resume after `Last-Event-ID`; resync on invalid or trimmed ID; keepalive; close after terminal; already-terminal Request; 404; both caps and their release; no prompt text in any frame
     - _Requirements: 7.1–7.8, 6.2_
-  - [ ] 7.6 Implement the Webhook_Sender
+  - [x] 7.6 Implement the Webhook_Sender
     - `das/gateway/webhooks.py`: `webhook.workers` tasks in the lifespan; claim → sign → POST (no redirects, 64 KiB cap, timeout) → complete; secret looked up at send time (`secret_missing`); graceful stop
     - _Requirements: 8.3, 8.4, 8.5, 8.6, 8.8, 8.10_
-  - [ ] 7.7 Write unit tests for the Webhook_Sender
+  - [x] 7.7 Write unit tests for the Webhook_Sender
     - respx: 2xx delivered; 5xx/timeout/connect error retried at `next_due(claim.claimed_at, ...)` (Redis time from the claim, no host clock); `failed` exactly when `attempts + 1 == max_attempts`; redirect not followed; oversized body; missing secret; secret and signature absent from logs
     - _Requirements: 8.5, 8.6, 8.8, 8.10_
-  - [ ] 7.8 Admin replay guard and OpenAPI route
+  - [x] 7.8 Admin replay guard and OpenAPI route
     - `decide_replay` returns `budget_exceeded` → 409; `/v1/openapi.json` behind API_Key auth
     - _Requirements: 5.10, 11.4_
-  - [ ] 7.9 Add metrics
+  - [x] 7.9 Add metrics
     - Catalog entries and fixed labels for `das_client_rejections_total`, `das_idempotent_replays_total`, `das_sse_streams`, `das_webhook_deliveries_total`, `das_budget_exceeded_total`; unit tests for names and labels
     - _Requirements: 10.1, 10.2, 10.3_
-  - [ ] 7.10 Write unit tests for the Gateway error responses
+  - [x] 7.10 Write unit tests for the Gateway error responses
     - Every row of the design Error Handling table, including 503 when Redis is unreachable for rate check and create
     - _Requirements: 2.2, 2.5, 3.2, 4.1, 4.4, 5.1, 5.2, 7.7_
 
-- [ ] 8. Checkpoint - Ensure all tests pass
+- [x] 8. Checkpoint - Ensure all tests pass
 
-- [ ] 9. Client_Package
-  - [ ] 9.1 Scaffold the package
-    - `clients/python/pyproject.toml` (`das-client`, Python >=3.10,<3.14, `httpx==0.28.1`), `src/das_client/` modules per design §7; uv workspace entry in the root `pyproject.toml`; client installed in the root dev group for the contract test
+- [x] 9. Client_Package
+  - [x] 9.1 Scaffold the package
+    - `clients/python/pyproject.toml` (`das-client`, Python >=3.10,<3.14, `httpx==0.28.1`), `src/das_client/` modules per design §7; root `pyproject.toml` path source (`[tool.uv.sources]`, editable; not a workspace member, see design §7); client installed in the root dev group for the contract test
     - _Requirements: 9.1_
-  - [ ] 9.2 Implement clients, retries and errors
+  - [x] 9.2 Implement clients, retries and errors
     - `DasClient`, `AsyncDasClient`; generated UUID4 idempotency key reused across retries; retry policy with `Retry-After` floor; typed errors; models ignoring unknown fields
     - _Requirements: 9.2, 9.3, 9.4, 9.5, 9.9_
-  - [ ] 9.3 Implement events, wait and webhook verification
+  - [x] 9.3 Implement events, wait and webhook verification
     - SSE parser, `events()` with reconnect and `Last-Event-ID`, stop after Terminal_Event; `wait()` with polling fallback; `verify_webhook` (copy of `das.client.webhook`)
     - _Requirements: 9.6, 9.7_
-  - [ ] 9.4 Write property test for the webhook signature round trip
+  - [x] 9.4 Write property test for the webhook signature round trip
     - **Property 8: Webhook signature round trip**
     - **Validates: Requirements 8.4, 9.7, 9.8**
-  - [ ] 9.5 Write client unit tests
+  - [x] 9.5 Write client unit tests
     - respx: retries, `Retry-After`, each typed error, SSE reconnect, `wait()` fallback, unknown fields, shared webhook vectors (every entry of `vectors`, `accept` and `reject` in `tests/fixtures/webhook_vectors.json`)
     - _Requirements: 9.3, 9.4, 9.5, 9.6, 9.9_
-  - [ ] 9.6 Write the contract test
+  - [x] 9.6 Write the contract test
     - `tests/contract/test_client_contract.py`: client against `create_app(...)` with fakeredis via `httpx.ASGITransport`, covering every client method and error mapping
     - _Requirements: 9.10_
 
-- [ ] 10. CI, deployment and docs
-  - [ ] 10.1 Update CI
-    - `client` job (Python 3.10, 3.13); `tests/contract` in the fast job
+- [x] 10. CI, deployment and docs
+  - [x] 10.1 Update CI
+    - `client` job (Python 3.10, 3.11, 3.12, 3.13: the package's whole range, see design §8); `tests/contract` in the fast job
     - _Requirements: 9.10, 11.5_
-  - [ ] 10.2 Update Compose, sample config and README
+  - [x] 10.2 Update Compose, sample config and README
     - `deploy/config/gateway.yaml` `client_limits`, `events`, `webhook` samples; `deploy/.env.example` webhook secret example; README sections: limits and quotas, idempotency, budgets, events, webhooks (signature verification), client package, upgrade order
     - _Requirements: 11.3_
 
-- [ ] 11. Integration and end-to-end tests
-  - [ ] 11.1 Write the Compose e2e tests
+- [x] 11. Integration and end-to-end tests
+  - [x] 11.1 Write the Compose e2e tests
     - `tests/integration/e2e/test_client_api_e2e.py`, `webhook_sink.py`, e2e override changes (`gateway=2`, insecure webhooks, `webhook.base_backoff=1`): shared bucket across two Gateways; SSE through a Manager kill; webhook retries and verified signature; budget stop with partial results; `das-client` `wait()`
+    - Done as project `das-e2e-client` (`docker-compose.client-api.e2e.yml`, `gateway.client-api.yaml`; second Gateway is the service `gateway-b`). The budget-stop test asserts what the API shows (status, `error`, Job states, the `budget` object, no `final_result`), not "partial results": the Request view returns `final_result` only for a Completed Request, so Req 5.9 and Req 11.1 conflict as written (plan Decision 1, `docs/superpowers/plans/2026-11-11-das-client-api-e2e.md`).
     - _Requirements: 2.4, 7.9, 8.6, 5.7, 9.6_
-  - [ ] 11.2 Run the full regression
+  - [x] 11.2 Run the full regression
     - All Phase 1–4 suites, `lint-imports`, ruff and mypy
+    - 2743 passed with `DAS_REQUIRE_DOCKER=1 uv run pytest` (no skips); the client suite 505 passed on Python 3.10 to 3.13.
     - _Requirements: 11.5_
 
-- [ ] 12. Final checkpoint - Ensure all tests pass, ask the user if questions arise.
+- [x] 12. Final checkpoint - Ensure all tests pass, ask the user if questions arise.
+  - From a clean state: `uv lock --check` and `uv sync --locked` clean; `ruff`, `mypy` (112 files) and `lint-imports` clean; `DAS_REQUIRE_DOCKER=1 uv run pytest` 2743 passed with no skips and no failures; the fast job's command with a random Hypothesis seed 2712 passed; the `ci` Hypothesis profile 415 property tests passed; the client package 505 passed on each of Python 3.10 to 3.13; `actionlint` clean on `ci.yml`.
+  - Not verifiable locally, left to the first GitHub run: the e2e job's runner speed and the Compose 2.30 `extends` plus `!override` merge (checked on Compose 5.7), and adding the four `Client_Job (Python 3.x)` checks to branch protection.
 
 ## Notes
 

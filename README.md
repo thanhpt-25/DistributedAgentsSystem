@@ -94,16 +94,177 @@ The query response contains:
 - `transitions`: every recorded state change, oldest first
 - `final_result` (only when `Completed`): `summary`, per-Job reports (worker, token usage), and `failures`
 - `error` when the Request failed
+- `budget`: `null`, or for a Request with a [budget](#budgets) `{limits, used, exceeded}`: `limits` holds the limits that are set (`max_total_tokens`, `max_cost` as canonical decimal text, so `"0.50"` reads back as `"0.5"`), `used` holds `total_tokens` and `cost` (`null` when the cost cannot be priced), and `exceeded` is `true` once a limit was reached or cannot be enforced
+- `webhook`: `null` until the Request has a [webhook](#webhooks) delivery, then `{state, attempts, last_status}`
 
 Errors are flat JSON objects:
 
 | Status | Body | Meaning |
 |---|---|---|
-| 400 | `empty_prompt`, `prompt_too_long` (with `max_length`), `invalid_body` | Bad submission |
+| 400 | `empty_prompt`, `prompt_too_long` (with `max_length`), `invalid_body`, `invalid_request` (with `parameter`), `budget_above_limit` (with `parameter` and `limit`) | Bad submission; see [Idempotent submits](#idempotent-submits) and [Budgets](#budgets) |
 | 401 | `unauthorized` | Missing or unknown API key |
 | 404 | `not_found` | Unknown Request ID |
 | 409 | `request_terminal` (with current `status`) | Cancel on a finished Request |
-| 503 | `service_unavailable` | Redis unreachable |
+| 422 | `idempotency_key_reused` | The `Idempotency-Key` was used before with a different prompt or budget |
+| 429 | `rate_limited` (with a `Retry-After` header), `quota_exceeded` (with `limit`), `too_many_streams` | A per-key limit was reached; see [Rate limits and quotas](#rate-limits-and-quotas) |
+| 503 | `service_unavailable`, `too_many_streams` | Redis unreachable, or this Gateway replica already serves `events.max_connections` event streams |
+
+### Idempotent submits
+
+Send an `Idempotency-Key` header with a submit, so that retrying it cannot create a second Request. The key is 1 to 128 printable ASCII characters (no spaces).
+
+```bash
+curl -s -X POST $GW/v1/requests -H "X-API-Key: $KEY" \
+  -H 'Idempotency-Key: order-1042' -H 'Content-Type: application/json' \
+  -d '{"prompt": "Summarize the CAP theorem"}'
+```
+
+- The first call answers `202` with the new `request_id`.
+- The same key with the same prompt and budget answers `200` with the same `request_id` and the header `Idempotent-Replayed: true`. No Request is created, and a replay is answered even when the key's quota is full.
+- The same key with a different prompt or budget answers `422 {"error": "idempotency_key_reused"}`. `max_cost` is compared by value, so `"1.50"` and `"1.5"` are the same budget.
+- A key that is not 1 to 128 printable ASCII characters answers `400 {"error": "invalid_request", "parameter": "Idempotency-Key"}`.
+- Keys belong to the API key that sent them and are remembered for `client_limits.idempotency_ttl` seconds (default 86400).
+- Without the header, every submit creates a new Request, as before.
+
+### Budgets
+
+Add a `budget` to a submit to cap what one Request may spend:
+
+```bash
+curl -s -X POST $GW/v1/requests -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"prompt": "Research the CAP theorem", "budget": {"max_total_tokens": 20000, "max_cost": "0.50"}}'
+```
+
+- `max_total_tokens` is a JSON integer of at least 1. `max_cost` is a number greater than 0 with at most 6 decimal places, in the currency of the [Price_Table](#price_table); send it as a string such as `"0.50"` so no float rounding applies. Set either or both.
+- **`max_cost` needs a Price_Table** (`pricing` in the config). Without one, a Request with a `max_cost` fails before planning with `error: "budget_unenforceable"`, and its `budget.exceeded` already reads `true`. The same error ends a Request whose Job used a provider or model that is not in the Price_Table.
+- A key can have a `default_budget` (see [Client API settings](#client-api-settings)). It applies to submits that send no budget, and it is a cap: a submit may ask for less, never more.
+- Bad input answers `400 {"error": "invalid_request", "parameter": "budget.max_cost"}`; the parameter is `budget`, `budget.max_total_tokens`, `budget.max_cost`, or `budget.<name>` for an unknown field. A value above the cap answers `400 {"error": "budget_above_limit", "parameter": "budget.max_total_tokens", "limit": 1000}`.
+- **What happens at the limit:** once usage reaches a limit, the Manager dispatches nothing more. Jobs that are already running finish, so usage can end slightly above the limit. Jobs that have not started are `Skipped` with reason `budget_exceeded`, no summary is written, and the Request ends `Failed` with `error: "budget_exceeded"`. A budget-stopped Request cannot be replayed (see the 409 under [Admin API](#admin-api)).
+- `final_result` is only returned for a `Completed` Request, so a budget-stopped Request has none. `jobs` and `transitions` show which Jobs succeeded and which were skipped.
+
+### Rate limits and quotas
+
+Every `/v1` call, including opening an event stream and reading the OpenAPI document, takes one token from a per-API-key bucket. The bucket holds `burst` tokens and refills at `rate` tokens per second. It is kept in Redis, so the limit holds across every Gateway replica. `/healthz` and the Ops_Port are never limited.
+
+- An empty bucket answers `429 {"error": "rate_limited"}` with a `Retry-After` header in whole seconds (at least 1). This check comes before everything else, so a limited call is not validated or counted.
+- A key may have at most `max_active_requests` Requests that are not yet finished. One more answers `429 {"error": "quota_exceeded", "limit": 100}` (the number is the key's limit). A Request leaves the count when it becomes `Completed`, `Failed`, or `Cancelled`.
+- A key may hold at most `max_streams` event streams open. One more answers `429 {"error": "too_many_streams"}`.
+- Set `rate`, `max_active_requests`, or `max_streams` to `0` to turn that limit off. Different keys can have different settings: see [Client API settings](#client-api-settings).
+- Every rejection is counted in `das_client_rejections_total{reason}`, with `reason` one of `rate_limited`, `quota_exceeded`, `too_many_streams`, `budget_above_limit`, or `idempotency_key_reused`.
+
+### Event streams
+
+`GET /v1/requests/{id}/events` streams a Request's progress as Server-Sent Events (`text/event-stream`). It takes the same `X-API-Key` and counts against the same rate limit.
+
+```bash
+curl -N -H "X-API-Key: $KEY" $GW/v1/requests/REQUEST_ID/events
+```
+
+A stream of a Request that was then cancelled looks like this (the `snapshot` data is shortened):
+
+```text
+event: snapshot
+id: 1794402379676-0
+data: {"request_id":"REQUEST_ID","status":"Pending","jobs":[],"transitions":[],...,"budget":null,"webhook":null,"event_id":"1794402379676-0"}
+
+event: request.cancelled
+id: 1794402380695-0
+data: {"request_id":"REQUEST_ID","event_id":"1794402380695-0","type":"request.cancelled","data":{"status":"Cancelled","error":null,"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}
+```
+
+- The first frame is always a `snapshot`: the same body as `GET /v1/requests/{id}`, without `final_result`, plus `event_id`, the id of the newest event it reflects (`null` if there is none yet).
+- Every later frame is one event, in order: `event:` is its type, `id:` its event id, and `data:` the object `{request_id, event_id, type, data}`.
+- The types are `request.created`, `request.planned` (Job ids, Capabilities, and dependencies; never instructions), `job.transition`, `request.reopened` (a Replay reopened a failed Request), and the terminal `request.completed`, `request.failed`, and `request.cancelled`. A terminal event carries `status`, `error`, the token `usage`, and `budget` when the Request has one. Events never contain the prompt, Job instructions, or results.
+- **Resuming:** without `Last-Event-ID` the stream sends the snapshot and then only newer events. With `Last-Event-ID: <event id>` (a browser `EventSource` sends it on reconnect) it sends the snapshot and then every event after that id. If the id is not valid, or is older than the oldest event kept (the newest `events.max_len` are kept), the snapshot has `"resync": true` and the stream continues after the snapshot's own id: rebuild your state from the snapshot.
+- A `: keepalive` comment is sent after `events.keepalive` seconds of silence.
+- The stream ends after the terminal event. A Request that is already finished gets its snapshot, and any events after `Last-Event-ID`, and then the stream closes.
+- A key may hold `max_streams` streams open (`429 too_many_streams` beyond it), and one Gateway replica serves at most `events.max_connections` (`503 too_many_streams`). A closed stream frees its slot.
+
+### Webhooks
+
+A webhook posts a Request's terminal event to a URL when the Request ends. Webhooks are configured **per API key by the operator**, not per request: see `webhook_url` and `webhook_secret_name` in [Client API settings](#client-api-settings). Requests created with a key that has no webhook have none.
+
+A delivery is a `POST` of the event, with these headers:
+
+```text
+Content-Type: application/json
+DAS-Webhook-Id: REQUEST_ID:1794402431264-0
+DAS-Webhook-Timestamp: 1794402432
+DAS-Webhook-Signature: v1=4885fcdc346945f01951464f5031295785efb9f62ae3d2a0cfc0ad6f4e6d35d8
+```
+
+and a body in canonical JSON (keys sorted, no spaces):
+
+```json
+{"data":{"error":null,"status":"Cancelled","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}},"event_id":"1794402431264-0","request_id":"REQUEST_ID","type":"request.cancelled"}
+```
+
+**Verify every delivery.** `DAS-Webhook-Signature` is `v1=` followed by the hex HMAC-SHA256, keyed with your webhook secret, of the text `{timestamp}.{raw body}`, where `timestamp` is the `DAS-Webhook-Timestamp` header. Compare it in constant time, and reject a timestamp more than 5 minutes from your clock. With the Python [client package](#python-client):
+
+```python
+from das_client import InvalidSignature, verify_webhook
+
+def handle(body: bytes, headers: dict[str, str]) -> int:
+    try:
+        event = verify_webhook(body, headers, SECRET)  # raises InvalidSignature
+    except InvalidSignature:
+        return 401
+    if already_processed(headers["DAS-Webhook-Id"]):  # delivery is at-least-once: dedupe on this id
+        return 200
+    process(event)
+    return 200
+```
+
+- **Delivery is at-least-once.** The same delivery can arrive more than once, for example when a Gateway replica stops after sending but before recording the result. Receivers must dedupe on `DAS-Webhook-Id` (`<request_id>:<event_id>`).
+- Any `2xx` answer is a success. Any other answer (a redirect is not followed), a timeout (`webhook.timeout`), or a connection error is retried. The wait before retry `n` is `base_backoff * 2^(n-1)`, at most `max_backoff`, with up to 20% jitter. After `max_attempts` attempts in all, the delivery is `failed`. The answer's body is read up to 64 KiB and ignored.
+- `webhook` in `GET /v1/requests/{id}` shows `state` (`pending`, `delivered`, or `failed`), `attempts`, and `last_status`: the HTTP status of the last attempt, `timeout`, `connect_error`, or `secret_missing`. If the secret is removed from the Gateway's config after the Request was created, the delivery fails with `secret_missing` and nothing is sent.
+- A `webhook_url` must be `https`, unless `client_limits.allow_insecure_webhooks` is `true`.
+- Each attempt is counted in `das_webhook_deliveries_total{outcome}`, with `outcome` one of `delivered`, `retry`, or `failed`.
+
+### OpenAPI
+
+`GET /v1/openapi.json` returns the OpenAPI 3.1 document of the client API, error responses included. It needs an API key like any other `/v1` call. The admin routes are not in it, and `/docs`, `/redoc`, and `/openapi.json` are not served.
+
+## Python client
+
+`clients/python` holds `das-client`, a small library for this API: Python 3.10 to 3.13, with `httpx` as its only dependency. It is not published to PyPI; install it from the repository:
+
+```bash
+pip install ./clients/python
+```
+
+```python
+from das_client import Budget, DasClient
+
+with DasClient("http://localhost:8080", "change-me-api-key") as client:
+    submitted = client.submit("Research the CAP theorem", budget=Budget(max_total_tokens=20000))
+    print(submitted.request_id, submitted.replayed)
+    view = client.wait(submitted.request_id, timeout=300)  # streams events; polls if the stream fails
+    print(view.status, view.final_result)
+```
+
+`AsyncDasClient` has the same methods as coroutines, and `events` as an async iterator:
+
+```python
+import asyncio
+
+from das_client import AsyncDasClient
+
+async def main() -> None:
+    async with AsyncDasClient("http://localhost:8080", "change-me-api-key") as client:
+        submitted = await client.submit("Research the CAP theorem")
+        async for event in client.events(submitted.request_id):
+            print(event.type, event.data)  # the snapshot first, then each event, ending at the terminal one
+
+asyncio.run(main())
+```
+
+- The methods are `submit`, `get`, `cancel`, `list_requests`, `events`, and `wait`, plus `verify_webhook` for receivers.
+- `submit` without an `idempotency_key` makes a random one and reuses it for every retry of that call, so a retried submit cannot create two Requests.
+- Connection errors, `503`, and `429` are retried up to `max_retries` times (default 3), waiting 0.5 s doubling to 8 s with jitter, and at least the `Retry-After` of a `429`.
+- `events` resumes with `Last-Event-ID` after a broken stream and stops after the terminal event. `wait` returns the final view, polling every second if streaming keeps failing.
+- Errors derive from `DasError`: `AuthError` (401, 403), `NotFound` (404), `Conflict` (409), `IdempotencyKeyReused` (422), `InvalidRequest` and `BudgetAboveLimit` (400, with `.parameter`), `RateLimited` (with `.retry_after`) and `QuotaExceeded` (with `.limit`) after the retries, `ServiceUnavailable` (503) and `TransportFailure` (cannot connect), `WaitTimeout`, and `InvalidSignature` from `verify_webhook`.
+- Responses are read leniently: a field the server adds later does not break an older client.
 
 ## Scaling
 
@@ -134,6 +295,16 @@ The Ops_Port is not published to the host in Compose; Prometheus reaches it on t
 docker compose -f deploy/docker-compose.yml exec manager \
   python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/readyz').read().decode())"
 ```
+
+Client API metrics (on the Gateway, except the last):
+
+| Metric | Type | Labels and meaning |
+|---|---|---|
+| `das_client_rejections_total` | counter | `reason`: `rate_limited`, `quota_exceeded`, `too_many_streams`, `budget_above_limit`, `idempotency_key_reused` |
+| `das_idempotent_replays_total` | counter | Submits answered from an idempotency record (not counted as new Requests) |
+| `das_sse_streams` | gauge | Event streams open on this Gateway replica |
+| `das_webhook_deliveries_total` | counter | `outcome`: `delivered`, `retry`, `failed` |
+| `das_budget_exceeded_total` | counter | On the Manager. `kind`: `tokens`, `cost`, `unenforceable` |
 
 ## Admin API
 
@@ -176,6 +347,7 @@ Admin errors:
 | 400 | `invalid_request` (with `parameter`) | Drain body is not a JSON object, or `release_leases` is not a boolean |
 | 404 | `not_found` | Unknown dead letter or agent ID |
 | 409 | replay rule code (with `current_state`) | Replay refused: `record_not_pending`, `not_replayable`, `request_gone`, `request_state`, `job_state`, `stale_attempt`, or `lease_held` |
+| 409 | `budget_exceeded` | Replay refused: the Request failed by its budget (`budget_exceeded` or `budget_unenforceable`), so a replay would spend it again. Nothing was changed |
 | 409 | `record_not_pending` | Discard on a replayed record |
 | 409 | `agent_state` (with `status`) | Drain/undrain on an Unavailable agent or on a Gateway |
 | 504 | `agent_timeout` | The agent did not confirm within 5 s. Nothing was changed or resent |
@@ -201,6 +373,15 @@ uv run das undrain http://localhost:8080 AGENT_ID                    # back to A
 ## Upgrading from v1
 
 With `tracing.enabled` set to `false` everywhere, upgraded agents and v1 agents can run side by side during a rolling upgrade: messages stay byte-identical to v1. Admin actions are the exception. Replay writes request transitions and a `replay` inbox kind, and drain introduces the `Draining` status, which v1 agents do not understand. **Only use Replay and drain after every Gateway, Manager, and Worker has been upgraded.**
+
+## Upgrading to Phase 4
+
+Phase 4 adds idempotency keys, budgets, per-key limits, event streams, and webhooks. A client that sends no `Idempotency-Key` and no `budget`, and stays within the default limits, sees the same responses as before, except that `GET /v1/requests/{id}` has two more fields, `budget` and `webhook` (both `null` for such a Request).
+
+- **Upgrade order.** Gateways and Managers can be upgraded in any order. **Events are complete only after every Manager runs Phase 4:** a Manager that has not been upgraded writes no events and does not enforce budgets, so a stream of a Request it handles shows a gap. Upgrade every Manager before you rely on event streams or budgets.
+- **Requests created before the upgrade** have no budget, no webhook, and do not count towards any key's quota. A stream of one sends its snapshot followed by whatever events exist.
+- **The limits are on by default.** After the upgrade each API key is limited to 60 requests per second (burst 120), 100 unfinished Requests, and 10 open event streams. A client that ran faster or wider before will see `429` responses until the limits are raised or set to `0`; see [Client API settings](#client-api-settings). Clients that retry should wait for `Retry-After`.
+- The new metrics are listed under [Ops_Port endpoints](#ops_port-endpoints-metrics-liveness-readiness).
 
 ## Configuration
 
@@ -235,10 +416,68 @@ Key settings:
 | `metrics.enabled`, `metrics.queue_sample_interval` | all | Turn `/metrics` on or off (default on); how often queue depth is sampled (default 15 s) |
 | `tracing.enabled`, `otlp_endpoint`, `otlp_protocol`, `sample_ratio` | all | OpenTelemetry export (default off; `grpc` or `http/protobuf`; ratio 0 to 1). `tracing.otlp_headers` is a credential: environment or secrets file only |
 | `admin_api_keys` | gateway | Admin_API keys (`DAS__ADMIN_API_KEYS`, credential: environment or secrets file only) |
+| `client_limits`, `events`, `webhook` | gateway | Per-key rate limits, quotas, budgets, and webhook targets; event streams; the webhook sender. See [Client API settings](#client-api-settings) |
+| `webhook_secrets` | gateway | Webhook signing secrets by name (`DAS__WEBHOOK_SECRETS__<NAME>`, credential: environment or secrets file only) |
 | `retention.*` | manager | Retention_Policy, see below |
 | `pricing.*` | gateway, manager, worker | Price_Table, see below |
 
 If you change `limits.max_attempts`, set the `das-jobs` policy `delivery-limit` in `deploy/rabbitmq/definitions.json` to `max_attempts - 1`.
+
+### Client API settings
+
+The Gateway reads these from its config. `deploy/config/gateway.yaml` lists every one with its default (a test keeps that file equal to the defaults), so it is the place to start. They can also be set as environment variables in the usual form, for example `DAS__CLIENT_LIMITS__DEFAULT__RATE=0`. Limits are per API key and shared by every Gateway replica.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `client_limits.default.rate` | 60 | Requests per second per API key; `0` turns the rate limit off |
+| `client_limits.default.burst` | 120 | How many requests may arrive at once before the rate applies |
+| `client_limits.default.max_active_requests` | 100 | Unfinished Requests per key; `0` turns the quota off |
+| `client_limits.default.max_streams` | 10 | Open event streams per key; `0` turns the cap off |
+| `client_limits.default.default_budget` | none | A budget (`max_total_tokens`, `max_cost`) applied to submits that send none, and a cap on what a submit may ask for |
+| `client_limits.default.webhook_url` | none | Where terminal events are posted (`https`, unless `allow_insecure_webhooks`) |
+| `client_limits.default.webhook_secret_name` | none | The name of the webhook secret that signs them |
+| `client_limits.overrides` | none | Per-key settings, matched by Key_Fingerprint; see below |
+| `client_limits.idempotency_ttl` | 86400 | Seconds an `Idempotency-Key` is remembered (60 to 604800) |
+| `client_limits.allow_insecure_webhooks` | false | Allow `http://` webhook URLs, for testing only |
+| `events.max_len` | 1000 | Events kept per Request (100 to 100000); the oldest are dropped beyond it |
+| `events.max_connections` | 500 | Event streams one Gateway replica serves at once (`503` beyond it) |
+| `events.keepalive` | 15 | Seconds of silence before a `: keepalive` comment is sent (up to 300) |
+| `webhook.workers` | 2 | Delivery workers per Gateway replica; `0` turns the sender off on that replica |
+| `webhook.timeout` | 10 | Seconds to wait for the receiver's answer |
+| `webhook.base_backoff` | 30 | Seconds before the first retry; it doubles each attempt |
+| `webhook.max_backoff` | 3600 | The longest wait between attempts (at least `base_backoff`) |
+| `webhook.max_attempts` | 8 | Attempts in all before a delivery is `failed` |
+
+To give one API key its own settings, add an entry to `client_limits.overrides` with the key's fingerprint: the first 8 hex characters of `sha256(api_key)`. Fields an entry leaves out are inherited from `client_limits.default`. A fingerprint that matches no configured key, or that is listed twice, stops the Gateway from starting.
+
+```bash
+printf %s "$KEY" | shasum -a 256 | cut -c1-8    # Linux: sha256sum; for the placeholder key change-me-api-key this is 484857e0
+```
+
+```yaml
+client_limits:
+  default:
+    rate: 30.0
+    max_active_requests: 20
+    default_budget:
+      max_total_tokens: 200000
+  overrides:
+    - fingerprint: "484857e0"  # the key change-me-api-key
+      rate: 600.0
+      burst: 1200
+      webhook_url: https://hooks.example.com/das
+      webhook_secret_name: partner
+```
+
+```yaml
+events:
+  max_connections: 200
+webhook:
+  workers: 4
+  max_attempts: 5
+```
+
+A webhook secret is set as `DAS__WEBHOOK_SECRETS__PARTNER` for `webhook_secret_name: partner` (the name is lower-cased). It must be at least 16 characters and comes only from the environment or the secrets file, never from YAML. **Never leave it set but empty:** an empty or short value stops the Gateway from starting. In Docker Compose, `deploy/.env.example` keeps the line commented out and the `gateway` service passes the name through.
 
 ### Retention_Policy
 
@@ -298,6 +537,7 @@ Nothing in the code assumes Compose service names. To run a role on another mach
 Requirements:
 
 - Python 3.12 and [uv](https://docs.astral.sh/uv/) 0.13.6, the same version CI uses. Regenerate `uv.lock` with this version when you add a dependency, otherwise `uv sync --locked` fails on CI.
+- Python 3.10 to 3.13 for the client package's own tests (uv installs the interpreter on demand).
 - Docker, running, for the integration suite, the e2e suite, and the repeat-run check.
 - Docker Compose 2.30 or later for the e2e suite.
 
@@ -329,10 +569,16 @@ Import contracts (Manager and Worker must not import broker, RPC, or Redis clien
 uv run lint-imports
 ```
 
-Fast suite (unit and property tests, no Docker):
+Fast suite (unit, property, and contract tests, no Docker). The contract tests run the Python client package against the real Gateway app in-process:
 
 ```bash
-uv run pytest tests/unit tests/property
+uv run pytest tests/unit tests/property tests/contract
+```
+
+Client package suite (`clients/python`, Python 3.10 to 3.13, no Docker). The client is not a uv workspace member: the server's lock is Python 3.12 only, and a member would pin the client to it. So its own tests run in an isolated environment, on the interpreter named by `UV_PYTHON` (CI sets it from its Python matrix; locally, run `UV_PYTHON=3.10 uv run ...`, or add `--python 3.10`):
+
+```bash
+uv run --isolated --no-project --with-editable clients/python --with pytest==9.1.1 --with pytest-asyncio==1.4.0 --with respx==0.23.1 pytest clients/python/tests -c clients/python/pyproject.toml --rootdir clients/python
 ```
 
 Integration suite (RabbitMQ and gRPC through testcontainers, needs Docker):
@@ -341,11 +587,13 @@ Integration suite (RabbitMQ and gRPC through testcontainers, needs Docker):
 uv run pytest tests/integration --ignore=tests/integration/e2e
 ```
 
-E2E suite (full Compose stack with a fake LLM, needs Docker and Compose 2.30+, about 1.5 min):
+E2E suite (full Compose stacks with a fake LLM, needs Docker and Compose 2.30+, about 4 min once the images are built; the first run also builds the three `das-*` images, about 2.5 min):
 
 ```bash
 uv run pytest tests/integration/e2e
 ```
+
+The suite brings up three Compose projects, one after the other, each torn down with `down -v` before the next: `das-e2e` (the platform), `das-e2e-obs` (the observability stack) and `das-e2e-client` (the client API: two Gateways, two Managers, two Workers and a webhook sink, about 70 s). The ports they publish are chosen free for each run, so nothing in them is fixed. The client API stack checks the shared Rate_Limit bucket, event latency, webhook retries with signatures, a budget stop, `das-client` against the real stack, and a stream that survives killing the Manager that owns the Request. `DAS_E2E_CLIENT_OVERRIDE_EXTRA` names one more Compose file to layer on top of that stack, for trying a deliberately broken variant.
 
 Repeat-run check (runs `test_reconnect_restores_subscriptions` 20 times in one pytest session against one RabbitMQ container, needs Docker; exits non-zero if any of the 20 runs fails):
 
@@ -393,11 +641,12 @@ Transport adapters are discovered through the `das.transports` entry-point group
 
 ## Continuous integration
 
-The workflow `.github/workflows/ci.yml` (named **CI**) has three jobs. Each job installs Python 3.12 and uv 0.13.6, runs `uv sync --locked`, then runs the commands listed below, which are the same commands as in [Development](#development). Each job reports its own status check on the commit and pull request.
+The workflow `.github/workflows/ci.yml` (named **CI**) has four jobs. Every job installs uv 0.13.6 and runs the commands listed below, which are the same commands as in [Development](#development). `fast`, `integration`, and `e2e` use Python 3.12 and run `uv sync --locked` first. `client` sets up each supported Python itself and does not sync, because it tests the client package in an isolated environment. Each job reports its own status check on the commit and pull request; `client` reports one per Python (`Client_Job (Python 3.10)` and so on).
 
 | Job | Commands | Runs on | Timeout |
 |---|---|---|---|
-| `fast` (Fast_Job) | `uv run ruff check`, `uv run mypy`, `uv run lint-imports`, `uv run pytest tests/unit tests/property` | every push to any branch (not tags); pull requests when opened, synchronized, or reopened; manual run | 15 min |
+| `fast` (Fast_Job) | `uv run ruff check`, `uv run mypy`, `uv run lint-imports`, `uv run pytest tests/unit tests/property tests/contract` | every push to any branch (not tags); pull requests when opened, synchronized, or reopened; manual run | 15 min |
+| `client` (Client_Job) | the client package suite from [Development](#development), once for each of Python 3.10, 3.11, 3.12, and 3.13 | same as `fast`; does not wait for it | 10 min per Python |
 | `integration` (Integration_Job) | `uv run pytest tests/integration --ignore=tests/integration/e2e`, then the repeat-run check (`... --count 20 -v`) | push to `main`; manual run | 30 min |
 | `e2e` (E2E_Job) | checks Docker Compose is 2.30 or later, then `uv run pytest tests/integration/e2e` | push to `main`; manual run | 30 min |
 
@@ -407,7 +656,7 @@ A new commit on the same branch, for the same event type, cancels the previous r
 
 ### Running CI manually
 
-To run all three jobs on any branch:
+To run every job on any branch:
 
 1. Open the repository on GitHub and go to the **Actions** tab.
 2. Select the **CI** workflow in the list on the left.
@@ -419,8 +668,8 @@ To run all three jobs on any branch:
 
 Each `fast` run picks a random Hypothesis seed. To rerun a failed run locally with the same seed:
 
-1. Open the failed run, then the `fast` job, then the step `uv run pytest tests/unit tests/property`.
+1. Open the failed run, then the `fast` job, then the step `uv run pytest tests/unit tests/property tests/contract`.
 2. Find the line `Hypothesis seed: <n>` near the top of the step log. The next line prints the full local command.
-3. Run the fast suite with that seed, replacing `<n>` with the number: `uv run pytest tests/unit tests/property --hypothesis-seed=<n>`.
+3. Run the fast suite with that seed, replacing `<n>` with the number: `uv run pytest tests/unit tests/property tests/contract --hypothesis-seed=<n>`.
 
 CI uses the `default` Hypothesis profile. Do not set `HYPOTHESIS_PROFILE=ci` when reproducing: that profile is derandomized and ignores `--hypothesis-seed`.

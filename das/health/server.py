@@ -29,7 +29,7 @@ import logging
 import socket
 from collections.abc import Awaitable, Callable, Generator, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import uvicorn
 from starlette.applications import Starlette
@@ -364,12 +364,21 @@ class HealthServer:
     """Runs a health app with uvicorn as a background task.
 
     ``start()`` returns once the socket is listening; ``stop()`` shuts it down.
-    Pass ``port=0`` to bind an ephemeral port (see :attr:`port`).
+    Pass ``port=0`` to bind an ephemeral port (see :attr:`port`). ``lifespan="on"`` runs the app's
+    ASGI startup and shutdown events (the Gateway's Webhook_Sender workers live there); the health
+    and ops apps have none and keep the default ``"off"``.
     """
 
-    def __init__(self, app: Starlette, port: int, host: str = "0.0.0.0") -> None:
+    def __init__(
+        self,
+        app: Starlette,
+        port: int,
+        host: str = "0.0.0.0",
+        *,
+        lifespan: Literal["on", "off"] = "off",
+    ) -> None:
         config = uvicorn.Config(
-            app, host=host, port=port, lifespan="off", log_config=None, access_log=False
+            app, host=host, port=port, lifespan=lifespan, log_config=None, access_log=False
         )
         self._server = _NoSignalServer(config)
         self._task: asyncio.Task[None] | None = None

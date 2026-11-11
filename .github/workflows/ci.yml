@@ -54,14 +54,38 @@ jobs:
       # Hypothesis profile "default" is used on purpose: the "ci" profile sets
       # derandomize=True, which overrides --hypothesis-seed. The .hypothesis
       # directory is never cached, so every run starts from the logged seed.
-      - name: uv run pytest tests/unit tests/property
+      - name: uv run pytest tests/unit tests/property tests/contract
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
           HYPOTHESIS_SEED="$(od -An -N4 -tu4 /dev/urandom | tr -d ' \n')"
           echo "Hypothesis seed: ${HYPOTHESIS_SEED}"
-          echo "Reproduce locally: uv run pytest tests/unit tests/property --hypothesis-seed=${HYPOTHESIS_SEED}"
+          echo "Reproduce locally: uv run pytest tests/unit tests/property tests/contract --hypothesis-seed=${HYPOTHESIS_SEED}"
           export PYTEST_ADDOPTS="--hypothesis-seed=${HYPOTHESIS_SEED}"
-          uv run pytest tests/unit tests/property
+          uv run pytest tests/unit tests/property tests/contract
+
+  # Client_Package (clients/python): its own tests, once per supported Python. It is not a uv workspace member
+  # (the server's lock is Python 3.12 only), so the tests run in an isolated environment. setup-uv's python-version
+  # sets UV_PYTHON, which the command below honours; that keeps the command identical for every Python and equal to
+  # the README block. It runs on every trigger and does not wait for the fast job.
+  client:
+    name: Client_Job (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+      - name: uv run pytest clients/python/tests
+        run: uv run --isolated --no-project --with-editable clients/python --with pytest==9.1.1 --with pytest-asyncio==1.4.0 --with respx==0.23.1 pytest clients/python/tests -c clients/python/pyproject.toml --rootdir clients/python
 
   integration:
     name: Integration_Job
@@ -148,7 +172,7 @@ jobs:
           DAS_E2E_LOG_DIR: ${{ runner.temp }}/e2e-logs
         run: |
           mkdir -p "$DAS_E2E_LOG_DIR"
-          for project in das-e2e das-e2e-obs; do
+          for project in das-e2e das-e2e-obs das-e2e-client; do
             for id in $(docker ps -aq --filter "label=com.docker.compose.project=${project}"); do
               name="$(docker inspect --format '{{.Name}}' "$id" | tr -d '/')"
               docker logs --timestamps "$id" > "${DAS_E2E_LOG_DIR}/container-${project}-${name}.log" 2>&1 || true
@@ -165,7 +189,7 @@ jobs:
       - name: Tear down Compose stacks
         if: ${{ always() }}
         run: |
-          for project in das-e2e das-e2e-obs; do
+          for project in das-e2e das-e2e-obs das-e2e-client; do
             docker compose -p "$project" down -v --remove-orphans || true
             docker ps -aq --filter "label=com.docker.compose.project=${project}" | xargs -r docker rm -f || true
             docker volume ls -q --filter "label=com.docker.compose.project=${project}" | xargs -r docker volume rm || true

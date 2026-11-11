@@ -1,0 +1,46 @@
+# Gateway_API Agent_Config for the client API end-to-end stack (das-client-api task 11.1).
+#
+# Mounted over /etc/das/config.yaml by docker-compose.client-api.e2e.yml. It is deploy/config/gateway.yaml with the
+# Phase 4 sections filled in for the tests; a unit test keeps every other setting equal to the production sample.
+# Supplied by the environment: DAS__REDIS__URL, DAS__GRPC__ADVERTISE_HOST, DAS__API_KEYS (the main key and the
+# limited key, comma-separated) and DAS__WEBHOOK_SECRETS__E2E (set in the override).
+role: gateway
+http_port: 8080
+health_port: 8081
+
+transports:
+  jobs: rabbitmq
+  control: grpc
+
+grpc:
+  bind: "0.0.0.0:50051"
+  advertise_port: 50051
+
+limits:
+  max_prompt_length: 32000
+  heartbeat_interval: 5
+  shutdown_timeout: 30
+  startup_timeout: 60
+  startup_retry_interval: 2
+
+client_limits:
+  default:
+    # The main key (e2e-api-key-0123456789) is effectively not throttled, so no test is slowed or rejected by it.
+    rate: 1000.0
+    burst: 2000
+    max_active_requests: 1000
+    max_streams: 100
+    # Every Request of the main key delivers its terminal event to the webhook sink.
+    webhook_url: http://webhook-sink:8099/hook
+    webhook_secret_name: e2e
+  overrides:
+    # The limited key (e2e-limited-key-0123456789): five calls at once, then one per second. Only the shared-bucket
+    # test uses it, and it creates no Requests.
+    - fingerprint: "f22c46dc"
+      rate: 1.0
+      burst: 5
+  allow_insecure_webhooks: true  # the sink is plain http inside the stack
+
+webhook:
+  base_backoff: 1.0  # the first retry about a second after the first attempt, so the retry test is quick
+  max_backoff: 4.0

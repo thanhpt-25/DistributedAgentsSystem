@@ -53,7 +53,13 @@ dev = [
     "botocore-stubs==1.40.61",
     # Repeat_Run_Check (Req 10.4, 10.8).
     "pytest-repeat==0.9.4",
+    # Phase 4 Client_Package, for the contract test and Property 8 (Req 9.10). A path source, not a workspace
+    # member: the client supports Python 3.10 to 3.13 and a member would pin it to this project's 3.12.
+    "das-client",
 ]
+
+[tool.uv.sources]
+das-client = { path = "clients/python", editable = true }
 
 [build-system]
 requires = ["hatchling==1.27.0"]
