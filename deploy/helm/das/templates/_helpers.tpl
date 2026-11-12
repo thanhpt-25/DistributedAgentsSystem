@@ -140,6 +140,24 @@ containers:
       - name: DAS__WORKER__CAPABILITIES
         value: {{ .capabilities | quote }}
       {{- end }}
+      {{- if and .root.Values.lifecycle.preStopDrain.enabled (ne .role "gateway") }}
+      # The key the preStop hook drains with, taken from the Secret. Optional: without it the drain fails and is skipped.
+      - name: DAS_ADMIN_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: {{ .root.Values.existingSecret }}
+            key: {{ .root.Values.lifecycle.preStopDrain.adminKeySecretKey }}
+            optional: true
+      {{- end }}
+    {{- if and .root.Values.lifecycle.preStopDrain.enabled (ne .role "gateway") }}
+    {{- /* Take this pod out of dispatch before SIGTERM. The Secret key may hold the whole admin list: use its first
+           key. A failed drain must not keep the pod from stopping, so the hook always exits 0. */}}
+    {{- $url := default (printf "http://%s-gateway:%v" (include "das.fullname" .root) .root.Values.gateway.service.port) .root.Values.lifecycle.preStopDrain.gatewayUrl }}
+    lifecycle:
+      preStop:
+        exec:
+          command: {{ list "/bin/sh" "-c" (print "DAS_ADMIN_API_KEY=\"${DAS_ADMIN_API_KEY%%,*}\" das drain " (squote $url) " \"$DAS__AGENT_ID\" || true") | toJson }}
+    {{- end }}
     ports:
       {{- if eq .role "gateway" }}
       - name: http

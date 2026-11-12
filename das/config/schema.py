@@ -420,7 +420,7 @@ class ClientLimitsConfig(_Section):
     idempotency_ttl: int = Field(default=86_400, ge=60, le=604_800)
     allow_insecure_webhooks: bool = False
 
-    def merged(self, override: ClientOverride | None) -> ClientSettingsConfig:
+    def merged(self, override: ClientOverride | TenantSettings | None) -> ClientSettingsConfig:
         """Effective settings: each field the override sets, else the default (Phase 4 Req 1.3)."""
         if override is None:
             return self.default
@@ -440,6 +440,8 @@ class ClientLimitsConfig(_Section):
 
 #: Tenant_ID (Phase 5 Req 1.1). ``default`` is reserved for the Default_Tenant (checked in ``tenant_errors``).
 TENANT_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"
+#: The implicit tenant, which no ``tenants`` entry may take (Phase 5 Req 1.1); equals ``das.state.keys.DEFAULT_TENANT``.
+DEFAULT_TENANT_ID = "default"
 MAX_TENANTS = 100
 MAX_TENANT_KEYS = 50
 TenantScope = Literal["submit", "read", "admin"]
@@ -929,9 +931,48 @@ def client_api_errors(config: AgentConfig) -> list[FieldError]:
     return errors
 
 
+def tenant_errors(config: AgentConfig) -> list[FieldError]:
+    """Phase 5 checks of the ``tenants`` list that need validated values (Req 1.1, 1.4, 4.2).
+
+    Gateway role only, like :func:`client_api_errors`. A tenant fingerprint must match a configured key of
+    ``api_keys`` (not an Admin_API_Key), appear once across all tenants, and a tenant id is unique and not the
+    reserved ``default``. A webhook target in a tenant's ``settings`` follows the Phase 4 rules. Errors name field
+    paths and never include a key, a secret or a fingerprint value.
+    """
+    if config.role != "gateway" or not config.tenants:
+        return []
+    api = {key_fingerprint(k.get_secret_value().encode("utf-8")) for k in config.api_keys}
+    admin = {key_fingerprint(k.get_secret_value().encode("utf-8")) for k in config.admin_api_keys}
+    errors: list[FieldError] = []
+    first_id: dict[str, int] = {}
+    first_key: dict[str, str] = {}
+    for t_index, tenant in enumerate(config.tenants):
+        path = f"tenants[{t_index}]"
+        if tenant.id == DEFAULT_TENANT_ID:
+            errors.append(FieldError(f"{path}.id", f"{DEFAULT_TENANT_ID!r} is reserved for the implicit tenant"))
+        elif tenant.id in first_id:
+            errors.append(FieldError(f"{path}.id", f"duplicate id (same as tenants[{first_id[tenant.id]}].id)"))
+        else:
+            first_id[tenant.id] = t_index
+        for k_index, key in enumerate(tenant.keys):
+            key_path = f"{path}.keys[{k_index}].fingerprint"
+            if key.fingerprint in first_key:
+                errors.append(FieldError(key_path, f"already listed at {first_key[key.fingerprint]}"))
+                continue
+            first_key[key.fingerprint] = f"{path}.keys[{k_index}]"
+            if key.fingerprint in admin:
+                errors.append(FieldError(key_path, "matches an Admin_API_Key, which no tenant may claim"))
+            elif key.fingerprint not in api:
+                errors.append(FieldError(key_path, "matches no configured key in api_keys"))
+        errors.extend(
+            _webhook_errors(f"{path}.settings", tenant.settings, config.client_limits.merged(tenant.settings), config)
+        )
+    return errors
+
+
 def _webhook_errors(
     prefix: str,
-    own: ClientSettingsConfig | ClientOverride,
+    own: ClientSettingsConfig | ClientOverride | TenantSettings,
     effective: ClientSettingsConfig,
     config: AgentConfig,
 ) -> list[FieldError]:
@@ -1071,6 +1112,8 @@ def validate_config(data: Mapping[str, Any]) -> AgentConfig:
     if config is not None:
         seen = {e.field for e in errors}
         errors.extend(e for e in client_api_errors(config) if e.field not in seen)
+        seen = {e.field for e in errors}
+        errors.extend(e for e in tenant_errors(config) if e.field not in seen)
     if errors or config is None:
         raise ConfigError(errors, reason="invalid configuration")
     return config
@@ -1124,5 +1167,6 @@ __all__ = [
     "cross_field_errors",
     "parse_otlp_headers",
     "pydantic_errors",
+    "tenant_errors",
     "validate_config",
 ]

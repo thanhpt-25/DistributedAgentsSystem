@@ -9,7 +9,10 @@ metadata:
   labels:
     {{- include "das.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
 spec:
+  {{- /* With KEDA the replica count is its to set: a fixed value here would reset it on every helm upgrade. */}}
+  {{- if not $.Values.keda.enabled }}
   replicas: {{ default 1 $worker.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "das.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}

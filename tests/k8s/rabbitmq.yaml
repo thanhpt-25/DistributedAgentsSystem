@@ -1,0 +1,49 @@
+# RabbitMQ 4.1 with the management plugin for the kind cluster tests. The Manager applies the das-jobs policy and the
+# transport declares the queues, so no definitions import is needed (plan section 9, G0b). Not part of the chart.
+# The credentials come from the Secret `das-secrets` that the test harness creates with random values.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: das
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: rabbitmq}
+  template:
+    metadata:
+      labels: {app: rabbitmq}
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4.1-management
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef: {name: das-secrets, key: RABBITMQ_USER}
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef: {name: das-secrets, key: RABBITMQ_PASS}
+          ports:
+            - containerPort: 5672
+            - containerPort: 15672
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: das
+spec:
+  selector: {app: rabbitmq}
+  ports:
+    - name: amqp
+      port: 5672
+    - name: management
+      port: 15672

@@ -15,7 +15,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Final, Literal
 
@@ -180,6 +180,12 @@ class StoreStatus(StrEnum):
 
 class StoreError(Exception):
     """Unexpected State_Store condition (not a normal script outcome)."""
+
+
+class IndexNotReady(StoreError):
+    """A non-default tenant was listed before the Tenant_Backfill set ``das:tenant:index:ready`` (Phase 5 Req 9.3).
+
+    The Gateway answers it as 503 ``index_not_ready``, like the Phase 2 Request_Index."""
 
 
 LEASE_KIND_INITIAL: Final = "initial"
@@ -440,6 +446,9 @@ class StoredRequest:
     # Only with ``load_snapshot(include_client=True)`` (Phase 4 Req 8.9, 7.1).
     webhook: WebhookState | None = None  # None: no Webhook_Delivery exists
     last_event_id: str | None = None  # newest Event_ID; None when the Event_Stream is empty
+    # Phase 5 fields (absent on Requests written before: tenant ``default``, priority ``normal``).
+    tenant: str = keys.DEFAULT_TENANT
+    priority: Literal["normal", "high"] = "normal"
 
 
 def _s(value: Any) -> str:
@@ -1089,9 +1098,14 @@ class StateStore:
         capability: str | None = None,
         limit: int = 20,
         after: tuple[int, str] | None = None,
+        tenant: str | None = None,
     ) -> DeadLetterPage:
         """One page of Dead_Letter_Records matching every given filter, ordered by
         dead_lettered_at then Dead_Letter_ID, both descending (Req 12.4, 12.5).
+
+        ``tenant`` limits the page to the records of that tenant's Requests (its twin keys); ``None`` is an
+        Operator and reads the global keys, including records whose Request is gone. Raises
+        :class:`IndexNotReady` as :meth:`list_requests` does (Phase 5 Req 5.3, 9.3).
 
         ``after`` is the ``(score_ms, dlid)`` of the last record of the previous page
         (decoded from the Page_Cursor by the Gateway).
@@ -1102,12 +1116,13 @@ class StateStore:
             raise ValueError(f"unknown Record_Status {status!r}")
         if reason is not None and reason not in DEAD_LETTER_REASONS:
             raise ValueError(f"unknown Dead_Letter_Reason {reason!r}")
+        scope = await self._listing_tenant(tenant)
         if status is not None:
-            source = keys.dlq_by_status(status)
+            source = keys.dlq_by_status(status) if scope is None else keys.tenant_dlq_by_status(scope, status)
         elif reason is not None:
-            source = keys.dlq_by_reason(reason)
+            source = keys.dlq_by_reason(reason) if scope is None else keys.tenant_dlq_by_reason(scope, reason)
         else:
-            source = keys.DLQ_INDEX
+            source = keys.DLQ_INDEX if scope is None else keys.tenant_dlq_index(scope)
         filters = {
             k: v
             for k, v in (
@@ -1315,6 +1330,92 @@ class StateStore:
         reply = await self._r.eval(_RELEASE_LOCK_LUA, 1, keys.REQUESTS_INDEX_BACKFILL_LOCK, owner)
         return int(reply) == 1
 
+    # ------------------------------------------------------------------ Tenant_Index (Phase 5)
+
+    async def tenant_index_ready(self) -> bool:
+        """True once the Tenant_Backfill completed (Phase 5 Req 9.2)."""
+        return _opt(await self._r.get(keys.TENANT_INDEX_READY)) == "1"
+
+    async def set_tenant_index_ready(self) -> None:
+        await self._r.set(keys.TENANT_INDEX_READY, "1")
+
+    async def acquire_tenant_backfill_lock(self, owner: str, ttl_ms: int) -> bool:
+        """``SET das:tenant:index:backfill_lock owner NX PX ttl_ms`` (Phase 5 Req 9.2)."""
+        return bool(await self._r.set(keys.TENANT_INDEX_BACKFILL_LOCK, owner, nx=True, px=int(ttl_ms)))
+
+    async def renew_tenant_backfill_lock(self, owner: str, ttl_ms: int) -> bool:
+        reply = await self._r.eval(_RENEW_LOCK_LUA, 1, keys.TENANT_INDEX_BACKFILL_LOCK, owner, int(ttl_ms))
+        return int(reply) == 1
+
+    async def release_tenant_backfill_lock(self, owner: str) -> bool:
+        reply = await self._r.eval(_RELEASE_LOCK_LUA, 1, keys.TENANT_INDEX_BACKFILL_LOCK, owner)
+        return int(reply) == 1
+
+    async def scan_request_index(self, count: int = 200) -> AsyncIterator[list[str]]:
+        """The Request_IDs of ``das:requests:index`` in batches, via ``ZSCAN`` (every member present for the whole
+        scan is returned; one added or removed meanwhile may or may not be, and may repeat)."""
+        async for batch in self._zscan_batches(keys.REQUESTS_INDEX, count):
+            yield batch
+
+    async def scan_dead_letter_index(self, count: int = 200) -> AsyncIterator[list[str]]:
+        """The Dead_Letter_IDs of ``das:dlq:index`` in batches, like :meth:`scan_request_index`."""
+        async for batch in self._zscan_batches(keys.DLQ_INDEX, count):
+            yield batch
+
+    async def _zscan_batches(self, key: str, count: int) -> AsyncIterator[list[str]]:
+        cursor = 0
+        while True:
+            cursor, members = await self._r.zscan(key, cursor, count=count)
+            if members:
+                yield [_s(member) for member, _score in members]
+            if int(cursor) == 0:
+                return
+
+    async def tenant_backfill_requests(self, rids: Sequence[str]) -> int:
+        """File the Requests of one batch in their tenant's index twins and active set (task 3.8). Idempotent;
+        returns how many it filed (an id that is gone or not in the global index is skipped)."""
+        return await self._backfill("requests", keys.REQUESTS_INDEX, rids)
+
+    async def tenant_backfill_dead_letters(self, dlids: Sequence[str]) -> int:
+        """File the Dead_Letter_Records of one batch in their tenant's DLQ twins; a record without a Request has no
+        tenant and is skipped. Idempotent; returns how many it filed."""
+        return await self._backfill("dlq", keys.DLQ_INDEX, dlids)
+
+    async def _backfill(self, kind: str, index_key: str, ids: Sequence[str]) -> int:
+        if not ids:
+            return 0
+        reply = await self._run("tenant_backfill", [index_key], [kind, *ids])
+        return int(reply[1])
+
+    async def _listing_tenant(self, tenant: str | None) -> str | None:
+        """The tenant whose twin keys a listing reads, or ``None`` for the global keys.
+
+        ``None`` is an Operator. Until the Tenant_Backfill has run the twins are incomplete: the default tenant
+        then reads the global keys and any other tenant is refused (Phase 5 Req 9.3).
+        """
+        if tenant is None:
+            return None
+        ready = await self.tenant_index_ready()
+        if tenant == keys.DEFAULT_TENANT:
+            return tenant if ready else None
+        if not ready:
+            raise IndexNotReady(f"tenant index not ready for {tenant!r}")
+        return tenant
+
+    async def read_usage(self, tenant: str, days: Sequence[date]) -> dict[date, dict[str, str]]:
+        """The Usage_Rollup hash of ``tenant`` for each UTC day, in the order given; ``{}`` for a day without one.
+
+        One round trip. Fields are ``submitted``, ``finished/{status}`` and ``tokens/{in,out,total}/{provider}/{model}``
+        (Phase 5 Req 6.1); ``das.tenancy.usage.parse_rollup`` turns them into numbers.
+        """
+        if not days:
+            return {}
+        async with self._r.pipeline(transaction=False) as pipe:
+            for d in days:
+                pipe.hgetall(keys.tenant_usage(tenant, f"{d.year:04d}{d.month:02d}{d.day:02d}"))
+            rows = await pipe.execute()
+        return {d: {_s(k): _s(v) for k, v in row.items()} for d, row in zip(days, rows, strict=True)}
+
     async def scan_request_ids(self, count: int = 500) -> AsyncIterator[str]:
         """Every Request_ID with a ``das:req:{rid}`` hash, via ``SCAN MATCH das:req:*
         TYPE hash``; keys with a suffix (``:jobs``, ``:results``, ...) are skipped.
@@ -1333,8 +1434,13 @@ class StateStore:
         created_before_ms: int | None = None,
         limit: int = 20,
         after: tuple[int, str] | None = None,
+        tenant: str | None = None,
     ) -> RequestPage:
         """One page of Requests in (created_at desc, Request_ID desc) order (Req 15.1).
+
+        ``tenant`` limits the page to one tenant by reading its twin keys; ``None`` (an Operator, and every
+        Phase 4 caller) reads the global index. Raises :class:`IndexNotReady` for a non-default tenant before
+        the Tenant_Backfill finished (Phase 5 Req 3.3, 9.3).
 
         ``statuses`` (1-5 values) matches the current status; ``created_after_ms`` is
         inclusive and ``created_before_ms`` exclusive (Req 15.2). ``after`` is the
@@ -1352,9 +1458,15 @@ class StateStore:
                     wanted.append(st)
             if not 1 <= len(wanted) <= len(_STATUS_ORDER):
                 raise ValueError("statuses must hold 1 to 5 Request_Status values")
-        sources = (
-            [keys.requests_by_status(s.value) for s in wanted] if wanted else [keys.REQUESTS_INDEX]
-        )
+        scope = await self._listing_tenant(tenant)
+        if scope is None:
+            sources = [keys.requests_by_status(s.value) for s in wanted] if wanted else [keys.REQUESTS_INDEX]
+        else:
+            sources = (
+                [keys.tenant_requests_by_status(scope, s.value) for s in wanted]
+                if wanted
+                else [keys.tenant_requests(scope)]
+            )
         reply = await self._run(
             "list_index",
             sources,
@@ -1622,6 +1734,8 @@ class StateStore:
             client_fp=req.get(keys.F_CLIENT_FP) or None,
             webhook=webhook,
             last_event_id=last_event_id,
+            tenant=req.get(keys.F_TENANT) or keys.DEFAULT_TENANT,
+            priority="high" if req.get(keys.F_PRIORITY) == "high" else "normal",
         )
 
 

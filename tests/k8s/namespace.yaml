@@ -1,0 +1,5 @@
+# Namespace of the kind cluster tests (das-multi-tenant task 11.1). The chart and the test infrastructure live here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: das

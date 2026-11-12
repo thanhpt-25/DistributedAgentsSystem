@@ -1,0 +1,43 @@
+# The Ollama-compatible stub LLM of the Compose e2e tests (tests/integration/e2e/llm_stub.py), so cluster tests need
+# no real model. The script is mounted from the ConfigMap `llm-stub`, which the test harness creates from that file.
+# A `[[delay=N]]` marker in a Job instruction holds the reply for N seconds, to keep a Job in flight.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-stub
+  namespace: das
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: llm-stub}
+  template:
+    metadata:
+      labels: {app: llm-stub}
+    spec:
+      containers:
+        - name: llm-stub
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-u", "/stub/llm_stub.py"]
+          ports:
+            - containerPort: 11434
+          volumeMounts:
+            - name: stub
+              mountPath: /stub
+          readinessProbe:
+            httpGet: {path: /api/tags, port: 11434}
+            periodSeconds: 3
+      volumes:
+        - name: stub
+          configMap:
+            name: llm-stub
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-stub
+  namespace: das
+spec:
+  selector: {app: llm-stub}
+  ports:
+    - port: 11434

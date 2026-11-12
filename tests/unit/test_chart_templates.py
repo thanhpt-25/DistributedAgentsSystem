@@ -69,7 +69,7 @@ def test_the_minimal_values_render_the_three_roles_and_their_companions() -> Non
 
 
 def test_there_is_one_worker_deployment_per_workers_entry_with_its_capabilities_and_replicas() -> None:
-    deployments = of_kind(render([ALL]), "Deployment")
+    deployments = of_kind(render([ALL], sets=["keda.enabled=false"]), "Deployment")  # with KEDA it owns the replicas
     research, review = deployments["release-das-worker-research"], deployments["release-das-worker-review"]
     assert env(research)["DAS__WORKER__CAPABILITIES"]["value"] == "research,summarize"
     assert env(review)["DAS__WORKER__CAPABILITIES"]["value"] == "code-review"
@@ -288,6 +288,151 @@ def test_the_service_account_can_be_switched_off_or_named() -> None:
 def test_a_release_named_after_the_chart_is_not_doubled() -> None:
     names = {d["metadata"]["name"] for d in render(release="das")}
     assert "das-gateway" in names and "das-das-gateway" not in names
+
+
+# --------------------------------------------------------------------------- KEDA (task 10.3, Req 10.1)
+
+RESEARCH, REVIEW = "release-das-worker-research", "release-das-worker-review"
+
+
+def scaled_objects(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return of_kind(docs, "ScaledObject")
+
+
+def test_keda_is_off_by_default_and_renders_nothing() -> None:
+    assert scaled_objects(render()) == {}
+    assert scaled_objects(render([ALL], sets=["keda.enabled=false"])) == {}
+
+
+def test_keda_renders_one_scaled_object_per_worker_deployment_and_targets_it() -> None:
+    docs = render([ALL])
+    objects, deployments = scaled_objects(docs), of_kind(docs, "Deployment")
+    assert sorted(objects) == [RESEARCH, REVIEW]  # not the Gateway, not the Manager
+    for name, obj in objects.items():
+        assert obj["apiVersion"] == "keda.sh/v1alpha1"
+        target = {"name": name, "envSourceContainerName": container(deployments[name])["name"]}
+        assert obj["spec"]["scaleTargetRef"] == target
+        assert deployments[name]["kind"] == "Deployment"
+        assert obj["metadata"]["labels"]["app.kubernetes.io/component"] == name.removeprefix("release-das-")
+
+
+def test_every_capability_queue_of_a_worker_is_a_trigger() -> None:
+    objects = scaled_objects(render([ALL]))
+    research = objects[RESEARCH]["spec"]["triggers"]
+    review = objects[REVIEW]["spec"]["triggers"]
+    assert [t["metadata"]["queueName"] for t in research] == ["das.jobs.research", "das.jobs.summarize"]
+    assert [t["metadata"]["queueName"] for t in review] == ["das.jobs.code-review"]
+    for trigger in research + review:
+        queue = trigger["metadata"]["queueName"]
+        assert trigger == {
+            "type": "rabbitmq",
+            "metadata": {
+                "protocol": "amqp", "queueName": queue, "mode": "QueueLength", "value": "5",
+                "hostFromEnv": "DAS__RABBITMQ__URL",
+            },
+        }  # fmt: skip
+
+
+def test_the_trigger_reads_the_broker_url_from_the_env_of_the_scaled_container() -> None:
+    docs = render([ALL])
+    for name, obj in scaled_objects(docs).items():
+        for trigger in obj["spec"]["triggers"]:
+            assert trigger["metadata"]["hostFromEnv"] in env(of_kind(docs, "Deployment")[name])
+    assert "amqp://" not in yaml.safe_dump(list(scaled_objects(docs).values()))  # a name, never the credentialed URL
+
+
+def test_keda_settings_come_from_the_values() -> None:
+    spec = scaled_objects(render([ALL]))[RESEARCH]["spec"]
+    assert (spec["pollingInterval"], spec["minReplicaCount"], spec["maxReplicaCount"]) == (10, 1, 8)
+    sets = ["keda.queueLength=20", "keda.pollingInterval=30", "keda.minReplicaCount=0", "keda.maxReplicaCount=3"]
+    spec = scaled_objects(render([ALL], sets=sets))[REVIEW]["spec"]
+    assert (spec["pollingInterval"], spec["minReplicaCount"], spec["maxReplicaCount"]) == (30, 0, 3)
+    assert {t["metadata"]["value"] for t in spec["triggers"]} == {"20"}
+
+
+def test_with_keda_the_worker_deployments_leave_the_replica_count_to_it() -> None:
+    on = of_kind(render([ALL]), "Deployment")
+    off = of_kind(render([ALL], sets=["keda.enabled=false"]), "Deployment")
+    for name in (RESEARCH, REVIEW):
+        assert "replicas" not in on[name]["spec"], name  # a helm upgrade must not reset what KEDA scaled
+        assert "replicas" in off[name]["spec"], name
+    for name in ("release-das-gateway", "release-das-manager"):
+        assert "replicas" in on[name]["spec"], name
+
+
+# --------------------------------------------------------------------------- preStop drain (task 10.3, Req 10.6)
+
+AGENTS = ("release-das-manager", RESEARCH, REVIEW)
+
+
+def drain_command(deployment: dict[str, Any]) -> list[str]:
+    return container(deployment)["lifecycle"]["preStop"]["exec"]["command"]
+
+
+def test_the_prestop_drain_is_off_by_default() -> None:
+    for name, d in of_kind(render(), "Deployment").items():
+        assert "lifecycle" not in container(d), name
+        assert "DAS_ADMIN_API_KEY" not in env(d), name
+
+
+def test_the_prestop_drain_is_added_to_the_agents_and_not_to_the_gateway() -> None:
+    d = of_kind(render([ALL]), "Deployment")
+    assert "lifecycle" not in container(d["release-das-gateway"])  # the Gateway is not an agent in the registry
+    assert "DAS_ADMIN_API_KEY" not in env(d["release-das-gateway"])
+    for name in AGENTS:
+        assert drain_command(d[name])[:2] == ["/bin/sh", "-c"], name
+
+
+def test_the_admin_key_of_the_hook_comes_from_the_secret_never_from_the_manifest() -> None:
+    d = of_kind(render([ALL]), "Deployment")
+    for name in AGENTS:
+        ref = secret_ref(env(d[name])["DAS_ADMIN_API_KEY"])
+        assert ref == {"name": SECRET, "key": "ADMIN_API_KEYS", "optional": True}
+    custom = of_kind(render([ALL], sets=["lifecycle.preStopDrain.adminKeySecretKey=DRAIN_KEY"]), "Deployment")
+    assert secret_ref(env(custom[RESEARCH])["DAS_ADMIN_API_KEY"])["key"] == "DRAIN_KEY"
+
+
+def run_hook(
+    command: list[str], tmp_path: Path, exit_code: int = 0, key: str = "key-one,key-two"
+) -> tuple[int, list[str], str]:
+    """Execute the rendered hook with a stub ``das`` that records its arguments and the admin key it was given."""
+    (tmp_path / "bin").mkdir(exist_ok=True)
+    stub = tmp_path / "bin" / "das"
+    stub.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$@" > "{tmp_path}/args"\n'
+        f'printf "%s" "$DAS_ADMIN_API_KEY" > "{tmp_path}/key"\nexit {exit_code}\n'
+    )
+    stub.chmod(0o755)
+    env_ = {"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "DAS__AGENT_ID": "pod-7", "DAS_ADMIN_API_KEY": key}
+    done = subprocess.run(command, env=env_, capture_output=True, text=True, timeout=30)
+    args = (tmp_path / "args").read_text().splitlines() if (tmp_path / "args").exists() else []
+    return done.returncode, args, (tmp_path / "key").read_text() if (tmp_path / "key").exists() else ""
+
+
+def test_the_hook_drains_this_pod_through_the_gateway_service_with_the_first_admin_key(tmp_path: Path) -> None:
+    command = drain_command(of_kind(render([ALL]), "Deployment")[RESEARCH])
+    code, args, key = run_hook(command, tmp_path)
+    assert code == 0
+    assert args == ["drain", "http://release-das-gateway:8080", "pod-7"]
+    assert key == "key-one"  # a Secret key that holds the whole admin list yields its first key
+
+
+def test_a_failing_drain_never_keeps_the_pod_from_stopping(tmp_path: Path) -> None:
+    command = drain_command(of_kind(render([ALL]), "Deployment")["release-das-manager"])
+    code, args, _ = run_hook(command, tmp_path, exit_code=1)
+    assert args and code == 0
+
+
+def test_the_gateway_url_follows_the_service_port_and_can_be_overridden(tmp_path: Path) -> None:
+    by_port = of_kind(render([ALL], sets=["gateway.service.port=9000"]), "Deployment")
+    assert run_hook(drain_command(by_port[RESEARCH]), tmp_path)[1][1] == "http://release-das-gateway:9000"
+    explicit = of_kind(render([ALL], sets=["lifecycle.preStopDrain.gatewayUrl=http://gw.example.com:81"]), "Deployment")
+    assert run_hook(drain_command(explicit[REVIEW]), tmp_path)[1][1] == "http://gw.example.com:81"
+
+
+def test_the_hook_command_holds_no_secret_value() -> None:
+    for name, d in of_kind(render([ALL]), "Deployment").items():
+        assert "key-one" not in yaml.safe_dump(d), name
 
 
 def test_replicas_and_resources_come_from_the_values() -> None:

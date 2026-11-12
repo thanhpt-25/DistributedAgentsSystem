@@ -26,7 +26,7 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from das.clock import Clock
 from das.config.schema import RetentionConfig
@@ -145,12 +145,32 @@ class BackfillStore(Protocol):
     async def index_request(self, rid: str) -> bool: ...
 
 
+class TenantBackfillStore(Protocol):
+    """The State_Store calls the Tenant_Backfill needs (``StateStore`` satisfies it)."""
+
+    async def index_ready(self) -> bool: ...
+    async def tenant_index_ready(self) -> bool: ...
+    async def set_tenant_index_ready(self) -> None: ...
+    async def acquire_tenant_backfill_lock(self, owner: str, ttl_ms: int) -> bool: ...
+    async def renew_tenant_backfill_lock(self, owner: str, ttl_ms: int) -> bool: ...
+    async def release_tenant_backfill_lock(self, owner: str) -> bool: ...
+    def scan_request_index(self): ...  # AsyncIterator[list[str]]
+    def scan_dead_letter_index(self): ...  # AsyncIterator[list[str]]
+    async def tenant_backfill_requests(self, rids: list[str]) -> int: ...
+    async def tenant_backfill_dead_letters(self, dlids: list[str]) -> int: ...
+
+
 class IndexBackfill:
-    """One-time Request_Index backfill under a renewed ``SET NX PX`` lock (Req 15.10)."""
+    """One-time Request_Index backfill under a renewed ``SET NX PX`` lock (Req 15.10).
+
+    The lock, renewal and retry logic is shared with :class:`TenantIndexBackfill`, which overrides the small
+    ``_is_ready`` ... ``_log_ready`` hooks below with the Tenant_Backfill's own flag, lock and work."""
+
+    _FAILED_EVENT = "request_index_backfill_failed"
 
     def __init__(
         self,
-        store: BackfillStore,
+        store: Any,  # BackfillStore, or TenantBackfillStore for TenantIndexBackfill
         clock: Clock,
         owner: str,
         *,
@@ -170,27 +190,54 @@ class IndexBackfill:
     def stop(self) -> None:
         self._stop.set()
 
+    # -- hooks: what differs between the Request_Index and the Tenant_Index backfill ------------------
+
+    async def _is_ready(self) -> bool:
+        return bool(await self._store.index_ready())
+
+    async def _can_start(self) -> bool:
+        return True
+
+    async def _acquire(self) -> bool:
+        return bool(await self._store.acquire_backfill_lock(self._owner, self._lock_ttl_ms))
+
+    async def _renew(self) -> bool:
+        return bool(await self._store.renew_backfill_lock(self._owner, self._lock_ttl_ms))
+
+    async def _release(self) -> None:
+        await self._store.release_backfill_lock(self._owner)
+
+    async def _fill(self) -> int:
+        count = 0
+        async for rid in self._store.scan_request_ids():
+            await self._store.index_request(rid)
+            count += 1
+        return count
+
+    async def _mark_ready(self) -> None:
+        await self._store.set_index_ready()
+
+    def _log_ready(self, count: int) -> None:
+        log.info("request_index_backfilled", requests=count)
+
     async def run_once(self) -> bool:
         """True when the index is ready (already, or after this backfill); False when
         another agent holds the lock. State_Store errors propagate."""
-        if await self._store.index_ready():
+        if await self._is_ready():
             return True
-        if not await self._store.acquire_backfill_lock(self._owner, self._lock_ttl_ms):
+        if not await self._can_start() or not await self._acquire():
             return False
         renewer = asyncio.ensure_future(self._renew_loop())
         try:
-            count = 0
-            async for rid in self._store.scan_request_ids():
-                await self._store.index_request(rid)
-                count += 1
-            await self._store.set_index_ready()
-            log.info("request_index_backfilled", requests=count)
+            count = await self._fill()
+            await self._mark_ready()
+            self._log_ready(count)
         finally:
             renewer.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await renewer
             with contextlib.suppress(Exception):
-                await self._store.release_backfill_lock(self._owner)
+                await self._release()
         return True
 
     async def run(self) -> None:
@@ -202,9 +249,7 @@ class IndexBackfill:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._warn.warning(
-                    log, "backfill", "request_index_backfill_failed", error=type(exc).__name__
-                )
+                self._warn.warning(log, "backfill", self._FAILED_EVENT, error=type(exc).__name__)
             if await self._wait(self._retry_interval):
                 return
 
@@ -212,7 +257,7 @@ class IndexBackfill:
         while True:
             await self._clock.sleep(self._renew_interval)
             try:
-                held = await self._store.renew_backfill_lock(self._owner, self._lock_ttl_ms)
+                held = await self._renew()
             except Exception as exc:
                 self._warn.warning(
                     log, "renew", "backfill_lock_renew_failed", error=type(exc).__name__
@@ -236,6 +281,46 @@ class IndexBackfill:
         return self._stop.is_set()
 
 
+class TenantIndexBackfill(IndexBackfill):
+    """One-time Tenant_Backfill (Phase 5 Req 9.2): files every Request and Dead_Letter_Record in its tenant's
+    index twins under ``das:tenant:index:backfill_lock``, then sets ``das:tenant:index:ready``.
+
+    It copies from the global indexes, so it waits for the Phase 2 Request_Index backfill to finish first.
+    ``tenant_backfill.lua`` is idempotent, so a second agent that loses the lock mid-run is harmless."""
+
+    _FAILED_EVENT = "tenant_index_backfill_failed"
+
+    async def _is_ready(self) -> bool:
+        return bool(await self._store.tenant_index_ready())
+
+    async def _can_start(self) -> bool:
+        return bool(await self._store.index_ready())
+
+    async def _acquire(self) -> bool:
+        return bool(await self._store.acquire_tenant_backfill_lock(self._owner, self._lock_ttl_ms))
+
+    async def _renew(self) -> bool:
+        return bool(await self._store.renew_tenant_backfill_lock(self._owner, self._lock_ttl_ms))
+
+    async def _release(self) -> None:
+        await self._store.release_tenant_backfill_lock(self._owner)
+
+    async def _fill(self) -> int:
+        count = 0
+        # Requests first: a record is filed only when its Request exists.
+        async for rids in self._store.scan_request_index():
+            count += await self._store.tenant_backfill_requests(rids)
+        async for dlids in self._store.scan_dead_letter_index():
+            count += await self._store.tenant_backfill_dead_letters(dlids)
+        return count
+
+    async def _mark_ready(self) -> None:
+        await self._store.set_tenant_index_ready()
+
+    def _log_ready(self, count: int) -> None:
+        log.info("tenant_index_backfilled", items=count)
+
+
 __all__ = [
     "BACKFILL_LOCK_TTL",
     "BACKFILL_RENEW_INTERVAL",
@@ -244,4 +329,6 @@ __all__ = [
     "RetentionStore",
     "RetentionSweeper",
     "SweepResult",
+    "TenantBackfillStore",
+    "TenantIndexBackfill",
 ]

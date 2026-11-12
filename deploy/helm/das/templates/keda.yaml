@@ -1,0 +1,35 @@
+{{- /*
+Optional (keda.enabled): one KEDA ScaledObject per worker Deployment, scaling it on the depth of the quorum queue of
+each of its Capabilities (das.jobs.<capability>, one trigger each; KEDA scales on the largest). The RabbitMQ scaler
+reads the credentialed AMQP URL from the DAS__RABBITMQ__URL variable of the scaled container, so this file holds no
+secret and no second credential is needed. KEDA itself is a cluster prerequisite.
+*/ -}}
+{{- if .Values.keda.enabled }}
+{{- range $worker := .Values.workers }}
+{{- $component := printf "worker-%s" $worker.name }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "das.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "das.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "das.fullname" $ }}-{{ $component }}
+    envSourceContainerName: das
+  pollingInterval: {{ $.Values.keda.pollingInterval }}
+  minReplicaCount: {{ $.Values.keda.minReplicaCount }}
+  maxReplicaCount: {{ $.Values.keda.maxReplicaCount }}
+  triggers:
+    {{- range $capability := $worker.capabilities }}
+    - type: rabbitmq
+      metadata:
+        protocol: amqp
+        queueName: {{ printf "das.jobs.%s" $capability }}
+        mode: QueueLength
+        value: {{ $.Values.keda.queueLength | quote }}
+        hostFromEnv: DAS__RABBITMQ__URL
+    {{- end }}
+{{- end }}
+{{- end }}

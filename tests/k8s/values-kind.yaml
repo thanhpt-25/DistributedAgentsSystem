@@ -1,0 +1,53 @@
+# Chart values of the kind cluster tests (das-multi-tenant task 11.1): the images built from this checkout, the test
+# infrastructure of tests/k8s/, and the stub LLM. No secret value is here: everything secret comes from the Secret
+# `das-secrets`, which the test harness creates with random values.
+image:
+  repository: das
+  tag: local
+  pullPolicy: Never          # the harness loads the images into the cluster; nothing is pulled
+
+existingSecret: das-secrets
+
+# Credential-free values go here; the AMQP URL carries credentials, so it comes from the Secret.
+redis:
+  url: redis://redis:6379/0
+rabbitmq:
+  url: ""
+  managementUrl: http://rabbitmq:15672
+
+secretEnv:
+  gateway:
+    DAS__API_KEYS: API_KEYS
+    DAS__ADMIN_API_KEYS: ADMIN_API_KEYS
+  manager:
+    DAS__RABBITMQ__URL: RABBITMQ_URL
+  worker:
+    DAS__RABBITMQ__URL: RABBITMQ_URL
+
+config:
+  common:
+    limits:
+      lease_duration: 10     # a killed Manager's Requests are taken over after 10 s, not 30 s
+      shutdown_timeout: 30
+  manager:
+    llm: &llm
+      provider: ollama
+      model: fake-llm
+      base_url: http://llm-stub:11434
+  worker:
+    llm: *llm
+
+gateway:
+  replicas: 1                # kubectl port-forward pins to one pod
+manager:
+  replicas: 2
+
+workers:
+  - name: research
+    capabilities: [research, summarize]
+    replicas: 2
+  - name: review
+    capabilities: [code-review]
+    replicas: 1
+
+terminationGracePeriodSeconds: 45

@@ -21,10 +21,10 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 1.4 Implement usage report assembly
     - `das/tenancy/usage.py`: UTC date range validation (default last 7 days, at most 92, inverted or malformed rejected), merge of rollup hashes into per-day entries and totals, cost at read time through `das.ops.cost` (`null` without a Price_Table or for an unpriced model)
     - _Requirements: 6.3, 6.5_
-  - [ ] 1.5 Write property test for Principal resolution
+  - [x] 1.5 Write property test for Principal resolution
     - **Property 5: Principal resolution**
     - **Validates: Requirements 1.2, 1.3, 1.4, 1.5, 1.7**
-  - [ ] 1.6 Write property test for settings layering
+  - [x] 1.6 Write property test for settings layering
     - **Property 6: Settings layering**
     - **Validates: Requirements 4.1, 4.4, 4.5**
 
@@ -32,7 +32,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 2.1 Add the tenant schema
     - `das/config/schema.py`: `TenantKeyConfig`, `TenantSettings` (the optional fields of `ClientOverride` without `fingerprint`), `TenantConfig`, `UsageConfig` (`retention_days`), `LabelLimitsConfig.tenant`, `AgentConfig.tenants` and `.usage`; Tenant_ID pattern, scope set, `max_priority` default `normal`
     - _Requirements: 1.1, 4.2, 4.3, 6.6, 7.1, 7.2, 8.1_
-  - [ ] 2.2 Add cross-field validation
+  - [x] 2.2 Add cross-field validation
     - `tenant_errors(config)` next to `client_api_errors`: fingerprint matching no key, listed twice, listed for an admin key, two keys with one fingerprint, duplicate or invalid `id`, `webhook_secret_name` not configured; paths only, never a key or secret value; wired into config loading (exit code 2)
     - _Requirements: 1.4_
   - [ ] 2.3 Write unit tests for the tenant config
@@ -52,16 +52,16 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 3.4 Roll up usage in `append_usage`
     - For every appended UsageRecord, `usage_bump` of `tokens/in`, `tokens/out`, `tokens/total` per `{provider}/{model}`; a record is counted exactly once because `append_usage` is the only place it is persisted
     - _Requirements: 6.1, 6.6_
-  - [ ] 3.5 Extend the StateStore API
+  - [x] 3.5 Extend the StateStore API
     - `ClientRequestSpec` gains `tenant`, `tenant_max_active`, `priority`; the snapshot and `StoredRequest` gain `tenant` and `priority`; `list_requests` and `list_dead_letters` take a tenant (twin keys, or the global keys for an Operator); `IndexNotReady` for a non-default tenant before `das:tenant:index:ready`; `read_usage(tenant, days)`; submit result `TENANT_QUOTA_EXCEEDED`
     - _Requirements: 3.3, 3.4, 5.3, 6.3, 9.3_
-  - [ ] 3.6 Write property test for the Tenant_Index mirror
+  - [x] 3.6 Write property test for the Tenant_Index mirror
     - **Property 2: Tenant_Index mirrors the global index**
     - **Validates: Requirements 3.1, 3.5, 3.9**
-  - [ ] 3.7 Write property test for the usage rollup
+  - [x] 3.7 Write property test for the usage rollup
     - **Property 3: Usage rollup is exact**
     - **Validates: Requirements 6.1, 6.2**
-  - [ ] 3.8 Add the Tenant_Backfill
+  - [x] 3.8 Add the Tenant_Backfill
     - `tenant_backfill.lua` (batched, idempotent: `ZADD`, `SADD`, `HSETNX`; DLQ records with an existing Request get `tenant=default`), `TenantIndexBackfill` in `das/manager/retention.py` with `das:tenant:index:backfill_lock` (`SET NX PX`) and `das:tenant:index:ready`, started with the other Manager retention tasks
     - _Requirements: 9.2_
   - [ ] 3.9 Write property test for the backfill
@@ -124,7 +124,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 6.4 Translate the header in the RabbitMQ adapter
     - `das/transport/base.py` `PRIORITY_HEADER = "das-priority"`; `das/transport/rabbitmq.py` pops it and sets `Message(priority=9)` for `high`, nothing otherwise; `x-max-priority` is never declared; other adapters ignore it; a unit test with a fake channel; codec output and queue declarations unchanged
     - _Requirements: 7.5, 7.7_
-  - [ ] 6.5 Write the real-broker priority test
+  - [x] 6.5 Write the real-broker priority test
     - `tests/integration/test_rabbitmq_priority.py` (testcontainers, RabbitMQ 4.1): delivery order from `basic.get`, the 2:1 weighting with no starvation, requeue keeps the class, a dead-lettered message keeps its priority, no `x-max-priority`
     - _Requirements: 7.5, 7.6_
 
@@ -162,7 +162,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 10.2 Write the workload templates
     - Gateway (Deployment and Service), Manager, one Worker Deployment per `workers` entry, ConfigMaps from structured values, ServiceAccount, PodDisruptionBudgets; secrets only through `secretKeyRef` from `existingSecret`; `DAS__GRPC__ADVERTISE_HOST` from `status.podIP`, `DAS__AGENT_ID` from `metadata.name`; startup and liveness `/livez`, readiness `/readyz`; no Redis, RabbitMQ or definitions job
     - _Requirements: 10.1, 10.2, 10.3, 10.5_
-  - [ ] 10.3 Add the optional features
+  - [x] 10.3 Add the optional features
     - KEDA `ScaledObject` per Worker Deployment on its Capability queues (`das.jobs.<cap>`), and `lifecycle.preStopDrain` running `das drain` for the pod's agent id with the Admin_API_Key from the Secret
     - _Requirements: 10.1, 10.6_
   - [ ] 10.4 Write rendered-output unit tests
@@ -173,7 +173,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - _Requirements: 10.7_
 
 - [ ] 11. Kubernetes verification and CI
-  - [ ] 11.1 Write the cluster tests
+  - [x] 11.1 Write the cluster tests
     - `tests/k8s/` manifests for Redis, RabbitMQ and the stub LLM; `tests/integration/k8s/` tests: pods Ready, a Request completes, an admin drain reaches an agent (advertise host), Worker and Manager pod deletion and rolling restarts with Requests in flight lose none
     - _Requirements: 11.3_
   - [ ] 11.2 Update CI

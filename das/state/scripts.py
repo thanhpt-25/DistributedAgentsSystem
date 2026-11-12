@@ -25,6 +25,7 @@ SCRIPT_NAMES: Final = (
     "purge_inbox",
     "purge_dead_letter",
     "index_request",
+    "tenant_backfill",
     "list_index",
     "rate_check",
     "claim_webhook",

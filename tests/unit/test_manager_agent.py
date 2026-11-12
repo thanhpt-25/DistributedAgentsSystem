@@ -224,7 +224,9 @@ async def test_registers_before_subscribing_then_starts_loops(state_store, fake_
         assert [s.destination for s in env.control.registry.active()] == ["m1"]
         # Retention is disabled by default; the one-shot backfill may already be done.
         assert CRITICAL <= env.agent.loops
-        assert env.agent.loops - CRITICAL <= {"queue_sampler", "registry_gauges", "index_backfill"}
+        assert env.agent.loops - CRITICAL <= {
+            "queue_sampler", "registry_gauges", "index_backfill", "tenant_backfill",
+        }
         assert "retention" not in env.agent.loops
     finally:
         await env.agent.stop()
@@ -385,6 +387,12 @@ async def test_index_backfill_runs_once_and_retention_only_when_enabled(state_st
             return await state_store.index_ready() and "index_backfill" not in env.agent.loops
 
         await wait_until(ready)
+
+        # The Tenant_Backfill follows it (Phase 5 Req 9.2) and is one-shot too.
+        async def tenants_ready() -> bool:
+            return await state_store.tenant_index_ready() and "tenant_backfill" not in env.agent.loops
+
+        await wait_until(tenants_ready)
     finally:
         await env.agent.stop()
     assert env.agent.loops == frozenset()

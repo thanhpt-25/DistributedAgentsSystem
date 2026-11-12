@@ -78,7 +78,9 @@ keda:
   enabled: false
   queueLength: 10
   pollingInterval: 15
-  minReplicaCount: 0
+  # Keep at least 1: the Manager dispatches a Job only when a registered Worker has its Capability, and otherwise fails
+  # it as "no capable worker" after limits.capability_wait. A pool scaled to 0 would never see its queue grow.
+  minReplicaCount: 1
   maxReplicaCount: 10
 
 serviceAccount:

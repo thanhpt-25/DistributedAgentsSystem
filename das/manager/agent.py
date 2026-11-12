@@ -89,7 +89,7 @@ from das.manager.ingest import (
 from das.manager.lease import HeldLeases
 from das.manager.machine import MachineConfig
 from das.manager.planner import Planner, PlannerConfig
-from das.manager.retention import IndexBackfill, RetentionSweeper
+from das.manager.retention import IndexBackfill, RetentionSweeper, TenantIndexBackfill
 from das.manager.samplers import QueueDepthSampler, RegistryGauges
 from das.manager.summarizer import Summarizer
 from das.observability import get_logger
@@ -138,7 +138,7 @@ STATUS_WRITE_TIMEOUT: Final = 1.0
 #: Background loops that are not Critical_Loops: their failures are logged and the
 #: loop starts again; they never stop the agent.
 NON_CRITICAL_LOOPS: Final = frozenset(
-    {"queue_sampler", "registry_gauges", "retention", "index_backfill"}
+    {"queue_sampler", "registry_gauges", "retention", "index_backfill", "tenant_backfill"}
 )
 
 
@@ -337,6 +337,8 @@ class ManagerAgent:
             store, self.metrics, self._clock, settings.retention
         )
         self.index_backfill = IndexBackfill(store, self._clock, owner=settings.agent_id)
+        # Starts once the Request_Index is ready, then fills the tenant indexes (Phase 5 Req 9.2).
+        self.tenant_backfill = TenantIndexBackfill(store, self._clock, owner=settings.agent_id)
         self._subs: list[Subscription] = []
         self._tasks: dict[str, asyncio.Task[None]] = {}
         #: Watcher tasks standing in for the ingest subscriptions in the supervisor.
@@ -644,10 +646,16 @@ class ManagerAgent:
         if self.retention_sweeper.enabled:  # Req 14.12: disabled -> no loop at all
             loops["retention"] = self.retention_sweeper.run
         loops["index_backfill"] = self.index_backfill.run
+        loops["tenant_backfill"] = self.tenant_backfill.run
         return loops
 
     def _stoppable_loops(self) -> list[Any]:
-        loops: list[Any] = [self.registry_gauges, self.retention_sweeper, self.index_backfill]
+        loops: list[Any] = [
+            self.registry_gauges,
+            self.retention_sweeper,
+            self.index_backfill,
+            self.tenant_backfill,
+        ]
         if self.queue_sampler is not None:
             loops.append(self.queue_sampler)
         return loops
