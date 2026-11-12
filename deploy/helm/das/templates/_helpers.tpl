@@ -196,11 +196,58 @@ volumes:
 {{- end -}}
 
 {{/*
+The secret fields of the agent configuration, as dotted paths (das.config.schema.SECRET_FIELDS; a test keeps the two
+equal). An agent accepts them only from its environment or a secrets file, never from YAML.
+*/}}
+{{- define "das.secretFields" -}}
+api_keys
+admin_api_keys
+llm.api_key
+llm.aws_access_key_id
+llm.aws_secret_access_key
+llm.aws_session_token
+tracing.otlp_headers
+gateway.cursor_secret
+webhook_secrets
+{{- end -}}
+
+{{/*
+Refuse values that would put a secret into a ConfigMap or a manifest (das-multi-tenant Req 10.2). The chart never gets a
+secret: it comes from the existing Secret through secretKeyRef. A value typed into the wrong place is refused: a secret
+field of the agent configuration under config.*, or a URL with credentials in config.*. The message names the path and
+never repeats the value (a schema pattern was tried for the URL values and rejected: Helm prints the value in its error).
+*/}}
+{{- define "das.refuseSecrets" -}}
+{{- $urls := dict "redis.url" .Values.redis.url "rabbitmq.url" .Values.rabbitmq.url "rabbitmq.managementUrl" .Values.rabbitmq.managementUrl "lifecycle.preStopDrain.gatewayUrl" .Values.lifecycle.preStopDrain.gatewayUrl -}}
+{{- range $name, $url := $urls -}}
+{{- if regexMatch "://[^/\\s@]*@" (toString $url) -}}
+{{- fail (printf "%s holds a URL with credentials: keep credentials in the Secret named by existingSecret (see secretEnv)" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- $config := .Values.config | default dict -}}
+{{- range $section, $body := $config -}}
+{{- range $path := splitList "\n" (include "das.secretFields" $) -}}
+{{- $node := $body -}}
+{{- range $part := splitList "." $path -}}
+{{- if kindIs "map" $node -}}{{- $node = get $node $part -}}{{- else -}}{{- $node = "" -}}{{- end -}}
+{{- end -}}
+{{- if and $node (not (kindIs "invalid" $node)) -}}
+{{- fail (printf "config.%s.%s is a secret and must not be set in values: put it in the Secret named by existingSecret and list it under secretEnv" $section $path) -}}
+{{- end -}}
+{{- end -}}
+{{- if regexMatch "://[^/\\s@]*@" (toYaml $body) -}}
+{{- fail (printf "config.%s holds a URL with credentials: keep credentials in the Secret named by existingSecret" $section) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Refuse to render a grace period shorter than the graceful shutdown (das-multi-tenant Req 10.4).
 A pod gets SIGTERM, then SIGKILL after terminationGracePeriodSeconds; the agents need limits.shutdown_timeout to
 finish what they run, and 10 seconds of margin for the rest of the shutdown.
 */}}
 {{- define "das.validate" -}}
+{{- include "das.refuseSecrets" . -}}
 {{- $shutdown := int (dig "common" "limits" "shutdown_timeout" 30 (.Values.config | default dict)) -}}
 {{- $minimum := add $shutdown 10 | int -}}
 {{- $grace := int .Values.terminationGracePeriodSeconds -}}

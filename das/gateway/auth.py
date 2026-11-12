@@ -17,7 +17,7 @@ echoed; only the Key_Fingerprint is recorded for the Audit_Entry (Req 11.8).
 from __future__ import annotations
 
 import hmac
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import Any, Final
 
 from fastapi import HTTPException, Request, Security, status
@@ -25,8 +25,9 @@ from fastapi.security import APIKeyHeader
 from pydantic import SecretStr
 
 from das.client.settings import resolve_settings
-from das.config.schema import ClientLimitsConfig
-from das.ops.keys import KeyClass, classify_key, key_fingerprint
+from das.config.schema import ClientLimitsConfig, TenantConfig
+from das.tenancy.directory import KeyDirectory, StaticKeyDirectory
+from das.tenancy.scopes import Principal, Scope
 
 API_KEY_HEADER: Final = "X-API-Key"
 UNAUTHORIZED_BODY: Final = {"error": "unauthorized"}
@@ -70,39 +71,61 @@ def _reject(code: int, body: dict[str, str]) -> HTTPException:
     return HTTPException(status_code=code, detail=dict(body), headers=headers)
 
 
-def _identify(request: Request, api_key: str, client_limits: ClientLimitsConfig) -> None:
-    """Record a matched key's Key_Fingerprint and Client_Settings, once per call.
+def _identify(
+    request: Request,
+    principal: Principal,
+    client_limits: ClientLimitsConfig,
+    tenants: Mapping[str, TenantConfig],
+) -> None:
+    """Record who the caller is, once per call: the Principal, and the Client_Settings that go with it.
 
-    The audit context (Req 11.8) and the rate limit (Phase 4 Req 1.2, 2.1) read the same
-    fingerprint, so they cannot disagree. Only the 8-hex fingerprint is kept, never the key.
+    The audit context (Req 11.8) and the rate limit (Phase 4 Req 1.2, 2.1) read the same fingerprint, so they cannot
+    disagree. The settings are layered default, then the tenant's, then the key's own override (Phase 5 Req 4.1).
+    Only the 8-hex fingerprint is kept, never the key.
     """
-    fingerprint = key_fingerprint(api_key.encode("utf-8"))
-    audit_context(request)["key_fingerprint"] = fingerprint
-    request.state.client_settings = resolve_settings(fingerprint, client_limits)
+    audit_context(request)["key_fingerprint"] = principal.fingerprint
+    request.state.principal = principal
+    layer = tenants.get(principal.tenant)
+    request.state.client_settings = resolve_settings(principal.fingerprint, client_limits, layer)
+
+
+def _directory(
+    keys: Iterable[SecretStr | str],
+    admin_keys: Iterable[SecretStr | str],
+    tenants: Sequence[TenantConfig],
+    directory: KeyDirectory | None,
+) -> KeyDirectory:
+    """The injected directory, or the one that reads the configured keys and tenants (Phase 5 Req 12.3)."""
+    return directory if directory is not None else StaticKeyDirectory(keys, admin_keys, tenants)
 
 
 def api_key_auth(
     keys: Iterable[SecretStr | str],
     admin_keys: Iterable[SecretStr | str] = (),
     client_limits: ClientLimitsConfig | None = None,
+    *,
+    tenants: Sequence[TenantConfig] = (),
+    directory: KeyDirectory | None = None,
 ) -> Callable[..., Awaitable[None]]:
-    """Dependency for the ``/v1`` router: API_Key or Admin_API_Key, same response.
+    """Dependency for the ``/v1`` router: any known key, one Principal, the same 401 for every other.
 
-    Empty configured keys are ignored; with no usable keys every call is rejected. A matched
-    key leaves its Client_Settings on ``request.state.client_settings`` for the rate limit.
+    A matched key leaves its Principal on ``request.state.principal`` and its Client_Settings on
+    ``request.state.client_settings`` for the rate limit. Without ``tenants`` every API_Key is a Default_Tenant key
+    with Scopes submit and read, as in Phase 4 (Req 1.5). Empty configured keys are ignored; with no usable keys every
+    call is rejected. ``directory`` replaces the static one (Req 12.3).
     """
-    api = _configured(keys)
-    admin = _configured(admin_keys)
+    keyring = _directory(keys, admin_keys, tenants, directory)
     limits = client_limits if client_limits is not None else ClientLimitsConfig()
+    by_id = {t.id: t for t in tenants}
 
     async def require_api_key(
         request: Request,
         api_key: str | None = Security(_header_scheme),
     ) -> None:
-        kind, _ = classify_key(api_key, api, admin)
-        if kind is KeyClass.NONE or not api_key:
+        principal = keyring.resolve(api_key)
+        if principal is None:
             raise _reject(status.HTTP_401_UNAUTHORIZED, UNAUTHORIZED_BODY)
-        _identify(request, api_key, limits)
+        _identify(request, principal, limits, by_id)
 
     return require_api_key
 
@@ -120,29 +143,36 @@ def admin_key_auth(
     keys: Iterable[SecretStr | str],
     admin_keys: Iterable[SecretStr | str],
     client_limits: ClientLimitsConfig | None = None,
+    *,
+    tenants: Sequence[TenantConfig] = (),
+    directory: KeyDirectory | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Dependency for the ``/v1/admin`` router (Req 11.2-11.5).
 
-    Records the Key_Fingerprint of a matched key in the audit context, so the
-    Audit_Entry carries it even when the call is rejected with 403 (Req 11.8). It also
-    leaves the key's Client_Settings on ``request.state`` for the rate limit.
+    Records the Principal and its Key_Fingerprint, so the Audit_Entry carries them even when the call is rejected with
+    403 (Req 11.8), and leaves the key's Client_Settings on ``request.state`` for the rate limit. Only an Operator (an
+    Admin_API_Key) passes here; a key of a tenant is refused with 403 ``forbidden``, or ``admin_disabled`` when nothing
+    in the configuration can administer: no Admin_API_Key and no tenant key holding the ``admin`` Scope (Phase 4 shape).
     """
-    api = _configured(keys)
-    admin = _configured(admin_keys)
+    keyring = _directory(keys, admin_keys, tenants, directory)
     limits = client_limits if client_limits is not None else ClientLimitsConfig()
+    by_id = {t.id: t for t in tenants}
+    can_administer = (
+        directory is not None
+        or bool(_configured(admin_keys))
+        or any(Scope.ADMIN.value in key.scopes for t in tenants for key in t.keys)
+    )
 
     async def require_admin_key(
         request: Request,
         api_key: str | None = Security(_header_scheme),
     ) -> None:
-        kind, _ = classify_key(api_key, api, admin)
-        if kind is not KeyClass.NONE and api_key:
-            _identify(request, api_key, limits)
-        if kind is KeyClass.NONE:
+        principal = keyring.resolve(api_key)
+        if principal is None:
             raise _reject(status.HTTP_401_UNAUTHORIZED, UNAUTHORIZED_BODY)
-        if kind is KeyClass.API:
-            body = FORBIDDEN_BODY if admin else ADMIN_DISABLED_BODY
-            raise _reject(status.HTTP_403_FORBIDDEN, body)
+        _identify(request, principal, limits, by_id)
+        if not principal.operator:
+            raise _reject(status.HTTP_403_FORBIDDEN, FORBIDDEN_BODY if can_administer else ADMIN_DISABLED_BODY)
 
     return require_admin_key
 

@@ -44,7 +44,7 @@ from das.client.budget import BudgetError, budget_status, budget_view, resolve_b
 from das.client.settings import ClientSettings
 from das.clock import Clock, SystemClock
 from das.codec import new_message
-from das.config.schema import ClientLimitsConfig, EventsConfig, WebhookConfig
+from das.config.schema import ClientLimitsConfig, EventsConfig, TenantConfig, WebhookConfig
 from das.gateway.admin import (
     create_admin_router,
     install_admin,
@@ -253,6 +253,7 @@ def create_app(
     events_client: Redis | None = None,
     webhook: WebhookConfig | None = None,
     webhook_secrets: Mapping[str, SecretStr] | None = None,
+    tenants: Sequence[TenantConfig] = (),
 ) -> FastAPI:
     """Build the Gateway_API with injected dependencies.
 
@@ -353,7 +354,7 @@ def create_app(
     v1 = APIRouter(
         prefix="/v1",
         dependencies=[
-            Depends(api_key_auth(api_keys, admin_api_keys, limits_config)),
+            Depends(api_key_auth(api_keys, admin_api_keys, limits_config, tenants=tenants)),
             Depends(enforce_rate),
         ],
         responses=V1_RESPONSES,
@@ -492,7 +493,7 @@ def create_app(
 
     # Admin_API (Req 11): router-level Admin_API_Key auth plus Audit_Entry middleware.
     admin = create_admin_router(
-        api_keys, admin_api_keys, client_limits=limits_config, rate_limit=enforce_rate
+        api_keys, admin_api_keys, client_limits=limits_config, rate_limit=enforce_rate, tenants=tenants
     )
     register_dlq_routes(
         admin,

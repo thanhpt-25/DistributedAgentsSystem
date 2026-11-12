@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fakeredis import FakeServer
@@ -50,6 +51,17 @@ operations = st.lists(
     min_size=1,
     max_size=25,
 )
+#: Operations without a clock tick, for the tests that need two Worlds to stay in step on one clock.
+steady_operations = st.lists(
+    st.tuples(
+        st.sampled_from([k for k in dict.fromkeys(KINDS) if k != "tick"]),
+        st.integers(0, 7),
+        st.sampled_from(TENANTS),
+        st.integers(1, 5),
+        st.integers(1, 4),
+    ),
+    max_size=25,
+)
 #: Every kind of operation, twice, over all three tenants: a sequence both properties always run, so a fault in the
 #: handling of any one operation cannot hide behind the luck of the random draw.
 EVERY_KIND = [
@@ -76,8 +88,16 @@ def day_of(seconds: float) -> str:
 
 
 class World:
-    def __init__(self, clock: FakeRedisTime) -> None:
-        self.store = StateStore(FakeRedis(server=FakeServer(), decode_responses=True))
+    """``phase4`` makes every Request a Default_Tenant one whatever tenant an operation names, with or without a
+    client key, as data written before Phase 5 is. ``ids`` makes Request ids deterministic, so two Worlds fed the same
+    operations hold the same keys."""
+
+    def __init__(
+        self, clock: FakeRedisTime, *, phase4: bool = False, ids: Callable[[], str] | None = None
+    ) -> None:
+        redis = FakeRedis(server=FakeServer(), decode_responses=True)
+        self.store = StateStore(redis, id_factory=ids) if ids is not None else StateStore(redis)
+        self.phase4 = phase4
         self.clock = clock
         self.recs: list[Rec] = []
         self.expected: Counter[tuple[str, str, str]] = Counter()  # (tenant, day, rollup field) -> value
@@ -109,10 +129,11 @@ class World:
         if tenant is None:
             rid = await self.store.create_request("prompt")
         else:
-            res = await self.store.submit_request("prompt", ClientRequestSpec(fingerprint=FP, tenant=tenant))
+            spec_tenant = None if self.phase4 else tenant
+            res = await self.store.submit_request("prompt", ClientRequestSpec(fingerprint=FP, tenant=spec_tenant))
             assert res.request_id is not None
             rid = res.request_id
-        effective = tenant or "default"
+        effective = "default" if self.phase4 else (tenant or "default")
         rec = Rec(rid, effective, "Pending")
         self.recs.append(rec)
         self._count(effective, "submitted")

@@ -168,6 +168,20 @@ async def test_a_stale_status_entry_is_removed(state_store: StateStore) -> None:
     assert twins(await everything(state_store)) == expected
 
 
+async def test_a_dead_letter_left_in_the_wrong_status_twin_by_an_older_version_is_moved(
+    state_store: StateStore,
+) -> None:
+    rid = await state_store.create_request("x")
+    await failed_job(state_store, rid)
+    await state_store.create_dead_letter(fields(DL1, rid=rid))
+    assert (await state_store.discard_dead_letter(DL1)).outcome == "accepted"
+    expected = twins(await everything(state_store))
+    # An older version discarded the record without touching the twins: it still sits in Pending's twin.
+    await state_store.client.zadd(keys.tenant_dlq_by_status("default", "Pending"), {DL1: 1})
+    await backfill(state_store)
+    assert twins(await everything(state_store)) == expected
+
+
 async def test_a_terminal_request_left_in_the_active_set_by_an_older_version_is_removed(
     state_store: StateStore,
 ) -> None:

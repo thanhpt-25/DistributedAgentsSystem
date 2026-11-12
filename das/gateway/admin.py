@@ -40,7 +40,7 @@ from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
 from das.codec import AgentControlPayload, AgentControlReplyMessage, new_message
-from das.config.schema import CAPABILITY_PATTERN, ClientLimitsConfig
+from das.config.schema import CAPABILITY_PATTERN, ClientLimitsConfig, TenantConfig
 from das.gateway.audit import ADMIN_PREFIX, AuditMiddleware
 from das.gateway.auth import admin_key_auth
 from das.gateway.cursor_key import CursorKeyProvider
@@ -97,12 +97,13 @@ def create_admin_router(
     *,
     client_limits: ClientLimitsConfig | None = None,
     rate_limit: Callable[..., Awaitable[None]] | None = None,
+    tenants: Sequence[TenantConfig] = (),
 ) -> APIRouter:
     """``/v1/admin`` router guarded by :func:`admin_key_auth`, then by ``rate_limit`` (Phase 4 Req 2.5).
 
     The key check runs first, so a 401/403 never consumes a token; a 429 is still audited.
     """
-    dependencies = [Depends(admin_key_auth(api_keys, admin_api_keys, client_limits))]
+    dependencies = [Depends(admin_key_auth(api_keys, admin_api_keys, client_limits, tenants=tenants))]
     if rate_limit is not None:
         dependencies.append(Depends(rate_limit))
     # Operator routes stay out of the schema a client key can read (Phase 4 Req 11.4).

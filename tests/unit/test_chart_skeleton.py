@@ -7,6 +7,7 @@ installed (CI installs a pinned one, task 11.2)."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -20,7 +21,18 @@ CHART = Path(__file__).resolve().parents[2] / "deploy" / "helm" / "das"
 MIN = CHART / "ci" / "values-min.yaml"
 ALL = CHART / "ci" / "values-all.yaml"
 
-needs_helm = pytest.mark.skipif(shutil.which("helm") is None, reason="the helm binary is not installed")
+#: The chart tests render with the real ``helm``. They are skipped on a machine without it, but not in CI (GitHub sets
+#: ``CI=true``): there a missing binary must fail, or the chart would go untested without anyone noticing.
+IN_CI = os.environ.get("CI", "").lower() == "true"
+needs_helm = pytest.mark.skipif(
+    shutil.which("helm") is None and not IN_CI, reason="the helm binary is not installed (required when CI=true)"
+)
+
+
+def test_helm_is_installed_when_running_in_ci() -> None:
+    if not IN_CI:
+        pytest.skip("only checked when CI=true")
+    assert shutil.which("helm"), "CI=true but the helm binary is missing: the chart tests would all fail or skip"
 
 
 def helm(

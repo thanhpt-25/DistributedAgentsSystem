@@ -548,6 +548,7 @@ async def run_agent(
             events_client=events_redis,
             webhook=config.webhook,
             webhook_secrets=config.webhook_secrets,
+            tenants=config.tenants,
         )
         # lifespan on: the Webhook_Sender workers start and stop with the Gateway's server.
         server = HealthServer(app, config.http_port, lifespan="on")

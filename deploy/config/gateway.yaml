@@ -60,6 +60,33 @@ client_limits:
   #     webhook_secret_name: partner
   # END EXAMPLE per-key override
 
+# --- Tenants (optional) ---------------------------------------------------------------------------------------
+# Without `tenants`, every key in DAS__API_KEYS belongs to the default tenant with the scopes submit and read, and
+# every key in DAS__ADMIN_API_KEYS is an operator: the single-team behaviour of earlier phases. Add a tenant to give
+# a team its own keys, scopes, quota and priority; its Requests, dead letters and usage are then invisible to the
+# others. A key is named by its fingerprint (see the overrides above), never by its value, and must be one of
+# DAS__API_KEYS: a fingerprint that matches no key, an admin key, or two tenants is refused at startup.
+# The tenant's `settings` sit between `client_limits.default` and a per-key override: a field a layer leaves out is
+# inherited from the layer below. `max_active_requests` directly under the tenant is a quota for the whole tenant
+# (0 = none), on top of the per-key one in `settings`. Configure tenants only after the Manager has logged
+# tenant_index_backfilled (the first start after an upgrade): until then a listing for a tenant is refused.
+# BEGIN EXAMPLE tenants
+# tenants:
+#   - id: team-a                    # lowercase letters, digits and hyphens, up to 32; not "default"
+#     keys:
+#       - fingerprint: "484857e0"   # the placeholder key `change-me-api-key`
+#         scopes: [submit, read]    # any of submit, read, admin; admin opens this tenant's dead-letter routes
+#     max_active_requests: 200      # unfinished Requests the whole tenant may have (429 quota_exceeded)
+#     default_priority: normal      # what a submit without a priority gets
+#     max_priority: high            # the most a submit may ask for (normal or high)
+#     settings:
+#       rate: 120.0
+#       burst: 240
+#       max_active_requests: 50     # per key; the override above still wins for its own key
+#       default_budget:
+#         max_total_tokens: 100000
+# END EXAMPLE tenants
+
 events:
   max_len: 1000          # events kept per Request (100 to 100000); the oldest are dropped beyond it
   max_connections: 500   # event streams one Gateway replica serves at once (503 too_many_streams beyond it)

@@ -35,7 +35,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 2.2 Add cross-field validation
     - `tenant_errors(config)` next to `client_api_errors`: fingerprint matching no key, listed twice, listed for an admin key, two keys with one fingerprint, duplicate or invalid `id`, `webhook_secret_name` not configured; paths only, never a key or secret value; wired into config loading (exit code 2)
     - _Requirements: 1.4_
-  - [ ] 2.3 Write unit tests for the tenant config
+  - [x] 2.3 Write unit tests for the tenant config
     - Every rule of 1.4 with a sentinel key value that must not appear in any message; absent `tenants` equals Phase 4; ranges and defaults; `deploy/config/gateway.yaml` sample gains a commented tenants example that a drift test loads
     - _Requirements: 1.1, 1.4, 1.5_
 
@@ -64,12 +64,12 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 3.8 Add the Tenant_Backfill
     - `tenant_backfill.lua` (batched, idempotent: `ZADD`, `SADD`, `HSETNX`; DLQ records with an existing Request get `tenant=default`), `TenantIndexBackfill` in `das/manager/retention.py` with `das:tenant:index:backfill_lock` (`SET NX PX`) and `das:tenant:index:ready`, started with the other Manager retention tasks
     - _Requirements: 9.2_
-  - [ ] 3.9 Write property test for the backfill
+  - [x] 3.9 Write property test for the backfill
     - **Property 7: Tenant_Backfill is idempotent and complete**
     - **Validates: Requirements 5.1, 5.2, 5.5, 9.1, 9.2**
 
 - [ ] 4. Gateway authentication and scopes
-  - [ ] 4.1 Authenticate to a Principal
+  - [x] 4.1 Authenticate to a Principal
     - `das/gateway/auth.py`: `api_key_auth` uses the `KeyDirectory`, stores `request.state.principal` and the resolved `client_settings`; `admin_key_auth` keeps `admin_disabled` for a Phase 4 configuration with no admin capability anywhere
     - _Requirements: 1.2, 1.3, 2.1_
   - [ ] 4.2 Enforce scopes on every route
@@ -165,10 +165,10 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 10.3 Add the optional features
     - KEDA `ScaledObject` per Worker Deployment on its Capability queues (`das.jobs.<cap>`), and `lifecycle.preStopDrain` running `das drain` for the pod's agent id with the Admin_API_Key from the Secret
     - _Requirements: 10.1, 10.6_
-  - [ ] 10.4 Write rendered-output unit tests
+  - [x] 10.4 Write rendered-output unit tests
     - `tests/unit/test_chart_*.py` render with the `helm` binary (skipped locally without it, required in CI): probes, advertise host, agent id, grace period and its refusal, no sentinel secret in any ConfigMap or manifest, features on and off, `values.schema.json` rejections
     - _Requirements: 10.2, 10.3, 10.4, 10.6, 10.7, 11.1_
-  - [ ] 10.5 Write the chart README
+  - [x] 10.5 Write the chart README
     - Prerequisites (Redis, RabbitMQ with the management plugin), the secret keys, tenant configuration, the grace period rule, the KEDA and preStop options, and the delivery-limit caveat for a Worker killed repeatedly
     - _Requirements: 10.7_
 
