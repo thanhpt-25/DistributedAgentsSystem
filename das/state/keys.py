@@ -103,6 +103,9 @@ DEFAULT_TENANT: Final = "default"
 #: ``1`` once the Tenant_Backfill completed; the lock of the backfill (Phase 5 Req 9.2).
 TENANT_INDEX_READY: Final = f"{PREFIX}:tenant:index:ready"
 TENANT_INDEX_BACKFILL_LOCK: Final = f"{PREFIX}:tenant:index:backfill_lock"
+#: Expiry in days of every Usage_Rollup hash (Phase 5 Req 6.6): one cluster-wide setting, written at startup by the
+#: Gateway and Manager from ``usage.retention_days`` and read by the scripts that write usage. 400 when absent.
+TENANT_USAGE_RETENTION: Final = f"{PREFIX}:tenant:usage_retention_days"
 
 # Phase 2 field of the lease hash: agent of the latest acquire, kept across release.
 F_LAST_OWNER: Final = "last_owner"

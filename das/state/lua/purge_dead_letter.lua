@@ -33,8 +33,13 @@ end
 if (v[3] or '') ~= ARGV[3] then
   return { 'CONFLICT' }
 end
+local tenant = redis.call('HGET', KEYS[1], 'tenant')  -- Phase 5 Req 5.1: read before the record goes
 redis.call('DEL', KEYS[1])
 for i = 2, 6 do
   redis.call('ZREM', KEYS[i], dlid)
+  if tenant and tenant ~= '' then
+    local twin = tenant_twin(KEYS[i], tenant)
+    if twin then redis.call('ZREM', twin, dlid) end
+  end
 end
 return { 'DELETED' }

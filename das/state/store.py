@@ -11,6 +11,7 @@ timestamps use Redis server time.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -63,6 +64,11 @@ CANCEL_REASON: Final = "cancelled: request cancelled"
 # Event_Stream length cap of a Request without a stored events_max_len (Phase 4 Req 6.5).
 DEFAULT_EVENTS_MAX_LEN: Final = 1000
 
+# Tenant_ID (Phase 5 Req 1.1); the config schema and create_request.lua check the same shape.
+_TENANT_ID: Final = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+#: Range of ``usage.retention_days`` (Phase 5 Req 6.6).
+USAGE_RETENTION_DAYS: Final = (30, 3650)
+
 # Owner-checked PEXPIRE / DEL of a single-key lock (IndexBackfill, Req 15.10).
 _RENEW_LOCK_LUA: Final = (
     "if redis.call('GET', KEYS[1]) == ARGV[1] then "
@@ -92,9 +98,24 @@ class ClientRequestSpec:
     idempotency_ttl: int = 86_400
     max_active_requests: int = 0
     events_max_len: int = DEFAULT_EVENTS_MAX_LEN
+    # Phase 5: the tenant the Request belongs to, its Tenant_Quota (0 = none) and its priority (Req 3.1, 3.7, 7.3).
+    # ``tenant`` None leaves the field off (the Default_Tenant); priority is stored only when ``high``.
+    tenant: str | None = None
+    tenant_max_active: int = 0
+    priority: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.tenant is not None and not _TENANT_ID.fullmatch(self.tenant):
+            raise ValueError(f"tenant is not a valid Tenant_ID: {self.tenant!r}")
+        if self.priority not in (None, "normal", "high"):
+            raise ValueError(f"priority must be normal or high, not {self.priority!r}")
+        if self.tenant_max_active < 0:
+            raise ValueError("tenant_max_active must be >= 0")
 
 
-CreateOutcome = Literal["created", "replayed", "idempotency_conflict", "quota_exceeded"]
+CreateOutcome = Literal[
+    "created", "replayed", "idempotency_conflict", "quota_exceeded", "tenant_quota_exceeded"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,6 +546,18 @@ class StateStore:
 
     # ------------------------------------------------------------------ time / scans
 
+    async def set_usage_retention(self, days: int) -> None:
+        """Set how many days each Usage_Rollup hash lives (Phase 5 Req 6.6).
+
+        One cluster-wide setting: every Gateway and Manager writes its configured ``usage.retention_days`` at
+        startup, and the scripts that write usage read it, defaulting to 400 days while it is absent. Keep the
+        value identical across the fleet; the last writer wins.
+        """
+        low, high = USAGE_RETENTION_DAYS
+        if not low <= int(days) <= high:
+            raise ValueError(f"usage retention must be between {low} and {high} days")
+        await self._r.set(keys.TENANT_USAGE_RETENTION, int(days))
+
     async def server_time(self) -> float:
         sec, usec = await self._r.time()
         return int(sec) + int(usec) / 1_000_000
@@ -664,6 +697,9 @@ class StateStore:
             int(client.idempotency_ttl),
             int(client.max_active_requests),
             int(client.events_max_len),
+            client.tenant or "",  # ARGV[13]: stored on the Request; absent = the Default_Tenant
+            int(client.tenant_max_active),  # ARGV[14]: Tenant_Quota, 0 = none
+            "high" if client.priority == "high" else "",  # ARGV[15]: stored only when high
         ]
         return await self._create(prompt, trace_context, extra)
 
@@ -693,6 +729,8 @@ class StateStore:
                 return CreateResult("idempotency_conflict")
             if status == "QUOTA_EXCEEDED":
                 return CreateResult("quota_exceeded", limit=int(_s(reply[1])))
+            if status == "TENANT_QUOTA_EXCEEDED":
+                return CreateResult("tenant_quota_exceeded", limit=int(_s(reply[1])))
             if status != "EXISTS":
                 raise StoreError(f"create_request returned an unexpected reply: {status}")
             # EXISTS: Request_ID collision; draw another.

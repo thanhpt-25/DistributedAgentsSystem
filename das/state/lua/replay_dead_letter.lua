@@ -119,7 +119,7 @@ if status == 'Failed' then
     dead_letter_id = dlid, at = at,
   }))
   local created = created_ms(KEYS[2], KEYS[9], rid)
-  index_move(rid, KEYS[10], KEYS[11], created)
+  index_move(rid, KEYS[10], KEYS[11], created, KEYS[2])  -- and the tenant's twins (Phase 5 Req 3.5)
   redis.call('ZREM', KEYS[12], rid)
   redis.call('ZREM', KEYS[13], rid)
   local pending_score = tonumber(cur[5] or '') or (created / 1000)
@@ -133,4 +133,5 @@ redis.call('HSET', KEYS[1], 'status', 'Replayed', 'status_changed_at', tostring(
 redis.call('ZREM', KEYS[14], dlid)
 redis.call('ZADD', KEYS[15], tonumber(rec[6] or '') or ms, dlid)
 redis.call('ZADD', KEYS[16], ms, dlid)
+dlq_twin_move(KEYS[1], dlid, KEYS[14], KEYS[15], tonumber(rec[6] or '') or ms)  -- Phase 5 Req 5.1
 return { 'ACCEPTED', status, tostring(job_attempt + 1) }

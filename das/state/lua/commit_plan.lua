@@ -50,6 +50,6 @@ for i = 7, #ARGV, 2 do
 end
 redis.call('HSET', KEYS[1], 'plan', ARGV[4], 'status', 'Running', 'job_count', tostring(job_count))
 redis.call('ZREM', KEYS[5], rid)
-index_move(rid, KEYS[8], KEYS[9], score)
+index_move(rid, KEYS[8], KEYS[9], score, KEYS[1])
 append_usage(KEYS[6], KEYS[1], ARGV[5])
 return { 'OK', at }

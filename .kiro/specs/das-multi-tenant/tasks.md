@@ -12,10 +12,10 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 1.1 Implement scopes, Principal and the route table
     - `das/tenancy/__init__.py`, `das/tenancy/scopes.py`: `Scope`, `OPERATOR`, `Requirement`, `Principal`, `authorize(principal, requirement)`, `ROUTE_SCOPES` listing every route explicitly (design §2 table, health routes `public`)
     - _Requirements: 2.2, 2.5_
-  - [ ] 1.2 Implement the key directory
+  - [x] 1.2 Implement the key directory
     - `das/tenancy/directory.py`: `KeyDirectory` protocol; `StaticKeyDirectory` using `das.ops.keys.classify_key` (constant time over every configured key), then mapping the matched fingerprint to its `TenantConfig`; admin keys → Operator in `default`; unclaimed api keys → `default` with `submit`, `read`
     - _Requirements: 1.2, 1.3, 1.5, 1.7, 12.3_
-  - [ ] 1.3 Implement settings layering
+  - [x] 1.3 Implement settings layering
     - `das/tenancy/settings.py` and `das/client/settings.py` `resolve_settings(fingerprint, limits, tenant)`: key override > `tenant.settings` > `client_limits.default`, field by field, an override applying to its key whatever the tenant; the Effective_Budget default comes from the resolved settings
     - _Requirements: 1.6, 4.1, 4.2, 4.4_
   - [x] 1.4 Implement usage report assembly
@@ -43,13 +43,13 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 3.1 Add the tenant keys and Lua helpers
     - `das/state/keys.py`: tenant key functions; `_common.lua`: `tenant_of`, `tenant_twin`, `index_move(..., req_key)`, tenant maintenance inside `client_active_add` and `client_active_remove`, `usage_bump` (UTC day from `TIME`, `EXPIRE` from `usage.retention_days` passed in ARGV)
     - _Requirements: 3.5, 5.1, 6.1_
-  - [ ] 3.2 Maintain the Tenant_Index in the Request scripts
+  - [x] 3.2 Maintain the Tenant_Index in the Request scripts
     - `create_request` (store `tenant` and `priority`, tenant quota check before any write, twin adds, tenant active, `submitted`), `commit_plan`, `reopen_request`, `finalize`, `cancel_request`, `replay_dead_letter`, `purge_request` (twins removed using the status read before the hash goes), `finalize` and `cancel_request` bump `finished/{status}`
     - _Requirements: 3.1, 3.5, 3.7, 3.9, 6.1, 7.3_
-  - [ ] 3.3 Maintain the Tenant_DLQ_Index in the DLQ scripts
+  - [x] 3.3 Maintain the Tenant_DLQ_Index in the DLQ scripts
     - `create_dead_letter` (store `tenant` on the record when the Request exists; add to the twins), `apply_transition` (`dlq_revert`), `discard_dead_letter`, `replay_dead_letter`, `purge_dead_letter` (twins follow the record's `tenant`)
     - _Requirements: 5.1, 5.2_
-  - [ ] 3.4 Roll up usage in `append_usage`
+  - [x] 3.4 Roll up usage in `append_usage`
     - For every appended UsageRecord, `usage_bump` of `tokens/in`, `tokens/out`, `tokens/total` per `{provider}/{model}`; a record is counted exactly once because `append_usage` is the only place it is persisted
     - _Requirements: 6.1, 6.6_
   - [ ] 3.5 Extend the StateStore API
@@ -121,7 +121,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [ ] 6.3 Write property test for the Priority header
     - **Property 8: Priority header**
     - **Validates: Requirements 7.3, 7.4, 7.5**
-  - [ ] 6.4 Translate the header in the RabbitMQ adapter
+  - [x] 6.4 Translate the header in the RabbitMQ adapter
     - `das/transport/base.py` `PRIORITY_HEADER = "das-priority"`; `das/transport/rabbitmq.py` pops it and sets `Message(priority=9)` for `high`, nothing otherwise; `x-max-priority` is never declared; other adapters ignore it; a unit test with a fake channel; codec output and queue declarations unchanged
     - _Requirements: 7.5, 7.7_
   - [ ] 6.5 Write the real-broker priority test
@@ -159,7 +159,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 10.1 Create the chart skeleton
     - `deploy/helm/das/`: `Chart.yaml`, `values.yaml`, `values.schema.json` (unknown keys rejected), `_helpers.tpl` with the grace-period guard (`fail` below `limits.shutdown_timeout + 10`), `ci/values-min.yaml`, `ci/values-all.yaml`
     - _Requirements: 10.4, 10.7_
-  - [ ] 10.2 Write the workload templates
+  - [x] 10.2 Write the workload templates
     - Gateway (Deployment and Service), Manager, one Worker Deployment per `workers` entry, ConfigMaps from structured values, ServiceAccount, PodDisruptionBudgets; secrets only through `secretKeyRef` from `existingSecret`; `DAS__GRPC__ADVERTISE_HOST` from `status.podIP`, `DAS__AGENT_ID` from `metadata.name`; startup and liveness `/livez`, readiness `/readyz`; no Redis, RabbitMQ or definitions job
     - _Requirements: 10.1, 10.2, 10.3, 10.5_
   - [ ] 10.3 Add the optional features

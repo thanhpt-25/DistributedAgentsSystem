@@ -62,6 +62,8 @@ from das.codec.message_codec import MessageCodec, ParseError, TypedMessage
 from das.config.schema import CAPABILITY_PATTERN
 from das.transport.base import (
     DEFAULT_REQUEST_REPLY_TIMEOUT,
+    PRIORITY_HEADER,
+    PRIORITY_HIGH,
     Delivery,
     Handler,
     Outcome,
@@ -111,6 +113,10 @@ DEFAULT_CONFIRM_TIMEOUT: Final = 10.0
 DEFAULT_CONNECT_TIMEOUT: Final = 10.0
 DEFAULT_MANAGEMENT_TIMEOUT: Final = 10.0
 _GET_TIMEOUT: Final = 5.0
+
+#: AMQP priority of a ``das-priority: high`` message. A RabbitMQ 4.1 quorum queue has two classes, 0 to 4 and 5 to 9,
+#: served about 2:1 without starving the lower one; ``x-max-priority`` must not be declared on it (spike G0a).
+HIGH_AMQP_PRIORITY: Final = 9
 
 _QUORUM: Final = {"x-queue-type": "quorum"}
 _JOBS_QUEUE_ARGS: Final = {"x-queue-type": "quorum", "x-dead-letter-exchange": EXCHANGE_DLX}
@@ -473,6 +479,9 @@ class RabbitMQTransport:
         route = resolve_destination(destination)
         body = self.codec.encode(message)
         hdrs = _check_headers(headers)
+        # The reserved priority header is consumed here: ``high`` becomes the AMQP priority, anything else leaves the
+        # message as it is (aio-pika sends priority 0, the normal class), and it never reaches the wire as a header.
+        priority = HIGH_AMQP_PRIORITY if hdrs.pop(PRIORITY_HEADER, None) == PRIORITY_HIGH else None
         self._require_connected()
         amqp_message = aio_pika.Message(
             body,
@@ -480,6 +489,7 @@ class RabbitMQTransport:
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             content_type="application/json",
             message_id=message.message_id,
+            priority=priority,
         )
         await self._publish(route, amqp_message)
 

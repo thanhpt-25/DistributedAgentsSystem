@@ -27,6 +27,7 @@ from das.codec.envelope import HeartbeatMessage
 from das.codec.message_codec import MessageCodec
 from das.models.results import HeartbeatPayload
 from das.transport.base import (
+    PRIORITY_HEADER,
     Delivery,
     Outcome,
     PublishNotConfirmed,
@@ -37,6 +38,7 @@ from das.transport.base import (
 from das.transport.rabbitmq import (
     EXCHANGE_DLX,
     EXCHANGE_JOBS,
+    HIGH_AMQP_PRIORITY,
     QUEUE_DLQ,
     QUEUE_DLQ_EVENTS,
     QUEUE_RESULTS,
@@ -433,6 +435,50 @@ async def test_publish_jobs_declares_quorum_queue_and_is_persistent(
     assert message.headers == {"k": "v"}
     assert message.body == MessageCodec().encode(heartbeat())  # codec bytes on the wire
     assert broker.queues["das.jobs.code"].messages[0].body == message.body
+
+
+# Priority (das-multi-tenant task 6.4; Phase 5 Req 7.5, 7.7). Broker ordering is covered by task 6.5 on a real broker.
+
+
+def test_the_priority_header_and_the_amqp_value_are_the_documented_ones() -> None:
+    assert PRIORITY_HEADER == "das-priority"
+    assert HIGH_AMQP_PRIORITY == 9  # 5 to 9 are the "high" class of a RabbitMQ 4.1 quorum queue (G0a)
+
+
+async def test_a_high_priority_header_becomes_amqp_priority_9_and_never_reaches_the_wire_as_a_header(
+    transport: RabbitMQTransport, broker: FakeBroker
+) -> None:
+    await transport.start()
+    await transport.publish("jobs/code", heartbeat(), headers={PRIORITY_HEADER: "high", "k": "v"})
+    message = broker.published[-1][2]
+    assert message.priority == HIGH_AMQP_PRIORITY
+    assert message.headers == {"k": "v"}  # the reserved header is consumed by the adapter
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [None, {}, {"k": "v"}, {PRIORITY_HEADER: "normal"}, {PRIORITY_HEADER: "urgent"}, {PRIORITY_HEADER: ""}],
+)
+async def test_anything_but_high_leaves_the_message_as_it_is_today(
+    transport: RabbitMQTransport, broker: FakeBroker, headers: dict[str, str] | None
+) -> None:
+    await transport.start()
+    await transport.publish("jobs/code", heartbeat(), headers=headers)
+    message = broker.published[-1][2]
+    assert message.priority == 0  # what aio-pika sends for every message: the "normal" class
+    assert PRIORITY_HEADER not in message.headers  # a reserved header never leaks, whatever its value
+
+
+async def test_priority_changes_neither_the_body_nor_the_queue_declarations(
+    transport: RabbitMQTransport, broker: FakeBroker
+) -> None:
+    await transport.start()
+    await transport.publish("jobs/code", heartbeat(), headers={PRIORITY_HEADER: "high"})
+    await transport.publish("jobs/code", heartbeat())
+    high, normal = broker.published[-2][2], broker.published[-1][2]
+    assert high.body == normal.body == MessageCodec().encode(heartbeat())
+    for _, arguments in [(name, args) for name, _, args in broker.declarations]:
+        assert "x-max-priority" not in arguments  # a quorum queue rejects it (G0a)
 
 
 async def test_publish_while_disconnected_raises_unavailable(

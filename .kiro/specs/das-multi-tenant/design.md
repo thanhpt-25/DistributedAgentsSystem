@@ -86,7 +86,7 @@ GET /v1/requests:       list_index.lua over das:tenant:{t}:requests[:by_status:{
 ```
 POST priority=high → Request hash priority=high → RequestSnapshot.priority
   → driver dispatch: transport.publish(dest, message, headers={"das-priority": "high"})   (every dispatch, retry, takeover, replay)
-  → RabbitMQ adapter: pop the header, Message(priority=9); normal sends no priority
+  → RabbitMQ adapter: pop the header, Message(priority=9); normal sends priority 0 (aio-pika's default)
 ```
 
 ### Package layout (new and changed)
@@ -229,7 +229,9 @@ local function client_active_remove(req_key, rid)       -- existing, plus SREM
 local function utc_day(ms)                              -- 'yyyymmdd' from epoch ms (reuses iso_ms)
 local function usage_bump(req_key, field, n, retention_days)  -- HINCRBY das:tenant:{t}:usage:{utc_day}; EXPIRE retention_days (400 if absent)
 -- append_usage(usage_key, req_key, records_json): for each record also usage_bump 'tokens/in|out|total/{provider}/{model}'
--- (task 3.4 decides how usage.retention_days reaches the scripts: an extra ARGV)
+-- usage.retention_days reaches the scripts through the key das:tenant:usage_retention_days, which the Gateway and Manager
+-- write at startup (StateStore.set_usage_retention) and usage_bump reads (400 if absent); an ARGV tail clashes with the
+-- variable-length tails of commit_plan and cancel_request.
 ```
 
 Where each script changes:

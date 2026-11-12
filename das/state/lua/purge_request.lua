@@ -40,10 +40,13 @@ if finished + ttl > now then
 end
 -- Read client_fp before the DEL removes the request hash (Phase 4 Req 3.5).
 client_active_remove(KEYS[1], rid)
+local tenant = tenant_of(KEYS[1])  -- Phase 5 Req 3.9: read before the DEL removes the request hash
 redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7],
   KEYS[8], KEYS[9], KEYS[10], KEYS[11])
 for i = 12, 21 do
   redis.call('ZREM', KEYS[i], rid)
+  local twin = tenant_twin(KEYS[i], tenant)  -- the index and by_status keys have one; the others none
+  if twin then redis.call('ZREM', twin, rid) end
 end
 redis.call('ZREM', outbox_key(KEYS[1]), rid)
 return { 'DELETED' }

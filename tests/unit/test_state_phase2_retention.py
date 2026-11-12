@@ -62,7 +62,9 @@ async def test_purge_request_keeps_until_ttl_then_deletes_everything(
     for k in keys.request_keys(rid):
         assert await r.exists(k) == 0, k
     assert await global_index_members(state_store, rid) == []
-    assert await everything(state_store) == {}
+    # Everything of the Request is gone. What stays is its tenant's Usage_Rollup (Phase 5 Req 6): usage for
+    # chargeback outlives the Request it describes and expires on its own (usage.retention_days).
+    assert {k: v for k, v in (await everything(state_store)).items() if ":usage:" not in k} == {}
     # A second sweeper finds nothing to delete (Req 14.10: counted once).
     assert await state_store.purge_request(rid, TTL) == PURGE_KEEP
 

@@ -12,7 +12,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, Literal
 
-__all__ = ["OPERATOR", "PUBLIC", "ROUTE_SCOPES", "Principal", "Requirement", "Scope", "authorize"]
+__all__ = ["DEFAULT_TENANT", "OPERATOR", "PUBLIC", "ROUTE_SCOPES", "Principal", "Requirement", "Scope", "authorize"]
 
 
 class Scope(StrEnum):
@@ -27,6 +27,8 @@ class Scope(StrEnum):
 OPERATOR: Final = "operator"
 #: A route that needs no authentication (health checks).
 PUBLIC: Final = "public"
+#: The implicit tenant of every Request without a ``tenant`` field and of every key no tenant claims (Req 1.2, 3.1).
+DEFAULT_TENANT: Final = "default"
 
 Requirement = Scope | Literal["operator", "public"]
 

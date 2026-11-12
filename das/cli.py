@@ -670,6 +670,9 @@ async def run_agent(
                 timeout=limits.startup_timeout,
                 clock=clock,
             )
+            if role in ("gateway", "manager"):
+                # The scripts that write usage read this cluster-wide setting (Phase 5 Req 6.6).
+                await store.set_usage_retention(config.usage.retention_days)
             for name, transport in instances.items():
                 # Closing twice is harmless; the agents also close their transports.
                 stack.push_async_callback(_close_quietly, name, transport.close)

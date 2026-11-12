@@ -24,4 +24,5 @@ redis.call('HSET', KEYS[1], 'status', 'Discarded', 'discarded_at', tostring(ms),
 redis.call('ZREM', KEYS[2], dlid)
 redis.call('ZADD', KEYS[3], tonumber(v[3]) or ms, dlid)
 redis.call('ZADD', KEYS[4], ms, dlid)
+dlq_twin_move(KEYS[1], dlid, KEYS[2], KEYS[3], tonumber(v[3]) or ms)  -- Phase 5 Req 5.1
 return { 'OK', tostring(ms) }

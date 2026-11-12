@@ -145,7 +145,13 @@ def model_inputs(sc: Scenario):
 
 
 def non_dlq(snapshot: dict) -> dict:
-    return {k: v for k, v in snapshot.items() if not k.startswith(keys.dlq(""))}
+    """The snapshot without the Dead_Letter keys: the records and their indexes, and (Phase 5 Req 5.1) the tenant
+    twins of those indexes, ``das:tenant:{t}:dlq:*``. A discard or a rejected Replay must not touch anything else."""
+    return {
+        k: v
+        for k, v in snapshot.items()
+        if not k.startswith(keys.dlq("")) and not (k.startswith("das:tenant:") and ":dlq:" in k)
+    }
 
 
 async def check_replay(sc: Scenario) -> None:

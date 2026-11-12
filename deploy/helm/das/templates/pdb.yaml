@@ -1,0 +1,17 @@
+{{- /* A PodDisruptionBudget per Deployment: a node drain takes one pod at a time. */ -}}
+{{- $components := list "gateway" "manager" }}
+{{- range $worker := .Values.workers }}{{- $components = append $components (printf "worker-%s" $worker.name) }}{{- end }}
+{{- range $component := $components }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "das.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "das.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "das.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+{{- end }}

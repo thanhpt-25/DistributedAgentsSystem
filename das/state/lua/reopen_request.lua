@@ -24,5 +24,5 @@ redis.call('RPUSH', KEYS[3], cjson.encode({
   scope = 'request', from_status = 'Pending', to_status = 'Running', at = at,
 }))
 redis.call('ZREM', KEYS[4], rid)
-index_move(rid, KEYS[6], KEYS[7], created)
+index_move(rid, KEYS[6], KEYS[7], created, KEYS[1])
 return { 'OK', at }

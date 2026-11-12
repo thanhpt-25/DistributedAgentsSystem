@@ -72,7 +72,8 @@ client_active_remove(KEYS[1], rid)  -- Phase 4 Req 3.3
 mark_finished(KEYS[1], KEYS[7], KEYS[8], rid, ms)
 local from_key = KEYS[10]
 if status == 'Pending' then from_key = KEYS[9] end
-index_move(rid, from_key, KEYS[11], created)
+index_move(rid, from_key, KEYS[11], created, KEYS[1])  -- and the tenant's twins (Phase 5 Req 3.5)
+usage_bump(KEYS[1], 'finished/Cancelled', 1)  -- Phase 5 Req 6.1
 redis.call('ZREM', KEYS[4], rid)
 for i, dlid in ipairs(dlids) do
   dlq_revert(KEYS[14 + i], KEYS[12], KEYS[13], KEYS[14], dlid, rid, ms)

@@ -1,0 +1,24 @@
+{{- /* One Deployment per entry of .Values.workers: same image and config, different Capabilities. */ -}}
+{{- range $worker := .Values.workers }}
+{{- $component := printf "worker-%s" $worker.name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "das.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "das.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  replicas: {{ default 1 $worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "das.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "das.componentLabels" (dict "root" $ "component" $component) | nindent 8 }}
+      annotations:
+        checksum/config: {{ include "das.config" (dict "root" $ "role" "worker") | sha256sum }}
+    spec:
+      {{- include "das.podSpec" (dict "root" $ "role" "worker" "component" $component "resources" $worker.resources "capabilities" (join "," $worker.capabilities)) | nindent 6 }}
+{{- end }}

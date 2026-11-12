@@ -118,44 +118,28 @@ local function index_move(rid, from_key, to_key, score, req_key)
   end
 end
 
+-- Move dlid between the tenant twins of two DLQ index keys (Phase 5 Req 5.1), using the 'tenant' field of
+-- the record itself (set at creation when its Request existed). A record without it belongs to no tenant,
+-- has no twins, and nothing is written. Same removal and skip rules as index_move.
+local function dlq_twin_move(record_key, dlid, from_key, to_key, score)
+  local t = redis.call('HGET', record_key, 'tenant')
+  if not t or t == '' then return end
+  if from_key and from_key ~= '' and from_key ~= to_key then
+    local twin = tenant_twin(from_key, t)
+    if twin then redis.call('ZREM', twin, dlid) end
+  end
+  if to_key and to_key ~= '' then
+    local twin = tenant_twin(to_key, t)
+    if twin then redis.call('ZADD', twin, score, dlid) end
+  end
+end
+
 -- Stamp a terminal Request (Req 14.2): finished_at = ms on the request hash and
 -- rid added to the finished and inbox_purge retention zsets, both scored by ms.
 local function mark_finished(req_key, finished_key, inbox_purge_key, rid, ms)
   redis.call('HSET', req_key, 'finished_at', tostring(ms))
   redis.call('ZADD', finished_key, ms, rid)
   redis.call('ZADD', inbox_purge_key, ms, rid)
-end
-
--- Append UsageRecords to the per-Request usage list and add them to the three
--- running totals of the request hash (Req 9). records_json is a JSON array whose
--- elements are UsageRecord objects or UsageRecord JSON strings (stored verbatim).
--- Returns the number of records appended.
-local function append_usage(usage_key, req_key, records_json)
-  if not records_json or records_json == '' then return 0 end
-  local records = cjson.decode(records_json)
-  local n, sum_in, sum_out, sum_total = 0, 0, 0, 0
-  for _, item in ipairs(records) do
-    local raw, rec
-    if type(item) == 'string' then
-      raw = item
-      rec = cjson.decode(item)
-    else
-      raw = cjson.encode(item)
-      rec = item
-    end
-    local u = rec.usage or {}
-    sum_in = sum_in + (tonumber(u.input_tokens) or 0)
-    sum_out = sum_out + (tonumber(u.output_tokens) or 0)
-    sum_total = sum_total + (tonumber(u.total_tokens) or 0)
-    redis.call('RPUSH', usage_key, raw)
-    n = n + 1
-  end
-  if n > 0 then
-    redis.call('HINCRBY', req_key, 'usage_input', sum_in)
-    redis.call('HINCRBY', req_key, 'usage_output', sum_out)
-    redis.call('HINCRBY', req_key, 'usage_total', sum_total)
-  end
-  return n
 end
 
 -- Decode and validate a UsageRecord JSON array before any write (Redis does not
@@ -203,6 +187,7 @@ local function dlq_revert(record_key, pending_idx, replayed_idx, terminal_idx, d
   redis.call('ZREM', replayed_idx, dlid)
   redis.call('ZREM', terminal_idx, dlid)
   redis.call('ZADD', pending_idx, tonumber(v[3]) or ms, dlid)
+  dlq_twin_move(record_key, dlid, replayed_idx, pending_idx, tonumber(v[3]) or ms)
   return 1
 end
 
@@ -272,14 +257,69 @@ local function client_active_remove(req_key, rid)
 end
 
 -- Add n to a field of the Usage_Rollup of the Request's tenant for the current UTC day (Phase 5
--- Req 6.1) and refresh its expiry (usage.retention_days, 400 when not given).
+-- Req 6.1) and refresh its expiry. The expiry in days is retention_days when given, else the
+-- cluster-wide setting das:tenant:usage_retention_days (written at startup from usage.retention_days),
+-- else 400.
 local function usage_bump(req_key, field, n, retention_days)
   local _, ms = server_time()
-  local key = key_prefix(req_key) .. ':tenant:' .. tenant_of(req_key) .. ':usage:' .. utc_day(ms)
+  local prefix = key_prefix(req_key)
+  local key = prefix .. ':tenant:' .. tenant_of(req_key) .. ':usage:' .. utc_day(ms)
   redis.call('HINCRBY', key, field, n)
   local days = tonumber(retention_days)
+  if not days then days = tonumber(redis.call('GET', prefix .. ':tenant:usage_retention_days')) end
   if not days or days < 1 then days = 400 end
   redis.call('EXPIRE', key, math.floor(days * 86400))
+end
+
+-- Append UsageRecords to the per-Request usage list and add them to the three
+-- running totals of the request hash (Req 9). records_json is a JSON array whose
+-- elements are UsageRecord objects or UsageRecord JSON strings (stored verbatim).
+-- Phase 5 Req 6.1: every record is also added to the Usage_Rollup of the Request's tenant and
+-- the current UTC day, per {provider}/{model}; this is the only place a UsageRecord is
+-- persisted, so each is counted exactly once. Returns the number of records appended.
+local function append_usage(usage_key, req_key, records_json)
+  if not records_json or records_json == '' then return 0 end
+  local records = cjson.decode(records_json)
+  local n, sum_in, sum_out, sum_total = 0, 0, 0, 0
+  local by_model, order = {}, {}
+  for _, item in ipairs(records) do
+    local raw, rec
+    if type(item) == 'string' then
+      raw = item
+      rec = cjson.decode(item)
+    else
+      raw = cjson.encode(item)
+      rec = item
+    end
+    local u = rec.usage or {}
+    local i, o, t = tonumber(u.input_tokens) or 0, tonumber(u.output_tokens) or 0, tonumber(u.total_tokens) or 0
+    sum_in = sum_in + i
+    sum_out = sum_out + o
+    sum_total = sum_total + t
+    redis.call('RPUSH', usage_key, raw)
+    n = n + 1
+    if type(rec.provider) == 'string' and rec.provider ~= '' and type(rec.model) == 'string' and rec.model ~= '' then
+      local pair = rec.provider .. '/' .. rec.model
+      if not by_model[pair] then
+        by_model[pair] = { 0, 0, 0 }
+        order[#order + 1] = pair
+      end
+      by_model[pair][1] = by_model[pair][1] + i
+      by_model[pair][2] = by_model[pair][2] + o
+      by_model[pair][3] = by_model[pair][3] + t
+    end
+  end
+  if n > 0 then
+    redis.call('HINCRBY', req_key, 'usage_input', sum_in)
+    redis.call('HINCRBY', req_key, 'usage_output', sum_out)
+    redis.call('HINCRBY', req_key, 'usage_total', sum_total)
+    for _, pair in ipairs(order) do
+      usage_bump(req_key, 'tokens/in/' .. pair, by_model[pair][1])
+      usage_bump(req_key, 'tokens/out/' .. pair, by_model[pair][2])
+      usage_bump(req_key, 'tokens/total/' .. pair, by_model[pair][3])
+    end
+  end
+  return n
 end
 
 -- Write one JobRecord JSON and, when its state changed, append a transition entry and

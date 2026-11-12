@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "das.fullname" . }}-manager
+  labels:
+    {{- include "das.componentLabels" (dict "root" . "component" "manager") | nindent 4 }}
+spec:
+  replicas: {{ .Values.manager.replicas }}
+  selector:
+    matchLabels:
+      {{- include "das.selectorLabels" (dict "root" . "component" "manager") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "das.componentLabels" (dict "root" . "component" "manager") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include "das.config" (dict "root" . "role" "manager") | sha256sum }}
+    spec:
+      {{- include "das.podSpec" (dict "root" . "role" "manager" "component" "manager" "resources" .Values.manager.resources) | nindent 6 }}

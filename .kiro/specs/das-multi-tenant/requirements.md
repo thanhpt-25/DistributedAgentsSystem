@@ -143,7 +143,7 @@ Places where property-based testing applies are marked by criteria of the form "
 2. WHEN `priority` exceeds the tenant's `max_priority` (default `normal`; `high` for the Default_Tenant), THE Gateway_API SHALL reject the submit with 400 `priority_above_limit` and the limit, creating nothing.
 3. THE State_Store SHALL store `priority` on the Request only when it is `high`, and the Request view SHALL return `priority` (`normal` when not stored).
 4. THE Manager_Agent SHALL set the Priority_Header `das-priority: high` on every dispatch of a Job of a `high` Request, including retries and Jobs re-dispatched after a Replay or a takeover, and SHALL set no header for `normal`. FOR ALL dispatch sequences, the header SHALL be present if and only if the Request's priority is `high`.
-5. THE RabbitMQ adapter SHALL translate the Priority_Header into the AMQP `priority` message property 9, SHALL send no `priority` property otherwise, and SHALL NOT declare `x-max-priority`. Other adapters SHALL ignore the header. The Job message payload and the Message_Codec output SHALL NOT change.
+5. THE RabbitMQ adapter SHALL translate the Priority_Header into the AMQP `priority` message property 9, SHALL leave the `priority` property at the client default 0 otherwise, and SHALL NOT declare `x-max-priority`. Other adapters SHALL ignore the header. The Job message payload and the Message_Codec output SHALL NOT change.
 6. THE README SHALL state that priority is a weighting and not strict: with both classes queued, `high` Jobs are delivered about two for every `normal` one, and `normal` Jobs are never starved.
 7. THE existing queue declarations, the `das-jobs` policy and the delivery limit SHALL be unchanged.
 

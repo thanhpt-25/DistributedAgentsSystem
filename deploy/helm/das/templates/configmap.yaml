@@ -1,0 +1,13 @@
+{{- /* One config file per role. The workers share one: only their Capabilities differ, and those are an env var. */ -}}
+{{- range $role := list "gateway" "manager" "worker" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "das.fullname" $ }}-{{ $role }}
+  labels:
+    {{- include "das.componentLabels" (dict "root" $ "component" $role) | nindent 4 }}
+data:
+  config.yaml: |
+    {{- include "das.config" (dict "root" $ "role" $role) | nindent 4 }}
+{{- end }}

@@ -42,6 +42,12 @@ MAX_MAX_RECONNECT_INTERVAL: Final = 300.0
 INITIAL_RECONNECT_INTERVAL: Final = 1.0
 
 DEFAULT_REQUEST_REPLY_TIMEOUT: Final = 30.0
+
+#: Reserved publish header (Phase 5 Req 7.4, 7.5). The value ``high`` asks an adapter that has message priorities to
+#: deliver the message ahead of normal ones. The adapter consumes it (it is never delivered as a header); adapters
+#: without priorities ignore it, and the codec output never changes.
+PRIORITY_HEADER: Final = "das-priority"
+PRIORITY_HIGH: Final = "high"
 MIN_REQUEST_REPLY_TIMEOUT: Final = 1.0
 MAX_REQUEST_REPLY_TIMEOUT: Final = 300.0
 
@@ -378,6 +384,8 @@ class SubscriptionRegistry:
 
 
 __all__ = [
+    "PRIORITY_HEADER",
+    "PRIORITY_HIGH",
     "DEFAULT_MAX_RECONNECT_INTERVAL",
     "DEFAULT_REQUEST_REPLY_TIMEOUT",
     "MAX_MAX_RECONNECT_INTERVAL",

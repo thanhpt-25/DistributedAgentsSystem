@@ -4,7 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from das.client.budget import Budget
-from das.config.schema import BudgetConfig, ClientLimitsConfig
+from das.config.schema import BudgetConfig, ClientLimitsConfig, TenantConfig
+from das.tenancy.settings import layered
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,9 +32,12 @@ def _budget(config: BudgetConfig | None) -> Budget | None:
     return None if budget.is_empty() else budget
 
 
-def resolve_settings(fingerprint: str, limits: ClientLimitsConfig) -> ClientSettings:
-    """``client_limits.default`` merged with the override for ``fingerprint``, if any (Req 1.3)."""
-    s = limits.settings_for(fingerprint)
+def resolve_settings(
+    fingerprint: str, limits: ClientLimitsConfig, tenant: TenantConfig | None = None
+) -> ClientSettings:
+    """``client_limits.default``, the tenant's settings and the override for ``fingerprint``, each field from the
+    most specific layer that sets it (Phase 4 Req 1.3; Phase 5 Req 4.1). Without a tenant: the Phase 4 result."""
+    s = layered(limits, fingerprint, tenant)
     return ClientSettings(
         fingerprint=fingerprint,
         rate=s.rate,
