@@ -66,10 +66,12 @@ Three need your answer because they change scope or cost: **1, 3 and 8**.
    exactly once, so no double count), plus a bounded `tenant` label on four metrics for Grafana. Prometheus alone
    is not chargeback-grade (resets, scrape gaps, retention). The roadmap's "S" is optimistic: cost needs the Price_Table
    (the Manager has it, the script does not) and the cancel path computes it in the Gateway.
-6. **Priority.** Request `priority` in `low|normal|high`, tenant default and ceiling, carried in the Job message as an
-   optional field (omitted when `normal`, so the codec baselines stay byte-identical). The transport mechanism
-   (quorum-queue priority, which in 4.x has two levels, versus a queue per class) is **decided by a spike**, G0 below,
-   because workers pull with `basic.get`.
+6. **Priority.** *Resolved by spike G0a (section 9): two classes, `normal` and `high`*, not three. Request `priority`
+   (tenant default and ceiling) is carried in the Job message as an optional field (omitted when `normal`, so the
+   codec baselines stay byte-identical) and the transport sets the AMQP `priority` property (5 or more for `high`) on the
+   existing quorum queues. No queue change and no migration. It is a **2:1 weighting, not strict priority**: under
+   contention `high` gets about two thirds of the deliveries and `normal` never starves. `low` is dropped (it would
+   be `normal`).
 7. **Autoscaling.** The chart ships an optional KEDA `ScaledObject` on `das_queue_depth` (or the RabbitMQ scaler), and
    a CPU HPA as the default-off baseline. No Prometheus adapter dependency.
 8. **How deep to verify Kubernetes.** *Recommended: `helm lint`, `helm template` plus `kubeconform` and rendered-output
@@ -96,9 +98,11 @@ Three need your answer because they change scope or cost: **1, 3 and 8**.
   Request was purged) is operator-only.
 - **Chart (`deploy/helm/das/`).** Gateway, Manager and one Worker Deployment per capability set (values list); config
   in a ConfigMap, secrets by `existingSecret`; Redis and RabbitMQ are external URLs (test-only manifests under
-  `tests/k8s/` for the kind job); probes `/livez` and `/readyz`; `terminationGracePeriodSeconds` above `job_timeout`
-  for Workers; optional `preStop` running `das drain --wait`; PDB; `DAS__GRPC__ADVERTISE_HOST` from the pod IP
-  (downward API), to be proven in G0.
+  `tests/k8s/` for the kind job); startup and liveness `/livez`, readiness `/readyz`, all on port 8081 for every role;
+  `DAS__GRPC__ADVERTISE_HOST` from the **pod IP** (downward API; the pod name does not work) and `DAS__AGENT_ID`
+  from the pod name; `terminationGracePeriodSeconds` just above `limits.shutdown_timeout` (45 s as in Compose; it
+  does **not** need to cover `job_timeout`); no RabbitMQ definitions-import job (the Manager applies the policy and
+  the transport declares the queues); PDB and at least two Gateway replicas; `preStop` drain is optional (section 9).
 
 ## 5. Work groups, order and dependencies
 
@@ -107,13 +111,13 @@ Sizes are the roadmap's scale (S/M/L) corrected where the code says otherwise. T
 
 | # | Group | Size | Depends on |
 |---|---|---|---|
-| G0 | **Spikes.** (a) RabbitMQ 4.1 priority with quorum queues and `basic.get`: order, starvation, requeue and retry behaviour. (b) The existing images on a `kind` cluster: config, probes, gRPC advertise address, drain on `preStop`. | S | none |
+| G0 | **Spikes. DONE, results in section 9.** (a) RabbitMQ 4.1 priority with quorum queues and `basic.get`. (b) The existing images on a `kind` cluster: config, probes, gRPC advertise address, pod deletion, rolling restarts. | S | none |
 | G1 | **Spec** `.kiro/specs/das-multi-tenant/` (requirements, design, tasks), naming the superseded Req 20 criteria | M | decisions 1, 3, 8; G0 |
 | G2 | **Identity and scopes:** tenant config and validation (fingerprint collisions, reserved `default`), `KeyDirectory`, `Principal`, scope checks per route, legacy mapping, tenant in the audit entry, OpenAPI and error table | M | G1 |
 | G3 | **Tenant on Requests:** `tenant` field, tenant indexes inside the 19 scripts, scoped get, cancel, list and events, per-tenant quota and defaults, backfill and `ready` flag, retention | L | G2 |
 | G4 | **DLQ and admin scoping:** tenant-scoped DLQ, tenant `admin` versus `operator`, malformed records operator-only | M | G3 |
 | G5 | **Usage and cost:** rollups in `finalize` and the cancel path, `GET /v1/usage` and `/v1/admin/usage`, bounded `tenant` label (amending Req 20.3), Grafana panel | M | G3 |
-| G6 | **Priority:** submit field, tenant default and ceiling, Job message field, transport mechanism from G0, retries and DLQ replay keep it | M | G0, G3 |
+| G6 | **Priority:** `normal`/`high` submit field, tenant default and ceiling, optional Job message field, AMQP priority property (no queue change), retries and DLQ replay keep it | S to M | G3 |
 | G7 | **Compatibility:** Phase 1 to 4 suites unchanged, codec baselines byte-identical, mixed-version upgrade test, updated pins of Req 20.1, 20.3, 20.6 | M | G3 to G6 (grows with each) |
 | G8 | **Helm chart:** templates, values, probes, drain, PDB, optional KEDA, README; `kubeconform` added to CI | M | G0b (can run beside G2 to G6) |
 | G9 | **CI, docs, final checkpoint:** kind job (Decision 8), README and CLAUDE.md, branch-protection note | S | all |
@@ -136,15 +140,63 @@ Sizes are the roadmap's scale (S/M/L) corrected where the code says otherwise. T
   must be forced through the scope check (a test that walks the OpenAPI routes and fails on an unclassified one).
 - **Touching 19 Lua scripts.** Largest regression surface; the existing atomicity and fault-injection tests are the net.
 - **Mixed-version rollout** is the real migration risk (see section 4).
-- **Priority behaviour is unproven** until G0a; if quorum-queue priority is too coarse, the queue-per-class design costs
-  more queues and a worker polling rule.
+- **Priority is coarse by nature:** two classes with a 2:1 weighting (measured, section 9). If strict priority or more
+  than two classes are ever needed, that is a queue-per-class design (more queues, a worker polling rule), not a tweak.
 - **Cost attribution** in `finalize` needs the Price_Table where the script runs; may force passing precomputed totals.
-- **Unverified by me:** how RabbitMQ 4.1 orders `basic.get` with priorities (from memory, hence the spike); the pod-IP
-  gRPC advertise address on Kubernetes; GitHub runner time for a kind job.
+- **Still unverified:** GitHub runner time for a kind job; `kind load` behaviour on a CI runner (section 9, point 10);
+  autoscaling (HPA or KEDA), PDB behaviour, a Gateway rollout with two replicas behind a Service, a `preStop` drain
+  hook, and Redis or RabbitMQ restarts on Kubernetes were not exercised by the spike.
+- **A Job killed repeatedly is dead-lettered:** the broker requeues a Job whose Worker died, but only
+  `delivery-limit` (2) times, so a Job whose pods keep being evicted ends in the DLQ. Worth a chart note.
 - **Spec conflict still open from Phase 4** (Req 5.9 vs 11.1, partial results of a budget-stopped Request) is
   independent of this phase; fold it into the spec only if you decide to expose results.
 
 ## 8. Next step
 
-Confirm or change decisions **1, 3 and 8** (the rest follow the recommendations unless you object), then run G0 (two
-small spikes, no product code) and write the G1 spec for your review before any implementation.
+Confirm or change decisions **1, 3 and 8** (the rest follow the recommendations unless you object); G0 is done
+(section 9), so the G1 spec for your review comes next, before any implementation.
+
+## 9. G0 results (2026-11-12; scripts and logs in the session scratchpad, no product code or repo file changed)
+
+**G0a: RabbitMQ 4.1.8, a quorum queue declared as the transport declares it (`x-queue-type: quorum` plus the dead-letter
+exchange, and the `das-jobs` delivery-limit policy), messages with an AMQP `priority`, consumed with `basic.get`.**
+
+1. `x-max-priority` is **rejected** on a quorum queue (`PRECONDITION_FAILED`). Never declare it. A plain `priority`
+   message property is accepted with no declaration.
+2. **Two levels only:** 0 to 4 behave as `normal`, 5 to 9 as `high`. Inside a level, delivery is FIFO: priority 9 does not
+   overtake 5, and single messages of priority 1 to 4 queue behind a flood of 0 in publish order.
+3. **Weighted, not strict:** with 200 `normal` ahead of 60 `high` in the queue, the first 90 deliveries alternated
+   `high, high, normal` until the `high` messages ran out at delivery 89. So `high` gets about two thirds of the
+   throughput under contention and `normal` never starves.
+4. Messages with no priority are plain FIFO: omitting the property leaves today's behaviour unchanged.
+5. `nack(requeue=True)` of a `high` message: redelivered first, priority kept, `x-delivery-count` 1. With
+   `delivery-limit` 2 the message is delivered three times and then dead-lettered through the DLX **with its priority
+   preserved** (this is `max_attempts - 1`, as the transport computes it).
+
+**G0b: the unmodified `das-gateway`, `das-manager` and `das-worker` images on `kind` v0.33 (Kubernetes 1.37), with the real
+`deploy/config/*.yaml`, in-cluster Redis, RabbitMQ 4.1 and the stub LLM (throwaway manifests, not the chart).**
+
+6. **Up in 20 s, zero restarts**; a Request completes end to end. Every role serves `/livez`, `/readyz` and `/healthz`
+   on port 8081 (Gateway included), and `/livez` plus `/readyz` probes work as startup, liveness and readiness.
+7. **RabbitMQ needs no definitions import.** With no `definitions.json`, the Manager applied the `das-jobs` policy and the
+   transport created every queue, DLQs included. Compose's import is a convenience, not a requirement.
+8. **gRPC advertise host must be the pod IP.** With `status.podIP` (downward API), admin drain, which goes Gateway to
+   agent over gRPC at the advertised address, answered `202` in 0.06 s and the agent became `Draining`. With the
+   pod name (the Compose default, `$HOSTNAME`) it answered `504 agent_timeout` and the agent stayed `Available`.
+   `DAS__AGENT_ID` from the pod name works, so agent ids equal pod names.
+9. **Pod deletion and restarts lose nothing:**
+   - graceful delete of a Worker mid-Job: it finished the Job (15 s) and exited after 13 s; the Request completed;
+   - force delete (grace 0) of a Worker mid-Job: the broker requeued the unacknowledged Job, the replacement redid it, and the
+     Request completed in 33 s (no wait for `job_timeout`);
+   - a Job longer than `shutdown_timeout` (45 s against 30 s): the pod exited at 26 s, inside the 45 s grace period; the
+     Job was requeued and redone from scratch by the replacement, and the Request completed;
+   - rolling restart with 6 Requests in flight: Managers 6 of 6 Completed (31 s), Workers 6 of 6 Completed (19 s).
+10. **Tooling note:** `kind load docker-image` failed for the multi-platform base images (`content digest … not found`) under
+    Docker Desktop's containerd image store; `docker save --platform linux/arm64` plus `kind load image-archive` worked.
+    Not expected on a GitHub runner (classic store), but unverified. Cost here: cluster 45 s, image load 26 s, a 1.3 GB
+    node image left in the local Docker cache.
+
+**What changed in this plan because of G0:** Decision 6 is resolved (two classes, no queue change); G6 shrinks; the chart
+sketch now says pod IP for the advertise host, a grace period just above `shutdown_timeout` rather than `job_timeout`, no
+RabbitMQ definitions job, and an optional `preStop` (a plain SIGTERM already drains safely); the "unverified" list in
+section 7 is shorter.
