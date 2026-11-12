@@ -584,7 +584,13 @@ uv run --isolated --no-project --with-editable clients/python --with pytest==9.1
 Integration suite (RabbitMQ and gRPC through testcontainers, needs Docker):
 
 ```bash
-uv run pytest tests/integration --ignore=tests/integration/e2e
+uv run pytest tests/integration --ignore=tests/integration/e2e --ignore=tests/integration/k8s
+```
+
+Kubernetes suite (the Helm chart on a throwaway kind cluster; opt-in with `DAS_K8S_E2E=1`, needs Docker, `kind`, `kubectl`, `helm` and the three images built as `das-<role>:local`, about 4 min once they exist):
+
+```bash
+uv run pytest tests/integration/k8s
 ```
 
 E2E suite (full Compose stacks with a fake LLM, needs Docker and Compose 2.30+, about 4 min once the images are built; the first run also builds the three `das-*` images, about 2.5 min):
@@ -641,16 +647,19 @@ Transport adapters are discovered through the `das.transports` entry-point group
 
 ## Continuous integration
 
-The workflow `.github/workflows/ci.yml` (named **CI**) has four jobs. Every job installs uv 0.13.6 and runs the commands listed below, which are the same commands as in [Development](#development). `fast`, `integration`, and `e2e` use Python 3.12 and run `uv sync --locked` first. `client` sets up each supported Python itself and does not sync, because it tests the client package in an isolated environment. Each job reports its own status check on the commit and pull request; `client` reports one per Python (`Client_Job (Python 3.10)` and so on).
+The workflow `.github/workflows/ci.yml` (named **CI**) has five jobs. Every job installs uv 0.13.6 and runs the commands listed below, which are the same commands as in [Development](#development). `fast`, `integration`, `e2e`, and `k8s` use Python 3.12 and run `uv sync --locked` first. `client` sets up each supported Python itself and does not sync, because it tests the client package in an isolated environment. Each job reports its own status check on the commit and pull request; `client` reports one per Python (`Client_Job (Python 3.10)` and so on).
 
 | Job | Commands | Runs on | Timeout |
 |---|---|---|---|
-| `fast` (Fast_Job) | `uv run ruff check`, `uv run mypy`, `uv run lint-imports`, `uv run pytest tests/unit tests/property tests/contract` | every push to any branch (not tags); pull requests when opened, synchronized, or reopened; manual run | 15 min |
+| `fast` (Fast_Job) | `uv run ruff check`, `uv run mypy`, `uv run lint-imports`, `uv run pytest tests/unit tests/property tests/contract` (which includes the Helm chart's rendered-output tests), then `helm lint`, `helm template` and `kubeconform -strict` on the chart for `deploy/helm/das/ci/values-min.yaml` and for `deploy/helm/das/ci/values-all.yaml` (every optional feature on) | every push to any branch (not tags); pull requests when opened, synchronized, or reopened; manual run | 15 min |
 | `client` (Client_Job) | the client package suite from [Development](#development), once for each of Python 3.10, 3.11, 3.12, and 3.13 | same as `fast`; does not wait for it | 10 min per Python |
-| `integration` (Integration_Job) | `uv run pytest tests/integration --ignore=tests/integration/e2e`, then the repeat-run check (`... --count 20 -v`) | push to `main`; manual run | 30 min |
+| `integration` (Integration_Job) | `uv run pytest tests/integration --ignore=tests/integration/e2e --ignore=tests/integration/k8s`, then the repeat-run check (`... --count 20 -v`) | push to `main`; manual run | 30 min |
 | `e2e` (E2E_Job) | checks Docker Compose is 2.30 or later, then `uv run pytest tests/integration/e2e` | push to `main`; manual run | 30 min |
+| `k8s` (Kind_Job) | installs helm, kind and kubectl, builds the three images, then `uv run pytest tests/integration/k8s` with `DAS_K8S_E2E=1` | push to `main`; manual run | 30 min |
 
-`integration` and `e2e` start only after `fast` in the same workflow run finishes with status success. If `fast` fails or is cancelled, they do not run. On pull requests and on pushes to other branches they are reported as skipped. Both set `DAS_REQUIRE_DOCKER=1`, so a Docker-related skip fails the job. In `fast`, all four checks run even if one of them fails, so one run shows every failure. When `e2e` fails, the container logs are uploaded as the `e2e-logs-<run id>-<attempt>` artifact.
+`integration`, `e2e` and `k8s` start only after `fast` in the same workflow run finishes with status success. If `fast` fails or is cancelled, they do not run. On pull requests and on pushes to other branches they are reported as skipped. All three set `DAS_REQUIRE_DOCKER=1`, so a Docker-related skip fails the job. In `fast`, every check runs even if one of them fails, so one run shows every failure. When `e2e` fails, the container logs are uploaded as the `e2e-logs-<run id>-<attempt>` artifact; when `k8s` fails, every pod's logs are uploaded as `k8s-logs-<run id>-<attempt>`.
+
+The Helm, kubeconform, kind and kubectl versions are pinned in the workflow's `env`, each with the SHA-256 of its download, and a downloaded binary is verified before it is installed. To upgrade one, change its version and its checksum together, taking the checksum from the publisher's own checksum file. `KUBERNETES_SCHEMA_VERSION` is the Kubernetes version `kubeconform` validates the rendered chart against.
 
 A new commit on the same branch, for the same event type, cancels the previous run that is still in progress.
 

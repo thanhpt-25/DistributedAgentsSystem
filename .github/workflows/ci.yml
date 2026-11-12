@@ -17,6 +17,18 @@ concurrency:
 env:
   UV_VERSION: "0.13.6"
   PYTHON_VERSION: "3.12"
+  # Tools for the Helm chart (das-multi-tenant Req 11.5): an exact version each, and the SHA-256 of the Linux amd64
+  # download, taken from the publisher's own checksum file. A downloaded binary is verified against it before it is
+  # installed. To upgrade a tool, change its version and its checksum together.
+  HELM_VERSION: "4.3.1"
+  HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b # helm-v4.3.1-linux-amd64.tar.gz
+  KUBECONFORM_VERSION: "0.7.0"
+  KUBECONFORM_SHA256: c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3 # kubeconform-linux-amd64.tar.gz
+  KUBERNETES_SCHEMA_VERSION: "1.37.0" # the Kubernetes version kubeconform validates the rendered chart against
+  KIND_VERSION: "0.33.0"
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d # kind-linux-amd64
+  KUBECTL_VERSION: "1.37.2"
+  KUBECTL_SHA256: c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4 # kubectl (linux/amd64)
 
 jobs:
   fast:
@@ -34,6 +46,23 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
+
+      # Before uv sync and the tests: the chart's unit tests render with the real helm, and with CI=true a missing
+      # binary fails them instead of skipping them. The runner image may carry another helm; this one is pinned.
+      - name: Install helm and kubeconform
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o helm.tgz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          curl -fsSL -o kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+          tar -xzf kubeconform.tgz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          helm version --short | grep -F "v${HELM_VERSION}"
+          kubeconform -v | grep -F "v${KUBECONFORM_VERSION}"
 
       - name: uv sync --locked
         id: install
@@ -62,6 +91,34 @@ jobs:
           echo "Reproduce locally: uv run pytest tests/unit tests/property tests/contract --hypothesis-seed=${HYPOTHESIS_SEED}"
           export PYTEST_ADDOPTS="--hypothesis-seed=${HYPOTHESIS_SEED}"
           uv run pytest tests/unit tests/property tests/contract
+
+      # The chart, for the default values and for the file that turns every optional feature on (Req 11.1). The
+      # chart's rendered-output unit tests are part of the pytest step above.
+      - name: helm lint
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          for values in deploy/helm/das/ci/values-min.yaml deploy/helm/das/ci/values-all.yaml; do
+            helm lint deploy/helm/das -f "$values" --strict
+          done
+
+      - name: helm template
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          for values in deploy/helm/das/ci/values-min.yaml deploy/helm/das/ci/values-all.yaml; do
+            helm template release deploy/helm/das -f "$values" > "${RUNNER_TEMP}/$(basename "$values")"
+          done
+
+      # -strict refuses unknown fields. The KEDA ScaledObject is a custom resource, so its schema comes from the
+      # datree CRDs catalog; every built-in kind uses the pinned Kubernetes schema version.
+      - name: kubeconform -strict
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          for values in deploy/helm/das/ci/values-min.yaml deploy/helm/das/ci/values-all.yaml; do
+            helm template release deploy/helm/das -f "$values" | kubeconform -strict -summary \
+              -kubernetes-version "${KUBERNETES_SCHEMA_VERSION}" \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          done
 
   # Client_Package (clients/python): its own tests, once per supported Python. It is not a uv workspace member
   # (the server's lock is Python 3.12 only), so the tests run in an isolated environment. setup-uv's python-version
@@ -108,10 +165,11 @@ jobs:
       - name: uv sync --locked
         id: install
         run: uv sync --locked
-      - name: uv run pytest tests/integration --ignore=tests/integration/e2e
+      # The cluster tests (tests/integration/k8s) run in the Kind_Job below, not here.
+      - name: uv run pytest tests/integration --ignore=tests/integration/e2e --ignore=tests/integration/k8s
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         timeout-minutes: 15
-        run: uv run pytest tests/integration --ignore=tests/integration/e2e
+        run: uv run pytest tests/integration --ignore=tests/integration/e2e --ignore=tests/integration/k8s
       # Repeat_Run_Check: runs even when the suite step above fails. With -v the
       # log shows PASSED/FAILED for each of the 20 runs ([k-20]).
       - name: uv run pytest "tests/integration/test_rabbitmq_broker.py::test_reconnect_restores_subscriptions" --count 20 -v
@@ -194,3 +252,67 @@ jobs:
             docker ps -aq --filter "label=com.docker.compose.project=${project}" | xargs -r docker rm -f || true
             docker volume ls -q --filter "label=com.docker.compose.project=${project}" | xargs -r docker volume rm || true
           done
+
+  # Kind_Job: the Helm chart on a real cluster (das-multi-tenant Req 11.2, 11.3). The test harness creates the kind
+  # cluster with its own kubeconfig, loads the images, applies tests/k8s/ (Redis, RabbitMQ, the stub LLM) and installs
+  # the chart; this job builds the images and provides the pinned tools.
+  k8s:
+    name: Kind_Job
+    needs: fast
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DAS_REQUIRE_DOCKER: "1" # a Docker-related skip is reported as a failure
+      DAS_K8S_E2E: "1" # the cluster tests are opt-in
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: uv sync --locked
+        run: uv sync --locked
+      - name: Install helm, kind and kubectl
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o helm.tgz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          curl -fsSL -o kind "https://kind.sigs.k8s.io/dl/v${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  kind" | sha256sum -c -
+          sudo install -m 0755 kind /usr/local/bin/kind
+          curl -fsSL -o kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  kubectl" | sha256sum -c -
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+          helm version --short | grep -F "v${HELM_VERSION}"
+          kind version | grep -F "v${KIND_VERSION}"
+          kubectl version --client | grep -F "v${KUBECTL_VERSION}"
+      # The images the chart tests load into the cluster: das-<role>:local, as tests/k8s/values-kind.yaml expects.
+      - name: Build the DAS images
+        timeout-minutes: 10
+        run: |
+          for role in gateway manager worker; do
+            docker build -f "deploy/docker/${role}.Dockerfile" -t "das-${role}:local" .
+          done
+      - name: uv run pytest tests/integration/k8s
+        timeout-minutes: 20
+        env:
+          DAS_K8S_LOG_DIR: ${{ runner.temp }}/k8s-logs # the harness writes every pod's logs here when a test fails
+        run: uv run pytest tests/integration/k8s
+      - name: Upload pod logs
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: k8s-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/k8s-logs
+          if-no-files-found: warn
+      - name: Delete the kind cluster
+        if: ${{ always() }}
+        run: kind delete cluster --name das-e2e-k8s || true

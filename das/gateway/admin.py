@@ -43,6 +43,7 @@ from das.codec import AgentControlPayload, AgentControlReplyMessage, new_message
 from das.config.schema import CAPABILITY_PATTERN, ClientLimitsConfig, TenantConfig
 from das.gateway.audit import ADMIN_PREFIX, AuditMiddleware
 from das.gateway.auth import admin_key_auth
+from das.gateway.authz import authorize_route
 from das.gateway.cursor_key import CursorKeyProvider
 from das.models.dlq import (
     DEAD_LETTER_ID_PATTERN,
@@ -103,7 +104,12 @@ def create_admin_router(
 
     The key check runs first, so a 401/403 never consumes a token; a 429 is still audited.
     """
-    dependencies = [Depends(admin_key_auth(api_keys, admin_api_keys, client_limits, tenants=tenants))]
+    # Authenticate, then authorize against the Route_Scope_Table (Phase 5 Req 2.3). admin_key_auth still lets only an
+    # Operator through: the DLQ routes become tenant-scoped in task 5.4, and a tenant's admin key reaches them then.
+    dependencies = [
+        Depends(admin_key_auth(api_keys, admin_api_keys, client_limits, tenants=tenants)),
+        Depends(authorize_route()),
+    ]
     if rate_limit is not None:
         dependencies.append(Depends(rate_limit))
     # Operator routes stay out of the schema a client key can read (Phase 4 Req 11.4).

@@ -83,7 +83,10 @@ def _identify(
     disagree. The settings are layered default, then the tenant's, then the key's own override (Phase 5 Req 4.1).
     Only the 8-hex fingerprint is kept, never the key.
     """
-    audit_context(request)["key_fingerprint"] = principal.fingerprint
+    context = audit_context(request)
+    context["key_fingerprint"] = principal.fingerprint
+    context["tenant"] = principal.tenant  # Phase 5 Req 2.7
+    context["operator"] = principal.operator
     request.state.principal = principal
     layer = tenants.get(principal.tenant)
     request.state.client_settings = resolve_settings(principal.fingerprint, client_limits, layer)

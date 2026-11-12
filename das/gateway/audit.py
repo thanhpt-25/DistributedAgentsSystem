@@ -8,8 +8,10 @@ entry at info level, and only then forwards the response to the client.
 Fields: ``at`` (UTC, millisecond precision), ``action`` (``"<METHOD> <route
 template>"``), ``target`` (the endpoint's path parameter, e.g. Dead_Letter_ID or
 agent ID, or null), ``http_status``, ``error_code`` (the ``error`` of the JSON
-body, or null) and ``key_fingerprint`` (set by
-:func:`das.gateway.auth.admin_key_auth` when the presented key matched, else null).
+body, or null), ``key_fingerprint`` (set by
+:func:`das.gateway.auth.admin_key_auth` when the presented key matched, else null) and, from Phase 5, ``tenant`` and
+``operator`` (the matched key's tenant and whether it is an Operator; null when no key matched). A key value is never
+logged.
 """
 
 from __future__ import annotations
@@ -98,6 +100,8 @@ class AuditMiddleware:
                 http_status=http_status,
                 error_code=error_code,
                 key_fingerprint=ctx.get("key_fingerprint"),
+                tenant=ctx.get("tenant"),  # null when no key matched (Phase 5 Req 2.7)
+                operator=ctx.get("operator"),
             )
 
         async def flush() -> None:

@@ -52,6 +52,8 @@ from das.gateway.admin import (
     register_dlq_routes,
 )
 from das.gateway.auth import api_key_auth
+from das.gateway.authz import authorize_route
+from das.tenancy.scopes import DEFAULT_TENANT, Principal
 from das.gateway.cursor_key import CursorKeyProvider
 from das.gateway.events import register_events_route
 from das.gateway.http_metrics import HttpMetricsMiddleware, route_templates
@@ -139,8 +141,9 @@ def format_heartbeat(ts: float) -> str:
     return datetime.fromtimestamp(int(ts), tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def agent_view(record: AgentRecord) -> dict[str, Any]:
-    return {
+def agent_view(record: AgentRecord, *, hide_identity: bool = False) -> dict[str, Any]:
+    """One agent as ``GET /v1/agents`` shows it. ``hide_identity`` drops ``agent_id`` and ``host`` (Phase 5 Req 2.6)."""
+    view = {
         "agent_id": record.agent_id,
         "role": record.role,
         "host": record.host,
@@ -152,6 +155,9 @@ def agent_view(record: AgentRecord) -> dict[str, Any]:
         "in_flight": record.in_flight,
         "drained": record.status == "Draining" and record.in_flight == 0,
     }
+    if hide_identity:
+        del view["agent_id"], view["host"]
+    return view
 
 
 def _transition_views(snap: StoredRequest) -> list[dict[str, Any]]:
@@ -355,6 +361,7 @@ def create_app(
         prefix="/v1",
         dependencies=[
             Depends(api_key_auth(api_keys, admin_api_keys, limits_config, tenants=tenants)),
+            Depends(authorize_route()),  # after authentication, before the rate limit (Phase 5 Req 2.3)
             Depends(enforce_rate),
         ],
         responses=V1_RESPONSES,
@@ -462,9 +469,12 @@ def create_app(
         return {"status": RequestStatus.CANCELLED.value}
 
     @v1.get("/agents")
-    async def agents() -> Any:
+    async def agents(request: Request) -> Any:
         snap = await _bounded(registry.snapshot())
-        return [agent_view(a) for a in snap.agents]
+        principal: Principal = request.state.principal
+        # A tenant other than the default one learns what runs, not where: no agent id, no host (Phase 5 Req 2.6).
+        hidden = not principal.operator and principal.tenant != DEFAULT_TENANT
+        return [agent_view(a, hide_identity=hidden) for a in snap.agents]
 
     # GET /v1/requests (Req 15): same API_Key / Admin_API_Key auth as the rest of /v1.
     register_list_route(v1, store=store, cursor_keys=cursor_keys, bounded=_bounded)

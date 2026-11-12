@@ -72,16 +72,16 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 4.1 Authenticate to a Principal
     - `das/gateway/auth.py`: `api_key_auth` uses the `KeyDirectory`, stores `request.state.principal` and the resolved `client_settings`; `admin_key_auth` keeps `admin_disabled` for a Phase 4 configuration with no admin capability anywhere
     - _Requirements: 1.2, 1.3, 2.1_
-  - [ ] 4.2 Enforce scopes on every route
+  - [x] 4.2 Enforce scopes on every route
     - `das/gateway/authz.py` `authorize_route` (router-level, after authentication and before the rate limit): looks up `(method, route template)` in `ROUTE_SCOPES`, fails closed on a missing entry, answers 403 `forbidden` with `scope`; applied to the `/v1` and admin routers
     - _Requirements: 2.2, 2.3, 2.4, 2.5_
   - [ ] 4.3 Write property test for route classification and authorization
     - **Property 4: Every route is classified, and authorization is exact**
     - **Validates: Requirements 2.2, 2.3, 2.4, 2.5**
-  - [ ] 4.4 Extend the Audit_Entry
+  - [x] 4.4 Extend the Audit_Entry
     - `tenant` and `operator` fields; key values never logged
     - _Requirements: 2.7_
-  - [ ] 4.5 Restrict the agents view
+  - [x] 4.5 Restrict the agents view
     - `GET /v1/agents` drops `agent_id` and `host` for a non-Operator outside the Default_Tenant
     - _Requirements: 2.6_
 
@@ -176,7 +176,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 11.1 Write the cluster tests
     - `tests/k8s/` manifests for Redis, RabbitMQ and the stub LLM; `tests/integration/k8s/` tests: pods Ready, a Request completes, an admin drain reaches an agent (advertise host), Worker and Manager pod deletion and rolling restarts with Requests in flight lose none
     - _Requirements: 11.3_
-  - [ ] 11.2 Update CI
+  - [x] 11.2 Update CI
     - Fast job: pinned `helm` and `kubeconform` (SHA-256 verified), `helm lint`, `helm template` for both values files, `kubeconform -strict`; the `Kind_Job` on `main` and manual dispatch (`DAS_REQUIRE_DOCKER=1`, pinned `kind` and `kubectl`, image build and load, test manifests, `helm install`, `pytest tests/integration/k8s`, pod logs as an artifact); `EXPECTED_TIMEOUTS` and the expected fast steps in `test_ci_workflow_static.py`; `actionlint` clean
     - _Requirements: 11.1, 11.2, 11.5, 11.6_
   - [x] 11.3 Rewrite the Compose-only test
