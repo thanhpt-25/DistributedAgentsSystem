@@ -75,7 +75,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 4.2 Enforce scopes on every route
     - `das/gateway/authz.py` `authorize_route` (router-level, after authentication and before the rate limit): looks up `(method, route template)` in `ROUTE_SCOPES`, fails closed on a missing entry, answers 403 `forbidden` with `scope`; applied to the `/v1` and admin routers
     - _Requirements: 2.2, 2.3, 2.4, 2.5_
-  - [ ] 4.3 Write property test for route classification and authorization
+  - [x] 4.3 Write property test for route classification and authorization
     - **Property 4: Every route is classified, and authorization is exact**
     - **Validates: Requirements 2.2, 2.3, 2.4, 2.5**
   - [x] 4.4 Extend the Audit_Entry
@@ -86,19 +86,19 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - _Requirements: 2.6_
 
 - [ ] 5. Tenant-scoped routes
-  - [ ] 5.1 Isolate get, cancel and events
+  - [x] 5.1 Isolate get, cancel and events
     - Compare the Request's `tenant` with the Principal's (Operators excepted) before starting a stream or writing; 404 `not_found` with the body of a missing Request
     - _Requirements: 3.2_
-  - [ ] 5.2 Scope the listing
+  - [x] 5.2 Scope the listing
     - `das/gateway/listing.py`: tenant twin keys, tenant (or `*`) in the Page_Cursor filters, `tenant` accepted only from an Operator (400 `invalid_query` otherwise), 503 `index_not_ready` for a non-default tenant before the flag
     - _Requirements: 3.3, 3.4, 9.3_
-  - [ ] 5.3 Scope submit
+  - [x] 5.3 Scope submit
     - Tenant stored on create, layered Client_Settings, tenant quota to 429 `quota_exceeded` with `limit_scope: "tenant"` (the per-key body stays as in Phase 4), webhook target resolved at creation, Effective_Budget default from the resolved settings
     - _Requirements: 3.1, 3.7, 4.1, 4.4, 4.6_
-  - [ ] 5.4 Scope the DLQ and admin routes
+  - [x] 5.4 Scope the DLQ and admin routes
     - Tenant `admin` lists, gets, replays and discards only its tenant's records (404 for others and for records of no tenant); Operators see all and may filter with `tenant`; drain and undrain require Operator
     - _Requirements: 5.3, 5.4, 5.6_
-  - [ ] 5.5 Add the usage endpoints
+  - [x] 5.5 Add the usage endpoints
     - `das/gateway/usage.py`: `GET /v1/usage` (read) and `GET /v1/admin/usage` (Operator, `tenant` optional), reading rollup hashes and building the report with `das.tenancy.usage`
     - _Requirements: 6.3, 6.4, 6.5, 6.7_
   - [ ] 5.6 Update the OpenAPI schema

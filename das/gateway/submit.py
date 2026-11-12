@@ -88,7 +88,7 @@ def client_spec(
     limits: ClientLimitsConfig,
     events: EventsConfig,
 ) -> ClientRequestSpec:
-    """The Phase 4 fields stored with a new Request (Req 3.1, 4.2, 5.4, 6.5, 8.1).
+    """The Phase 4 fields stored with a new Request (Req 3.1, 4.2, 5.4, 6.5, 8.1), and its tenant (Phase 5 Req 3.1).
 
     The Body_Hash covers the Budget as the client sent it, not the merged one, so a later change
     of the key's default does not turn a retry into a conflict (Req 4.3, 4.4).
@@ -104,6 +104,8 @@ def client_spec(
         idempotency_ttl=limits.idempotency_ttl,
         max_active_requests=settings.max_active_requests,
         events_max_len=events.max_len,
+        tenant=settings.tenant,  # Phase 5 Req 3.1, 3.7
+        tenant_max_active=settings.tenant_max_active,
     )
 
 

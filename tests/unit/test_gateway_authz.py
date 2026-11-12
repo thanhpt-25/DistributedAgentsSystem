@@ -28,6 +28,7 @@ from das.ops.keys import key_fingerprint
 from das.registry import AgentInfo, AgentRegistry
 from das.state import StateStore
 from das.tenancy.scopes import OPERATOR, ROUTE_SCOPES, Scope
+from tests.fixtures.routes import method_templates
 
 DEFAULT_KEY, READER, SUBMITTER = "default-key-0000001", "reader-key-00000001", "submitter-key-000001"
 # Not named "operator": the log redactor masks every 8-character window of a key, which would mask that field name.
@@ -197,12 +198,16 @@ async def test_a_refusal_does_not_spend_a_rate_limit_token(gateway: httpx.AsyncC
     assert (await gateway.get("/v1/agents", headers=h(READER))).status_code == 429
 
 
-async def test_a_tenant_admin_key_still_cannot_use_the_admin_router_until_it_is_tenant_scoped(
+async def test_a_tenant_admin_key_reaches_the_dlq_routes_but_not_the_operator_only_ones(
     gateway: httpx.AsyncClient,
 ) -> None:
-    """The DLQ routes are not tenant-scoped yet (task 5.4): only an Operator may reach them until they are."""
-    assert (await gateway.get("/v1/admin/dlq", headers=h(ADMINNER))).status_code == 403
-    assert (await gateway.get("/v1/admin/dlq", headers=h(ADMIN))).status_code == 200
+    """Scope ``admin`` opens the dead-letter routes (scoped to its tenant by their handlers, task 5.4); draining an
+    agent needs the Operator role."""
+    # Authorized: with no Tenant_Backfill flag in this fixture a non-default tenant is answered 503 index_not_ready.
+    assert (await gateway.get("/v1/admin/dlq", headers=h(ADMINNER))).status_code in (200, 503)
+    drain = await gateway.post("/v1/admin/agents/worker-1/drain", headers=h(ADMINNER))
+    assert (drain.status_code, drain.json()) == (403, {"error": "forbidden", "scope": "operator"})
+    assert (await gateway.get("/v1/admin/dlq", headers=h(READER))).status_code == 403  # read alone is not admin
 
 
 async def test_an_admin_route_without_a_table_entry_is_refused_even_to_an_operator() -> None:
@@ -231,15 +236,7 @@ async def test_an_admin_route_without_a_table_entry_is_refused_even_to_an_operat
 
 async def test_every_route_of_the_application_has_an_entry_in_the_table(gateway: httpx.AsyncClient) -> None:
     app = gateway._transport.app  # type: ignore[attr-defined]
-    missing = [
-        (method, route.path_format)
-        for route in app.routes
-        if hasattr(route, "path_format")
-        for method in getattr(route, "methods", None) or ()
-        if method not in ("HEAD", "OPTIONS")
-        and route.path_format.startswith("/v1")
-        and (method, route.path_format) not in ROUTE_SCOPES
-    ]
+    missing = sorted(r for r in method_templates(app) if r not in ROUTE_SCOPES)
     assert missing == []
 
 
@@ -263,11 +260,11 @@ async def test_the_audit_entry_names_the_tenant_and_whether_the_caller_is_an_ope
     gateway: httpx.AsyncClient, stream: io.StringIO
 ) -> None:
     await gateway.get("/v1/admin/dlq", headers=h(ADMIN))
-    await gateway.get("/v1/admin/dlq", headers=h(ADMINNER))
+    await gateway.get("/v1/admin/dlq", headers=h(READER))  # a key of team-a without the admin scope
     ok, refused = audits(stream)
     assert (ok["tenant"], ok["operator"], ok["http_status"], ok["key_fingerprint"]) == ("default", True, 200, fp(ADMIN))
     assert (refused["tenant"], refused["operator"], refused["http_status"]) == ("team-a", False, 403)
-    assert refused["key_fingerprint"] == fp(ADMINNER)
+    assert refused["key_fingerprint"] == fp(READER)
 
 
 async def test_an_unauthenticated_admin_call_has_no_tenant_and_no_operator_claim(

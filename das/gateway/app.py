@@ -53,7 +53,8 @@ from das.gateway.admin import (
 )
 from das.gateway.auth import api_key_auth
 from das.gateway.authz import authorize_route
-from das.tenancy.scopes import DEFAULT_TENANT, Principal
+from das.gateway.usage import register_admin_usage_route, register_usage_route
+from das.tenancy.scopes import DEFAULT_TENANT, Principal, can_see
 from das.gateway.cursor_key import CursorKeyProvider
 from das.gateway.events import register_events_route
 from das.gateway.http_metrics import HttpMetricsMiddleware, route_templates
@@ -84,7 +85,7 @@ from das.observability.tracing import NoopTracer, Tracer
 from das.ops.cost import PriceTable, estimate_cost
 from das.ops.usage import summarize_usage
 from das.registry import AgentRegistry
-from das.state.store import StateStore, StoredRequest, StoreStatus
+from das.state.store import IndexNotReady, StateStore, StoredRequest, StoreStatus
 from das.transport.base import Transport
 
 log = get_logger(__name__)
@@ -132,6 +133,8 @@ async def _bounded(op: Awaitable[T], timeout: float = STORE_TIMEOUT) -> T:
     try:
         async with asyncio.timeout(timeout):
             return await op
+    except IndexNotReady:  # an answer the caller maps (503 index_not_ready), not a failure of the store
+        raise
     except Exception as exc:  # redis errors, timeouts, StoreError, decode errors
         raise StoreUnavailable(type(exc).__name__) from exc
 
@@ -411,6 +414,14 @@ def create_app(
                     status.HTTP_429_TOO_MANY_REQUESTS,
                     {"error": "quota_exceeded", "limit": result.limit},
                 )
+            if result.outcome == "tenant_quota_exceeded":
+                # The per-key body above is unchanged from Phase 4; only this one names its scope (Phase 5 Req 3.7).
+                metrics.client_rejected("quota_exceeded")
+                span.fail("quota_exceeded")
+                return _error(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    {"error": "quota_exceeded", "limit": result.limit, "limit_scope": "tenant"},
+                )
             if result.outcome == "idempotency_conflict":
                 metrics.client_rejected("idempotency_key_reused")
                 span.fail("idempotency_key_reused")
@@ -435,7 +446,7 @@ def create_app(
         return {"request_id": rid}
 
     @v1.get("/requests/{request_id}", responses=QUERY_RESPONSES)
-    async def get_request(request_id: str) -> Any:
+    async def get_request(request: Request, request_id: str) -> Any:
         # One MULTI/EXEC including every UsageRecord, the Webhook_Delivery and the budget: a
         # failed or partial read is a 503, never a summary of partial records (Req 9.12).
         snap = await _bounded(
@@ -443,14 +454,20 @@ def create_app(
                 request_id, include_transitions=True, include_usage=True, include_client=True
             )
         )
-        if snap is None:
+        # A Request of another tenant answers exactly like one that does not exist (Phase 5 Req 3.2).
+        if snap is None or not can_see(request.state.principal, snap.tenant):
             return _error(status.HTTP_404_NOT_FOUND, NOT_FOUND)
         return request_view(snap, price_table)
 
     @v1.post(
         "/requests/{request_id}/cancel", status_code=status.HTTP_202_ACCEPTED, responses=CANCEL_RESPONSES
     )
-    async def cancel(request_id: str, background: BackgroundTasks) -> Any:
+    async def cancel(request: Request, request_id: str, background: BackgroundTasks) -> Any:
+        # Compare tenants before writing: a Request of another tenant is a 404 and nothing is written (Phase 5
+        # Req 3.2). A missing Request falls through to cancel_request, which answers 404 as before.
+        owner = await _bounded(store.request_tenant(request_id))
+        if owner is not None and not can_see(request.state.principal, owner):
+            return _error(status.HTTP_404_NOT_FOUND, NOT_FOUND)
         # The Price_Table lets a budgeted Request's request.cancelled carry its Budget_Used (Req 5.9).
         result = await _bounded(store.cancel_request(request_id, prices=price_table))
         if result.status is StoreStatus.NOT_FOUND:
@@ -478,6 +495,9 @@ def create_app(
 
     # GET /v1/requests (Req 15): same API_Key / Admin_API_Key auth as the rest of /v1.
     register_list_route(v1, store=store, cursor_keys=cursor_keys, bounded=_bounded)
+
+    # GET /v1/usage (Phase 5 Req 6.3): the caller's own tenant, behind the same auth, scope and rate limit.
+    register_usage_route(v1, store=store, bounded=_bounded, price_table=price_table)
 
     # GET /v1/requests/{id}/events (Phase 4 Req 7): same auth and rate limit as the rest of /v1.
     event_gate = register_events_route(
@@ -518,6 +538,9 @@ def create_app(
         control_transport=control_transport,
         gateway_agent_id=agent_id,
         bounded=_bounded,
+    )
+    register_admin_usage_route(  # Phase 5 Req 6.4: Operators only, one tenant or all of them
+        admin, store=store, bounded=_bounded, price_table=price_table, tenants=[t.id for t in tenants]
     )
     install_admin(app, admin)
 

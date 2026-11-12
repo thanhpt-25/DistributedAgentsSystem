@@ -175,49 +175,85 @@ async def test_an_injected_directory_that_knows_nobody_means_401() -> None:
 
 
 def admin_app(**kwargs: Any) -> FastAPI:
+    """The real admin router with one stub route listed in the table: ``admin_key_auth`` authenticates, then
+    ``authorize_route`` decides (Phase 5 Req 2.3). ``admin_key_auth`` alone no longer refuses a known key."""
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    from das.gateway.admin import create_admin_router, install_admin
+
     app = FastAPI()
 
-    @app.post("/admin", dependencies=[Depends(admin_key_auth(**kwargs))])
-    async def admin(request: Request) -> dict[str, Any]:
-        return {"operator": request.state.principal.operator}
+    @app.exception_handler(StarletteHTTPException)
+    async def flat(_: Request, exc: StarletteHTTPException) -> Any:
+        from fastapi.responses import JSONResponse
 
+        body = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+        return JSONResponse(status_code=exc.status_code, content=body)
+
+    router = create_admin_router(
+        kwargs["keys"], kwargs["admin_keys"], tenants=kwargs.get("tenants", ())
+    )
+
+    @router.get("/dlq")  # GET /v1/admin/dlq: needs Scope admin
+    async def dlq(request: Request) -> dict[str, Any]:
+        return {"operator": request.state.principal.operator, "tenant": request.state.principal.tenant}
+
+    install_admin(app, router)
     return app
 
 
 async def post_admin(app: FastAPI, key: str | None) -> httpx.Response:
     headers = {} if key is None else {API_KEY_HEADER: key}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as c:
-        return await c.post("/admin", headers=headers)
+        return await c.get("/v1/admin/dlq", headers=headers)
 
 
 async def test_an_admin_key_reaches_the_admin_router_as_an_operator() -> None:
     reply = await post_admin(admin_app(keys=ALL_KEYS, admin_keys=[ADMIN_KEY], tenants=[TEAM_A]), ADMIN_KEY)
-    assert reply.status_code == 200 and reply.json() == {"operator": True}
+    assert reply.status_code == 200 and reply.json() == {"operator": True, "tenant": "default"}
 
 
-async def test_an_api_key_is_forbidden_on_the_admin_router_when_an_admin_exists() -> None:
+async def test_a_tenant_key_with_the_admin_scope_reaches_the_admin_router() -> None:
+    reply = await post_admin(admin_app(keys=ALL_KEYS, admin_keys=[ADMIN_KEY], tenants=[TEAM_A]), WRITER_KEY)
+    assert reply.status_code == 200 and reply.json() == {"operator": False, "tenant": "team-a"}
+
+
+async def test_an_api_key_without_the_admin_scope_is_forbidden_when_an_admin_exists() -> None:
     reply = await post_admin(admin_app(keys=ALL_KEYS, admin_keys=[ADMIN_KEY]), API_KEY)
-    assert reply.status_code == 403 and reply.json() == {"detail": {"error": "forbidden"}}
+    assert reply.status_code == 403 and reply.json() == {"error": "forbidden", "scope": "admin"}
 
 
 async def test_without_any_admin_capability_the_answer_stays_admin_disabled() -> None:
     read_only = tenant("t", (TEAM_KEY, ["read"]))
     reply = await post_admin(admin_app(keys=ALL_KEYS, admin_keys=[], tenants=[read_only]), TEAM_KEY)
-    assert reply.status_code == 403 and reply.json() == {"detail": {"error": "admin_disabled"}}
+    assert reply.status_code == 403 and reply.json() == {"error": "admin_disabled"}
 
 
 async def test_a_tenant_that_can_admin_makes_the_answer_forbidden_not_disabled() -> None:
     reply = await post_admin(admin_app(keys=ALL_KEYS, admin_keys=[], tenants=[TEAM_A]), API_KEY)
-    assert reply.status_code == 403 and reply.json() == {"detail": {"error": "forbidden"}}
+    assert reply.status_code == 403 and reply.json() == {"error": "forbidden", "scope": "admin"}
 
 
 async def test_a_missing_key_on_the_admin_router_is_401() -> None:
     assert (await post_admin(admin_app(keys=ALL_KEYS, admin_keys=[ADMIN_KEY]), None)).status_code == 401
 
 
+async def test_admin_key_auth_alone_authenticates_and_decides_nothing_else() -> None:
+    """It no longer refuses a known key itself: that is the route table's job, one step later."""
+    app = FastAPI()
+    app.get("/x", dependencies=[Depends(admin_key_auth(ALL_KEYS, [ADMIN_KEY]))])(lambda: {})
+    assert (await post_admin_at(app, "/x", API_KEY)).status_code == 200
+    assert (await post_admin_at(app, "/x", "unknown")).status_code == 401
+
+
+async def post_admin_at(app: FastAPI, path: str, key: str | None) -> httpx.Response:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as c:
+        return await c.get(path, headers={} if key is None else {API_KEY_HEADER: key})
+
+
 async def test_the_principal_is_known_even_when_the_admin_router_refuses_the_call() -> None:
     seen: dict[str, Any] = {}
-    app = FastAPI()
+    app = admin_app(keys=ALL_KEYS, admin_keys=[ADMIN_KEY])
 
     @app.middleware("http")
     async def spy(request: Request, call_next: Any) -> Any:
@@ -225,7 +261,6 @@ async def test_the_principal_is_known_even_when_the_admin_router_refuses_the_cal
         seen["fingerprint"] = audit_context(request).get("key_fingerprint")
         return response
 
-    app.post("/admin", dependencies=[Depends(admin_key_auth(ALL_KEYS, [ADMIN_KEY]))])(lambda: {})
     assert (await post_admin(app, API_KEY)).status_code == 403
     assert seen["fingerprint"] == fp(API_KEY)  # the Audit_Entry still names the key
 

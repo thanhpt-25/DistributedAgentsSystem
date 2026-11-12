@@ -188,7 +188,10 @@ async def _run(sc: Scenario) -> None:
                 if auth_status is not None:
                     # Rejected by authorization: fixed body, no State_Store write, no command.
                     assert resp.status_code == auth_status, (call, resp.text)
-                    assert resp.json() == {"error": auth_error}
+                    expected_body = {"error": auth_error}
+                    if auth_error == "forbidden":  # Phase 5 Req 2.3: the refusal names what the route requires
+                        expected_body["scope"] = "admin" if "/dlq" in path_t else "operator"
+                    assert resp.json() == expected_body
                     assert await _dump(redis) == before
                     assert len(broker.wire) == wire_before
                 else:

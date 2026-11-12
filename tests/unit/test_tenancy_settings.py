@@ -5,6 +5,7 @@ settings, then ``client_limits.default``. ``None`` means "not set" (so ``0`` is 
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -83,7 +84,10 @@ def test_an_override_applies_to_its_key_whatever_the_tenant() -> None:
 def test_a_tenant_with_no_settings_changes_nothing() -> None:
     lim = limits({"rate": 10}, {"burst": 5})
     plain = TenantConfig.model_validate({"id": "team-a", "keys": [{"fingerprint": FP, "scopes": ["read"]}]})
-    assert resolve_settings(FP, lim, plain) == resolve_settings(FP, lim)
+    resolved = resolve_settings(FP, lim, plain)
+    assert (resolved.tenant, resolved.tenant_max_active) == ("team-a", 0)  # the tenant is named; it limits nothing
+    # Every limit, budget and webhook field is exactly what the same key gets without a tenant.
+    assert replace(resolved, tenant="default") == resolve_settings(FP, lim)
 
 
 # --------------------------------------------------------------------------- budget and webhook
@@ -119,13 +123,22 @@ def test_the_webhook_target_layers_like_the_other_fields() -> None:
 # --------------------------------------------------------------------------- shape
 
 
-def test_the_resolved_settings_keep_their_phase_4_shape_and_carry_the_fingerprint() -> None:
+def test_the_resolved_settings_keep_their_phase_4_fields_and_add_the_tenant() -> None:
     s = resolve_settings(FP, limits(), tenant_with(rate=5))
     assert isinstance(s, ClientSettings) and s.fingerprint == FP
     assert set(ClientSettings.__dataclass_fields__) == {
         "fingerprint", "rate", "burst", "max_active_requests", "max_streams",
         "default_budget", "webhook_url", "webhook_secret_name",
+        "tenant", "tenant_max_active",  # Phase 5: whose key it is, and that tenant's own quota
     }  # fmt: skip
+    assert (s.tenant, s.tenant_max_active) == ("team-a", 0)
+    with_quota = TenantConfig.model_validate(
+        {"id": "team-a", "keys": [{"fingerprint": FP, "scopes": ["read"]}], "max_active_requests": 7}
+    )
+    quota = resolve_settings(FP, limits(), with_quota)
+    assert quota.tenant_max_active == 7 and quota.max_active_requests != 7  # the tenant's field, not the per-key one
+    per_key = resolve_settings(FP, limits(), tenant_with(max_active_requests=9))
+    assert per_key.max_active_requests == 9 and per_key.tenant_max_active == 0  # and the other way round
 
 
 def test_layering_covers_every_field_of_the_settings_model() -> None:

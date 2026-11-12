@@ -749,6 +749,22 @@ class StateStore:
         value = await self._r.hget(keys.request(rid), keys.F_STATUS)
         return None if value is None else RequestStatus(_s(value))
 
+    async def request_tenant(self, rid: str) -> str | None:
+        """The tenant of a Request (``default`` when it has none), or ``None`` when there is no such Request.
+
+        One ``HMGET``: it lets a route that writes (a cancel) compare tenants before it writes, without loading the
+        whole snapshot. The tenant never changes after creation, so there is no check-then-act race (Phase 5 Req 3.2).
+        """
+        status, tenant = await self._r.hmget(keys.request(rid), keys.F_STATUS, keys.F_TENANT)
+        if status is None:
+            return None
+        return _opt(tenant) or keys.DEFAULT_TENANT
+
+    async def dead_letter_tenant(self, dlid: str) -> str | None:
+        """The tenant a Dead_Letter_Record belongs to, or ``None`` when it has none or does not exist: a record is
+        filed under the tenant of its Request when it is created (Phase 5 Req 5.1, 5.2)."""
+        return _opt(await self._r.hget(keys.dlq(dlid), "tenant")) or None
+
     async def get_request_job(
         self, rid: str, job_id: str | None
     ) -> tuple[RequestStatus | None, JobRecord | None]:

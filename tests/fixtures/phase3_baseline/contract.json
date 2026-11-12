@@ -2555,6 +2555,10 @@
       ],
       [
         "GET",
+        "/v1/admin/usage"
+      ],
+      [
+        "GET",
         "/v1/agents"
       ],
       [
@@ -2580,6 +2584,10 @@
       [
         "GET",
         "/v1/requests/{request_id}/events"
+      ],
+      [
+        "GET",
+        "/v1/usage"
       ]
     ],
     "health": [

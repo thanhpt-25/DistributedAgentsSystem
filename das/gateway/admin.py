@@ -31,7 +31,7 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Final, Literal, TypeVar
 
@@ -40,11 +40,12 @@ from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
 from das.codec import AgentControlPayload, AgentControlReplyMessage, new_message
-from das.config.schema import CAPABILITY_PATTERN, ClientLimitsConfig, TenantConfig
+from das.config.schema import CAPABILITY_PATTERN, TENANT_ID_PATTERN, ClientLimitsConfig, TenantConfig
 from das.gateway.audit import ADMIN_PREFIX, AuditMiddleware
-from das.gateway.auth import admin_key_auth
+from das.gateway.auth import admin_key_auth, can_administer
 from das.gateway.authz import authorize_route
 from das.gateway.cursor_key import CursorKeyProvider
+from das.gateway.listing import ALL_TENANTS
 from das.models.dlq import (
     DEAD_LETTER_ID_PATTERN,
     DEAD_LETTER_REASONS,
@@ -58,7 +59,8 @@ from das.observability.logging import format_timestamp
 from das.observability.metrics import DlqAction, DlqAdminOutcome, GatewayMetrics
 from das.ops.cursor import InvalidCursor, PageCursor, decode_cursor, encode_cursor
 from das.registry import AgentRegistry
-from das.state.store import StateStore
+from das.state.store import IndexNotReady, StateStore
+from das.tenancy.scopes import Principal
 from das.transport.base import RequestTimeout, Transport
 
 T = TypeVar("T")
@@ -86,6 +88,7 @@ NOT_FOUND: Final = {"error": "not_found"}
 
 _DLID_RE: Final = re.compile(DEAD_LETTER_ID_PATTERN)
 _CAPABILITY_RE: Final = re.compile(CAPABILITY_PATTERN)
+_TENANT_RE: Final = re.compile(TENANT_ID_PATTERN)
 _LIMIT_RE: Final = re.compile(r"[1-9][0-9]{0,2}")
 #: Record fields left out of list items and of the detail's record view.
 _HEAVY_FIELDS: Final = frozenset({"envelope_json", "raw_b64"})
@@ -104,11 +107,13 @@ def create_admin_router(
 
     The key check runs first, so a 401/403 never consumes a token; a 429 is still audited.
     """
-    # Authenticate, then authorize against the Route_Scope_Table (Phase 5 Req 2.3). admin_key_auth still lets only an
-    # Operator through: the DLQ routes become tenant-scoped in task 5.4, and a tenant's admin key reaches them then.
+    # Authenticate, then authorize against the Route_Scope_Table (Phase 5 Req 2.3): the dead-letter routes need Scope
+    # ``admin`` and are scoped to the caller's tenant by their handlers (Req 5.3); drain, undrain and the admin usage
+    # report need the Operator role (Req 5.6).
+    admin_keys = list(admin_api_keys)
     dependencies = [
-        Depends(admin_key_auth(api_keys, admin_api_keys, client_limits, tenants=tenants)),
-        Depends(authorize_route()),
+        Depends(admin_key_auth(api_keys, admin_keys, client_limits, tenants=tenants)),
+        Depends(authorize_route(admin_disabled=not can_administer(admin_keys, tenants))),
     ]
     if rate_limit is not None:
         dependencies.append(Depends(rate_limit))
@@ -157,6 +162,8 @@ class DlqQuery:
     limit: int = DEFAULT_LIMIT
     cursor: str | None = None
     filters: dict[str, str] = field(default_factory=dict)
+    #: The ``tenant`` an Operator asked for; ``None`` when absent. Only an Operator may send it (Phase 5 Req 5.4).
+    tenant: str | None = None
 
 
 def _single(params: Mapping[str, Sequence[str]], name: str) -> str | None:
@@ -168,10 +175,15 @@ def _single(params: Mapping[str, Sequence[str]], name: str) -> str | None:
     return values[0]
 
 
-def parse_dlq_query(params: Mapping[str, Sequence[str]]) -> DlqQuery:
-    """Validate the query (pure). Checks ``status``, ``reason``, ``request_id``,
+def parse_dlq_query(params: Mapping[str, Sequence[str]], *, allow_tenant: bool = False) -> DlqQuery:
+    """Validate the query (pure). Checks ``tenant``, ``status``, ``reason``, ``request_id``,
     ``capability`` and ``limit`` in that order; the cursor is verified by the handler
-    with :func:`decode_cursor` (needs the HMAC key)."""
+    with :func:`decode_cursor` (needs the HMAC key).
+
+    ``tenant`` is accepted only with ``allow_tenant`` (an Operator) and must be a valid Tenant_ID (Phase 5 Req 5.4)."""
+    tenant = _single(params, "tenant") if "tenant" in params else None
+    if "tenant" in params and (not allow_tenant or tenant is None or _TENANT_RE.fullmatch(tenant) is None):
+        raise InvalidQuery("tenant")
     status_ = _single(params, "status")
     if status_ is not None and status_ not in RECORD_STATUSES:
         raise InvalidQuery("status")
@@ -209,7 +221,16 @@ def parse_dlq_query(params: Mapping[str, Sequence[str]]) -> DlqQuery:
         limit=limit,
         cursor=cursor,
         filters=filters,
+        tenant=tenant,
     )
+
+
+def scoped_query(query: DlqQuery, principal: Principal) -> tuple[DlqQuery, str | None]:
+    """``query`` bound to the tenant the call may list, and that tenant (``None``: every tenant, an Operator only).
+
+    The tenant goes into the cursor filters, so a cursor issued for one tenant fails for another (Req 5.3, 5.4)."""
+    scope = query.tenant if principal.operator else principal.tenant
+    return replace(query, filters={**query.filters, "tenant": scope or ALL_TENANTS}), scope
 
 
 # --------------------------------------------------------------------------- views
@@ -273,11 +294,20 @@ def register_dlq_routes(
     after every route is registered.
     """
 
+    async def _visible(request: Request, dead_letter_id: str) -> bool:
+        """Whether the caller may see this record: an Operator any record, a tenant only those of its own tenant. A
+        record of no tenant, or one that does not exist, is visible to nobody else (Phase 5 Req 5.2, 5.3)."""
+        principal: Principal = request.state.principal
+        if principal.operator:
+            return True
+        return await bounded(store.dead_letter_tenant(dead_letter_id)) == principal.tenant
+
     @router.get("/dlq")
     async def list_dlq(request: Request) -> Any:
         params = {k: request.query_params.getlist(k) for k in request.query_params}
+        principal: Principal = request.state.principal
         try:
-            query = parse_dlq_query(params)
+            query, scope = scoped_query(parse_dlq_query(params, allow_tenant=principal.operator), principal)
         except InvalidQuery as exc:
             return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=exc.body())
         after: tuple[int, str] | None = None
@@ -292,16 +322,22 @@ def register_dlq_routes(
                     status_code=status.HTTP_400_BAD_REQUEST, content=InvalidQuery("cursor").body()
                 )
             after = (cur.s, cur.m)
-        page = await bounded(
-            store.list_dead_letters(
-                status=query.status,
-                reason=query.reason,
-                request_id=query.request_id,
-                capability=query.capability,
-                limit=query.limit,
-                after=after,
+        try:
+            page = await bounded(
+                store.list_dead_letters(
+                    status=query.status,
+                    reason=query.reason,
+                    request_id=query.request_id,
+                    capability=query.capability,
+                    limit=query.limit,
+                    after=after,
+                    tenant=scope,
+                )
             )
-        )
+        except IndexNotReady:  # a non-default tenant before the Tenant_Backfill finished (Phase 5 Req 9.3)
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"error": "index_not_ready"}
+            )
         body: dict[str, Any] = {"items": [record_view(r) for r in page.records]}
         if page.next_after is not None:
             key = await bounded(cursor_keys.get())
@@ -312,8 +348,8 @@ def register_dlq_routes(
         return body
 
     @router.get("/dlq/{dead_letter_id}")
-    async def get_dlq(dead_letter_id: str) -> Any:
-        if _DLID_RE.fullmatch(dead_letter_id) is None:
+    async def get_dlq(request: Request, dead_letter_id: str) -> Any:
+        if _DLID_RE.fullmatch(dead_letter_id) is None or not await _visible(request, dead_letter_id):
             return _not_found()
         rec = await bounded(store.get_dead_letter(dead_letter_id))
         if rec is None:
@@ -340,8 +376,8 @@ def register_dlq_routes(
             raise
 
     @router.post("/dlq/{dead_letter_id}/replay")
-    async def replay_dlq(dead_letter_id: str) -> Any:
-        if _DLID_RE.fullmatch(dead_letter_id) is None:
+    async def replay_dlq(request: Request, dead_letter_id: str) -> Any:
+        if _DLID_RE.fullmatch(dead_letter_id) is None or not await _visible(request, dead_letter_id):
             metrics().dlq_admin_action("replay", "not_found")
             return _not_found()
         result = await _write("replay", store.replay_dead_letter(dead_letter_id))
@@ -367,8 +403,8 @@ def register_dlq_routes(
         )
 
     @router.post("/dlq/{dead_letter_id}/discard")
-    async def discard_dlq(dead_letter_id: str) -> Any:
-        if _DLID_RE.fullmatch(dead_letter_id) is None:
+    async def discard_dlq(request: Request, dead_letter_id: str) -> Any:
+        if _DLID_RE.fullmatch(dead_letter_id) is None or not await _visible(request, dead_letter_id):
             metrics().dlq_admin_action("discard", "not_found")
             return _not_found()
         result = await _write("discard", store.discard_dead_letter(dead_letter_id))

@@ -179,7 +179,9 @@ _dlq_params = st.fixed_dictionaries(
 def _normalized(endpoint: str, params: dict[str, str]) -> dict[str, Any]:
     raw = {k: [v] for k, v in params.items()}
     parse = parse_list_query if endpoint == "requests" else parse_dlq_query
-    return dict(parse(raw).filters)
+    # Phase 5 Req 3.3: a cursor is bound to the tenant it was issued for. The listing call here is a default-tenant key,
+    # and the DLQ call is an Operator listing every tenant.
+    return {**parse(raw).filters, "tenant": "default" if endpoint == "requests" else "*"}
 
 
 @st.composite

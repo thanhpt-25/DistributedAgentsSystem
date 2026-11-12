@@ -1,17 +1,20 @@
-"""API_Key and Admin_API_Key authorization for the Gateway_API (Requirements 1.3, 11).
+"""Authentication for the Gateway_API: a presented key becomes a Principal (Requirements 1.3, 11; Phase 5 Req 1, 2.1).
 
 Two FastAPI dependency builders, both declared at router level so they run before
 any handler code touches the State_Store or publishes a control command:
 
-- :func:`api_key_auth` for the ``/v1`` router: accepts an API_Key or an
-  Admin_API_Key with identical behavior (Req 11.6); anything else is 401.
-- :func:`admin_key_auth` for the ``/v1/admin`` router: ``NONE`` → 401
-  ``unauthorized``, ``API`` → 403 ``forbidden`` (or ``admin_disabled`` when no
-  Admin_API_Key is configured), ``ADMIN`` → handler (Req 11.2-11.5).
+- :func:`api_key_auth` for the ``/v1`` router: any known key (an API_Key of any tenant or an
+  Admin_API_Key) becomes a Principal, left on ``request.state.principal``; anything else is 401.
+- :func:`admin_key_auth` for the ``/v1/admin`` router: the same, authentication only.
+
+What a Principal may do is decided next by :func:`das.gateway.authz.authorize_route` against the route
+table: 403 ``forbidden`` naming the Scope or role, or ``admin_disabled`` when nothing in the
+configuration can administer (:func:`can_administer`, the Phase 4 answer).
 
 Every presented key is compared against every configured key in constant time via
 :func:`das.ops.keys.classify_key` (Req 11.7). Key values are never logged or
-echoed; only the Key_Fingerprint is recorded for the Audit_Entry (Req 11.8).
+echoed; only the Key_Fingerprint, the tenant and the operator flag are recorded for the
+Audit_Entry (Req 11.8; Phase 5 Req 2.7).
 """
 
 from __future__ import annotations
@@ -150,21 +153,16 @@ def admin_key_auth(
     tenants: Sequence[TenantConfig] = (),
     directory: KeyDirectory | None = None,
 ) -> Callable[..., Awaitable[None]]:
-    """Dependency for the ``/v1/admin`` router (Req 11.2-11.5).
+    """Dependency for the ``/v1/admin`` router (Req 11.2-11.5): authentication only.
 
-    Records the Principal and its Key_Fingerprint, so the Audit_Entry carries them even when the call is rejected with
-    403 (Req 11.8), and leaves the key's Client_Settings on ``request.state`` for the rate limit. Only an Operator (an
-    Admin_API_Key) passes here; a key of a tenant is refused with 403 ``forbidden``, or ``admin_disabled`` when nothing
-    in the configuration can administer: no Admin_API_Key and no tenant key holding the ``admin`` Scope (Phase 4 shape).
+    An unknown or missing key is 401. A known key leaves its Principal, Key_Fingerprint and Client_Settings on the
+    request (the fingerprint also in the audit context, so the Audit_Entry carries it even for a refused call, Req
+    11.8). What the key may do is decided next by :func:`das.gateway.authz.authorize_route` against the route table:
+    the dead-letter routes need Scope ``admin`` (and show a tenant only its own records), the rest the Operator role.
     """
     keyring = _directory(keys, admin_keys, tenants, directory)
     limits = client_limits if client_limits is not None else ClientLimitsConfig()
     by_id = {t.id: t for t in tenants}
-    can_administer = (
-        directory is not None
-        or bool(_configured(admin_keys))
-        or any(Scope.ADMIN.value in key.scopes for t in tenants for key in t.keys)
-    )
 
     async def require_admin_key(
         request: Request,
@@ -174,10 +172,23 @@ def admin_key_auth(
         if principal is None:
             raise _reject(status.HTTP_401_UNAUTHORIZED, UNAUTHORIZED_BODY)
         _identify(request, principal, limits, by_id)
-        if not principal.operator:
-            raise _reject(status.HTTP_403_FORBIDDEN, FORBIDDEN_BODY if can_administer else ADMIN_DISABLED_BODY)
 
     return require_admin_key
+
+
+def can_administer(
+    admin_keys: Iterable[SecretStr | str],
+    tenants: Sequence[TenantConfig] = (),
+    directory: KeyDirectory | None = None,
+) -> bool:
+    """Whether anything in the configuration can administer: an Admin_API_Key, a tenant key holding the ``admin``
+    Scope, or an injected directory. When nothing can, an admin route answers ``admin_disabled`` instead of
+    ``forbidden`` (the Phase 4 answer, Phase 5 Req 2.3)."""
+    return (
+        directory is not None
+        or bool(_configured(admin_keys))
+        or any(Scope.ADMIN.value in key.scopes for t in tenants for key in t.keys)
+    )
 
 
 __all__ = [
@@ -189,5 +200,6 @@ __all__ = [
     "admin_key_auth",
     "api_key_auth",
     "audit_context",
+    "can_administer",
     "is_valid_key",
 ]

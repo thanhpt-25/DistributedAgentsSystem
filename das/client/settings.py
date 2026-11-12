@@ -23,6 +23,10 @@ class ClientSettings:
     default_budget: Budget | None
     webhook_url: str | None
     webhook_secret_name: str | None
+    #: The tenant of the key and its Tenant_Quota (0 = none), distinct from the per-key ``max_active_requests``
+    #: above (Phase 5 Req 3.7, 4.3).
+    tenant: str = "default"
+    tenant_max_active: int = 0
 
 
 def _budget(config: BudgetConfig | None) -> Budget | None:
@@ -47,4 +51,6 @@ def resolve_settings(
         default_budget=_budget(s.default_budget),
         webhook_url=s.webhook_url,
         webhook_secret_name=s.webhook_secret_name,
+        tenant=tenant.id if tenant is not None else "default",
+        tenant_max_active=tenant.max_active_requests if tenant is not None else 0,
     )

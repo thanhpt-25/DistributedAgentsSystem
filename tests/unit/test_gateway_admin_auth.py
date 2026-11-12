@@ -104,7 +104,7 @@ async def test_api_key_is_403_forbidden(
     client: httpx.AsyncClient, calls: list[str], stream: io.StringIO
 ) -> None:
     r = await client.get("/v1/admin/dlq", headers={"x-api-key": API_KEY})
-    assert (r.status_code, r.json()) == (403, {"error": "forbidden"})
+    assert (r.status_code, r.json()) == (403, {"error": "forbidden", "scope": "admin"})  # Phase 5 Req 2.3
     assert calls == []
     [entry] = audits(stream)
     assert entry["key_fingerprint"] == key_fingerprint(API_KEY.encode())

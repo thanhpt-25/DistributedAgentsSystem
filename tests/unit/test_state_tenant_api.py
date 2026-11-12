@@ -207,6 +207,27 @@ async def test_read_usage_of_no_days_is_empty(state_store: StateStore) -> None:
     assert await state_store.read_usage(A, []) == {}
 
 
+async def test_request_tenant_is_the_tenant_none_for_a_missing_request_and_default_without_a_field(
+    state_store: StateStore,
+) -> None:
+    named = await submit(state_store, A)
+    legacy = await state_store.create_request("no tenant field")
+    assert await state_store.request_tenant(named) == A
+    assert await state_store.request_tenant(legacy) == "default"  # absent field: the default tenant
+    assert await state_store.request_tenant("no-such-request") is None  # not "default": there is no such Request
+
+
+async def test_dead_letter_tenant_is_the_records_tenant_and_none_for_no_tenant_or_no_record(
+    state_store: StateStore,
+) -> None:
+    ra, _ = await running_with_failed_job(state_store, A)
+    await state_store.create_dead_letter(fields(DL1, rid=ra))
+    await state_store.create_dead_letter(fields(DL2, rid=None))
+    assert await state_store.dead_letter_tenant(DL1) == A
+    assert await state_store.dead_letter_tenant(DL2) is None  # a record of no tenant
+    assert await state_store.dead_letter_tenant("f" * 32) is None  # no such record
+
+
 async def test_the_submit_spec_refuses_an_invalid_tenant() -> None:
     with pytest.raises(ValueError):
         ClientRequestSpec(fingerprint=FP, tenant="Bad Tenant")

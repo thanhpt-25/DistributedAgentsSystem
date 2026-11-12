@@ -12,7 +12,17 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, Literal
 
-__all__ = ["DEFAULT_TENANT", "OPERATOR", "PUBLIC", "ROUTE_SCOPES", "Principal", "Requirement", "Scope", "authorize"]
+__all__ = [
+    "DEFAULT_TENANT",
+    "OPERATOR",
+    "PUBLIC",
+    "ROUTE_SCOPES",
+    "Principal",
+    "Requirement",
+    "Scope",
+    "authorize",
+    "can_see",
+]
 
 
 class Scope(StrEnum):
@@ -50,6 +60,12 @@ def authorize(principal: Principal, requirement: Requirement) -> bool:
     if requirement == OPERATOR:
         return principal.operator
     return principal.operator or requirement in principal.scopes
+
+
+def can_see(principal: Principal, tenant: str) -> bool:
+    """Whether ``principal`` may see what belongs to ``tenant``: an Operator sees every tenant, anyone else only their
+    own (Req 3.2, 5.3). The tenant of a Request never changes after creation, so the answer cannot go stale."""
+    return principal.operator or principal.tenant == tenant
 
 
 _TABLE: dict[tuple[str, str], Requirement] = {

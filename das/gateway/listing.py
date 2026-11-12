@@ -18,18 +18,20 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 
+from das.config.schema import TENANT_ID_PATTERN
 from das.gateway.cursor_key import CursorKeyProvider
 from das.models import RequestStatus
 from das.observability.logging import format_timestamp
 from das.ops.cursor import InvalidCursor, PageCursor, decode_cursor, encode_cursor
-from das.state.store import RequestListItem, StateStore
+from das.state.store import IndexNotReady, RequestListItem, StateStore
+from das.tenancy.scopes import Principal
 
 #: Awaits a store operation within a timeout; failures raise ``StoreUnavailable``
 #: (mapped to 503 ``service_unavailable`` by the app, Req 15.13).
@@ -42,6 +44,9 @@ MAX_LIMIT: Final = 100
 MAX_STATUS_VALUES: Final = 5
 
 INDEX_NOT_READY: Final = {"error": "index_not_ready"}
+_TENANT_RE: Final = re.compile(TENANT_ID_PATTERN)
+#: The tenant filter of a cursor that lists every tenant (an Operator without ``tenant``).
+ALL_TENANTS: Final = "*"
 
 #: Canonical order of statuses in the normalized ``status`` filter.
 _STATUS_ORDER: Final = (
@@ -83,6 +88,8 @@ class ListQuery:
     limit: int = DEFAULT_LIMIT
     cursor: str | None = None
     filters: dict[str, Any] = field(default_factory=dict)
+    #: The ``tenant`` the Operator asked for; ``None`` when absent. Only an Operator may send it (Phase 5 Req 3.4).
+    tenant: str | None = None
 
 
 def _single(params: Mapping[str, Sequence[str]], name: str) -> str | None:
@@ -129,14 +136,20 @@ def _timestamp(params: Mapping[str, Sequence[str]], name: str) -> int | None:
         raise InvalidQuery(name) from exc
 
 
-def parse_list_query(params: Mapping[str, Sequence[str]]) -> ListQuery:
+def parse_list_query(params: Mapping[str, Sequence[str]], *, allow_tenant: bool = False) -> ListQuery:
     """Validate the query (pure, Req 15.2, 15.8).
+
+    ``tenant`` is accepted only with ``allow_tenant`` (an Operator): from anyone else it is an invalid parameter, and
+    for an Operator it must be a valid Tenant_ID (Phase 5 Req 3.4). It is checked first.
 
     Checks ``status``, ``created_after``, ``created_before`` (and that
     ``created_after`` is earlier than ``created_before``, reported as
     ``created_after``), then ``limit``. The cursor is verified separately by
     :func:`decode_list_cursor`, which needs the HMAC key.
     """
+    tenant = _single(params, "tenant") if "tenant" in params else None
+    if "tenant" in params and (not allow_tenant or tenant is None or _TENANT_RE.fullmatch(tenant) is None):
+        raise InvalidQuery("tenant")
     raw_status = _single(params, "status")
     statuses = _parse_statuses(raw_status) if raw_status is not None else None
     after_ms = _timestamp(params, "created_after")
@@ -164,7 +177,16 @@ def parse_list_query(params: Mapping[str, Sequence[str]]) -> ListQuery:
         limit=limit,
         cursor=cursor,
         filters=filters,
+        tenant=tenant,
     )
+
+
+def scoped(query: ListQuery, principal: Principal) -> tuple[ListQuery, str | None]:
+    """``query`` bound to the tenant the call may list, and that tenant (``None``: every tenant, an Operator only).
+
+    The tenant goes into the cursor filters, so a cursor issued for one tenant fails for another (Req 3.3, 3.4)."""
+    scope = query.tenant if principal.operator else principal.tenant
+    return replace(query, filters={**query.filters, "tenant": scope or ALL_TENANTS}), scope
 
 
 def decode_list_cursor(query: ListQuery, key: bytes) -> tuple[int, str] | None:
@@ -227,8 +249,9 @@ def register_list_route(
     @router.get("/requests")
     async def list_requests(request: Request) -> Any:
         params = {k: request.query_params.getlist(k) for k in request.query_params}
+        principal: Principal = request.state.principal
         try:
-            query = parse_list_query(params)
+            query, scope = scoped(parse_list_query(params, allow_tenant=principal.operator), principal)
         except InvalidQuery as exc:
             return _bad_query(exc)
         after: tuple[int, str] | None = None
@@ -242,15 +265,21 @@ def register_list_route(
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=dict(INDEX_NOT_READY)
             )
-        page = await bounded(
-            store.list_requests(
-                statuses=query.statuses,
-                created_after_ms=query.created_after_ms,
-                created_before_ms=query.created_before_ms,
-                limit=query.limit,
-                after=after,
+        try:
+            page = await bounded(
+                store.list_requests(
+                    statuses=query.statuses,
+                    created_after_ms=query.created_after_ms,
+                    created_before_ms=query.created_before_ms,
+                    limit=query.limit,
+                    after=after,
+                    tenant=scope,
+                )
             )
-        )
+        except IndexNotReady:  # a non-default tenant before the Tenant_Backfill finished (Req 9.3)
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=dict(INDEX_NOT_READY)
+            )
         body: dict[str, Any] = {"items": [list_item_view(it) for it in page.items]}
         if page.next_after is not None:
             key = await bounded(cursor_keys.get())
@@ -259,6 +288,7 @@ def register_list_route(
 
 
 __all__ = [
+    "ALL_TENANTS",
     "DEFAULT_LIMIT",
     "INDEX_NOT_READY",
     "MAX_LIMIT",
@@ -271,4 +301,5 @@ __all__ = [
     "parse_list_query",
     "parse_timestamp_ms",
     "register_list_route",
+    "scoped",
 ]

@@ -33,6 +33,7 @@ from das.models import RequestStatus, is_terminal_request
 from das.observability import get_logger
 from das.observability.metrics import GatewayMetrics
 from das.state.store import StateStore, StoredRequest
+from das.tenancy.scopes import can_see
 
 log = get_logger(__name__)
 
@@ -293,7 +294,9 @@ def register_events_route(
                 request_id, include_transitions=True, include_usage=True, include_client=True
             )
         )
-        if snap is None:
+        # Another tenant's Request is a 404 like a missing one, decided before a stream slot is taken or a stream
+        # starts (Phase 5 Req 3.2).
+        if snap is None or not can_see(request.state.principal, snap.tenant):
             return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=dict(_NOT_FOUND))
         cursor, resync = await position(request_id, last_event_id, snap.last_event_id)
         body = view(snap)
