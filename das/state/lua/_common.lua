@@ -38,6 +38,12 @@ local function iso_ms(ms)
   return string.format('%04d-%02d-%02dT%02d:%02d:%02d.%03dZ', y, m, d, hh, mi, ss, msr)
 end
 
+-- UTC day 'yyyymmdd' of epoch milliseconds (Phase 5 Req 6.1: the Usage_Rollup key suffix).
+local function utc_day(ms)
+  local iso = iso_ms(ms)
+  return string.sub(iso, 1, 4) .. string.sub(iso, 6, 7) .. string.sub(iso, 9, 10)
+end
+
 local TERMINAL_REQUEST = { Completed = true, Failed = true, Cancelled = true }
 
 local function is_terminal(status)
@@ -53,15 +59,62 @@ local function lease_ok(lease_key, owner, epoch, now)
   return true
 end
 
+-- Tenant of a Request (Phase 5 Req 3.1): the 'tenant' field of the request hash,
+-- 'default' when it is absent or empty (Requests created before Phase 5).
+local function tenant_of(req_key)
+  local t = redis.call('HGET', req_key, 'tenant')
+  if not t or t == '' then return 'default' end
+  return t
+end
+
+-- The tenant twin of a global Request or DLQ index key (Phase 5 Req 3.5, 5.1), or nil for a key
+-- that has none. Mirrors das.state.keys.tenant_twin. Derived inside the script, like key_prefix
+-- below, so no KEYS list changes (single Redis primary only).
+local function tenant_twin(global_key, t)
+  local i = string.find(global_key, ':requests:', 1, true)
+  if i then
+    local prefix = string.sub(global_key, 1, i - 1)
+    local rest = string.sub(global_key, i + 10)
+    if rest == 'index' then return prefix .. ':tenant:' .. t .. ':requests' end
+    if string.sub(rest, 1, 10) == 'by_status:' then
+      return prefix .. ':tenant:' .. t .. ':requests:' .. rest
+    end
+    return nil
+  end
+  i = string.find(global_key, ':dlq:', 1, true)
+  if i then
+    local prefix = string.sub(global_key, 1, i - 1)
+    local rest = string.sub(global_key, i + 5)
+    if rest == 'index' or string.sub(rest, 1, 10) == 'by_status:' or string.sub(rest, 1, 10) == 'by_reason:' then
+      return prefix .. ':tenant:' .. t .. ':dlq:' .. rest
+    end
+  end
+  return nil
+end
+
 -- Move rid between Request index zsets (Phase 2, Req 15.11): ZREM from from_key
 -- (skipped when nil/'' or equal to to_key), then ZADD to_key with score (created_at ms).
--- Both key names must come from KEYS.
-local function index_move(rid, from_key, to_key, score)
-  if from_key and from_key ~= '' and from_key ~= to_key then
+-- Both key names must come from KEYS. With req_key (Phase 5 Req 3.5) the same move is made
+-- on the tenant's twins of both keys, in the same call; without it nothing else is touched.
+local function index_move(rid, from_key, to_key, score, req_key)
+  local move_from = from_key and from_key ~= '' and from_key ~= to_key
+  local move_to = to_key and to_key ~= ''
+  if move_from then
     redis.call('ZREM', from_key, rid)
   end
-  if to_key and to_key ~= '' then
+  if move_to then
     redis.call('ZADD', to_key, score, rid)
+  end
+  if req_key then
+    local t = tenant_of(req_key)
+    if move_from then
+      local twin = tenant_twin(from_key, t)
+      if twin then redis.call('ZREM', twin, rid) end
+    end
+    if move_to then
+      local twin = tenant_twin(to_key, t)
+      if twin then redis.call('ZADD', twin, score, rid) end
+    end
   end
 end
 
@@ -200,14 +253,33 @@ end
 -- Active_Set membership of a Request (Phase 4 Req 3.3-3.7): add or remove rid in
 -- das:client:{client_fp}:active. No-op for a Request without client_fp (created
 -- before Phase 4 or through create_request), so those touch no Active_Set.
+-- Phase 5 Req 3.5, 3.7: the same call also maintains das:tenant:{t}:active, for every Request
+-- (a Request without client_fp still belongs to its tenant, 'default' when it has none).
+local function tenant_active_key(req_key, t)
+  return key_prefix(req_key) .. ':tenant:' .. t .. ':active'
+end
+
 local function client_active_add(req_key, rid)
+  redis.call('SADD', tenant_active_key(req_key, tenant_of(req_key)), rid)
   local fp = redis.call('HGET', req_key, 'client_fp')
   if fp and fp ~= '' then redis.call('SADD', active_key(req_key, fp), rid) end
 end
 
 local function client_active_remove(req_key, rid)
+  redis.call('SREM', tenant_active_key(req_key, tenant_of(req_key)), rid)
   local fp = redis.call('HGET', req_key, 'client_fp')
   if fp and fp ~= '' then redis.call('SREM', active_key(req_key, fp), rid) end
+end
+
+-- Add n to a field of the Usage_Rollup of the Request's tenant for the current UTC day (Phase 5
+-- Req 6.1) and refresh its expiry (usage.retention_days, 400 when not given).
+local function usage_bump(req_key, field, n, retention_days)
+  local _, ms = server_time()
+  local key = key_prefix(req_key) .. ':tenant:' .. tenant_of(req_key) .. ':usage:' .. utc_day(ms)
+  redis.call('HINCRBY', key, field, n)
+  local days = tonumber(retention_days)
+  if not days or days < 1 then days = 400 end
+  redis.call('EXPIRE', key, math.floor(days * 86400))
 end
 
 -- Write one JobRecord JSON and, when its state changed, append a transition entry and

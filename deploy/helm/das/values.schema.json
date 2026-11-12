@@ -1,0 +1,151 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DAS chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["existingSecret"],
+  "definitions": {
+    "envMap": {
+      "description": "Environment variable name -> key in the existing Secret",
+      "type": "object",
+      "additionalProperties": { "type": "string", "minLength": 1 },
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+    },
+    "resources": { "type": "object" },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+  },
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": { "name": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "existingSecret": { "type": "string", "minLength": 1 },
+    "secretEnv": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gateway": { "$ref": "#/definitions/envMap" },
+        "manager": { "$ref": "#/definitions/envMap" },
+        "worker": { "$ref": "#/definitions/envMap" }
+      }
+    },
+    "redis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "url": { "type": "string" } }
+    },
+    "rabbitmq": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string" },
+        "managementUrl": { "type": "string" }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "common": { "type": "object" },
+        "gateway": { "type": "object" },
+        "manager": { "type": "object" },
+        "worker": { "type": "object" }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "resources": { "$ref": "#/definitions/resources" },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "port": { "$ref": "#/definitions/port" }
+          }
+        }
+      }
+    },
+    "manager": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "workers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "capabilities"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 40 },
+          "capabilities": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" }
+          },
+          "replicas": { "type": "integer", "minimum": 0 },
+          "resources": { "$ref": "#/definitions/resources" }
+        }
+      }
+    },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preStopDrain": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "gatewayUrl": { "type": "string" },
+            "adminKeySecretKey": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "keda": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "queueLength": { "type": "integer", "minimum": 1 },
+        "pollingInterval": { "type": "integer", "minimum": 1 },
+        "minReplicaCount": { "type": "integer", "minimum": 0 },
+        "maxReplicaCount": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    }
+  }
+}

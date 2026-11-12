@@ -146,8 +146,9 @@ tenants:
     max_priority: high              # default normal (high for the Default_Tenant)
 usage:
   retention_days: 400               # 30 to 3650
-label_limits:
-  tenant: 100                       # 1 to 500
+metrics:
+  label_limits:
+    tenant: 100                     # 1 to 500 (next to capability, queue, provider, model)
 ```
 
 `TenantSettings` has the optional fields of `ClientOverride` without `fingerprint` (`rate`, `burst`, `max_active_requests`, `max_streams`, `default_budget`, `webhook_url`, `webhook_secret_name`) with the same ranges. A new cross-field validator `tenant_errors(config)` in the module of `client_api_errors` returns `FieldError`s (path only, never a key or secret value) for every rule of Requirement 1.4. A fingerprint is checked against the fingerprints of `api_keys` and `admin_api_keys` computed with `das.ops.keys.key_fingerprint`, as `client_api_errors` does for overrides.
@@ -192,8 +193,10 @@ def resolve_settings(fingerprint, limits, tenant: TenantConfig | None) -> Client
 |---|---|
 | `POST /v1/requests`, `POST /v1/requests/{request_id}/cancel` | `submit` |
 | `GET /v1/requests`, `GET /v1/requests/{request_id}`, `GET /v1/requests/{request_id}/events`, `GET /v1/agents`, `GET /v1/usage`, `GET /v1/openapi.json` | `read` |
-| `GET /v1/admin/dlq`, `GET /v1/admin/dlq/{id}`, `POST …/replay`, `POST …/discard` | `admin` (own tenant; records of no tenant and other tenants are not visible) |
+| `GET /v1/admin/dlq`, `GET /v1/admin/dlq/{dead_letter_id}`, `POST …/{dead_letter_id}/replay`, `POST …/{dead_letter_id}/discard` | `admin` (own tenant; records of no tenant and other tenants are not visible) |
 | `POST /v1/admin/agents/{agent_id}/drain`, `…/undrain`, `GET /v1/admin/usage` | `operator` |
+
+The templates are the application's `path_format` strings, as registered (`{request_id}`, `{dead_letter_id}`, `{agent_id}`); `das/tenancy/scopes.py` holds the table and `tests/unit/test_tenancy_scopes.py` pins it.
 
 ### 3. State_Store keys and scripts (Req 3, 5, 6, 9)
 
@@ -216,12 +219,17 @@ Helpers added to `_common.lua` (names indicative):
 
 ```lua
 local function tenant_of(req_key)                       -- HGET tenant, default 'default'
-local function tenant_twin(global_key, t)               -- 'das:requests:…' -> 'das:tenant:{t}:requests:…'; 'das:dlq:…' -> 'das:tenant:{t}:dlq:…'
-local function index_move(rid, from_key, to_key, score, req_key)   -- existing moves, plus the same move on the twins
-local function client_active_add(req_key, rid)          -- existing, plus SADD das:tenant:{t}:active
+local function tenant_twin(global_key, t)               -- the twin of a global index key, nil for keys without one
+                                                        --   das:requests:index -> das:tenant:{t}:requests
+                                                        --   das:requests:by_status:S -> das:tenant:{t}:requests:by_status:S
+                                                        --   das:dlq:index|by_status:S|by_reason:R -> das:tenant:{t}:dlq:…
+local function index_move(rid, from_key, to_key, score, req_key)   -- existing moves, plus the same moves on the twins when req_key is given
+local function client_active_add(req_key, rid)          -- existing, plus SADD das:tenant:{t}:active (for every Request)
 local function client_active_remove(req_key, rid)       -- existing, plus SREM
-local function usage_bump(req_key, field, n)            -- HINCRBY das:tenant:{t}:usage:{UTC day from TIME}; EXPIRE
+local function utc_day(ms)                              -- 'yyyymmdd' from epoch ms (reuses iso_ms)
+local function usage_bump(req_key, field, n, retention_days)  -- HINCRBY das:tenant:{t}:usage:{utc_day}; EXPIRE retention_days (400 if absent)
 -- append_usage(usage_key, req_key, records_json): for each record also usage_bump 'tokens/in|out|total/{provider}/{model}'
+-- (task 3.4 decides how usage.retention_days reaches the scripts: an extra ARGV)
 ```
 
 Where each script changes:
@@ -257,11 +265,12 @@ Until the flag is set, `list_requests` for the Default_Tenant reads the global i
               "requests": { "submitted": 12, "finished": { "Completed": 10, "Failed": 1, "Cancelled": 1 } },
               "models": [ { "provider": "openai", "model": "gpt-4o", "input_tokens": 1200, "output_tokens": 800,
                             "total_tokens": 2000, "estimated_cost": "0.0123" } ] } ],
-  "totals": { "input_tokens": 1200, "output_tokens": 800, "total_tokens": 2000,
-              "estimated_cost": { "currency": "USD", "amount": "0.0123" } } }
+  "totals": { "requests": { "submitted": 12, "finished": { "Completed": 10, "Failed": 1, "Cancelled": 1 } },
+              "input_tokens": 1200, "output_tokens": 800, "total_tokens": 2000,
+              "estimated_cost": { "currency": "USD", "amount": "0.0123", "complete": true } } }
 ```
 
-`estimated_cost` is `null` per model or in total when there is no Price_Table or the model is unpriced (v2 Req 10.7). The admin report without `tenant` returns `{"tenants": [report, …]}`.
+Every day of the range has an entry, with zero counters and no models when nothing happened. A model's `estimated_cost` is `null` when there is no Price_Table or the model is unpriced (v2 Req 10.7). The total is `null` without a Price_Table; with one it is `{currency, amount, complete}`, where `amount` covers the priced models and `complete` is false when any model is unpriced. Cost is computed from the per-model token aggregates with `das.ops.cost` (linear in tokens, so an aggregate prices exactly as its records would). The admin report without `tenant` returns `{"tenants": [report, …]}`.
 
 - `submit.py`: `priority` validation (`invalid_request` naming `priority`, `priority_above_limit` with the limit), tenant and priority passed in `ClientRequestSpec`, tenant quota result mapped to 429 `quota_exceeded` with `limit_scope: "tenant"` (the per-key rejection body is unchanged from Phase 4 and has no `limit_scope`).
 - `GET /v1/agents`: for a non-Operator Principal outside the Default_Tenant, entries drop `agent_id` and `host`.
@@ -379,7 +388,7 @@ The set of `(method, route template)` pairs registered on the Gateway applicatio
 | Cursor from another tenant | 400 `invalid_query` `cursor` | the tenant is part of the cursor filters |
 | Tenant_Quota reached | 429 `quota_exceeded` `limit_scope: tenant` | after the per-key checks, before any write |
 | `priority` invalid / above the tenant limit | 400 `invalid_request` / `priority_above_limit` | |
-| Usage range invalid or longer than 92 days | 400 `invalid_query` | names `from`, `to` or the range |
+| Usage range malformed, inverted or longer than 92 days | 400 `invalid_query` | names `from` (malformed or inverted) or `to` (malformed or too long) |
 | Non-default tenant listing before the backfill | 503 `index_not_ready` | |
 | Redis unreachable | 503 as today | fail closed |
 | Chart grace period below `shutdown_timeout + 10` | `helm template` fails with a message | |

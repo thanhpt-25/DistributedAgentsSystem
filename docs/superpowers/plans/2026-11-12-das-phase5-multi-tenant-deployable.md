@@ -200,3 +200,14 @@ exchange, and the `das-jobs` delivery-limit policy), messages with an AMQP `prio
 sketch now says pod IP for the advertise host, a grace period just above `shutdown_timeout` rather than `job_timeout`, no
 RabbitMQ definitions job, and an optional `preStop` (a plain SIGTERM already drains safely); the "unverified" list in
 section 7 is shorter.
+
+## 10. Implementation progress
+
+The spec is `.kiro/specs/das-multi-tenant/` (committed `991e6df`); `tasks.md` there is the tracker.
+
+**Wave 0 (tasks 1.1, 1.4, 2.1, 3.1, 10.1, and 11.3 pulled forward): done, uncommitted at the time of writing.**
+- **New:** `das/tenancy/scopes.py` (Scope, Principal, `authorize`, the read-only `ROUTE_SCOPES`, 16 entries) and `das/tenancy/usage.py` (date range, rollup parsing, report with cost at read time); the tenant schema in `das/config/schema.py` (`TenantConfig`, `TenantKeyConfig`, `TenantSettings`, `UsageConfig`, `metrics.label_limits.tenant`, `AgentConfig.tenants` and `.usage`); the tenant key builders and a Python `tenant_twin` in `das/state/keys.py`; the Lua helpers `tenant_of`, `tenant_twin`, `utc_day`, `usage_bump` and tenant maintenance inside `index_move`, `client_active_add` and `client_active_remove` in `_common.lua`; the chart skeleton in `deploy/helm/das/` (values, strict schema, helpers with the grace-period guard, `ci/values-min.yaml` and `values-all.yaml`).
+- **Tests first, red then green:** 236 new tests (`test_tenancy_scopes`, `test_tenancy_usage`, `test_config_tenants`, `test_state_tenant_keys`, `test_chart_skeleton`, the last against the real `helm` 4.3.1). **Fault injection: 17 of 17 faults caught**, with an unmutated control that passes and every file restored byte-for-byte. Fast-job set 2950 passed; ruff, mypy and import-linter clean; the Phase 3 platform and Phase 4 client API Compose stacks (14 tests) pass on real Redis with the changed `_common.lua`.
+- **Found while building, and fixed in the spec:** `label_limits` lives under `metrics` (`metrics.label_limits.tenant`), not at the top level; the real route templates use `{request_id}`, `{dead_letter_id}` and `{agent_id}`; the report total gains `complete` and the request counters; usage range errors name `from` (malformed or inverted) or `to` (malformed or too long); `redis.url` and `rabbitmq.url` are credential-free values while credentialed URLs come from `secretEnv`.
+- **Two consequences handled deliberately:** the v2 Req 20.6 test cannot coexist with a chart, so task 11.3 (its rewrite) was done with 10.1, and a stray manifest outside `deploy/helm/` and `tests/k8s/` still fails it (checked); and the config contract baseline `tests/fixtures/phase3_baseline/contract.json` was regenerated for the new fields, with 224 lines added, none removed, and the codec corpus byte-identical.
+- **Open for task 3.4:** how `usage.retention_days` reaches the scripts (an extra ARGV); `usage_bump` already takes it and defaults to 400.

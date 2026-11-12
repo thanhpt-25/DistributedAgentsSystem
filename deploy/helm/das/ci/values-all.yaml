@@ -1,0 +1,91 @@
+# Every optional feature on, with synthetic values only (lint, template and kubeconform render this file too).
+nameOverride: ""
+image:
+  repository: das
+  tag: "ci"
+  pullPolicy: Never
+imagePullSecrets:
+  - name: registry-credentials
+existingSecret: das-secrets
+
+secretEnv:
+  gateway:
+    DAS__API_KEYS: API_KEYS
+    DAS__ADMIN_API_KEYS: ADMIN_API_KEYS
+    DAS__REDIS__URL: REDIS_URL
+    DAS__WEBHOOK_SECRETS__PARTNER: WEBHOOK_SECRET_PARTNER
+  manager:
+    DAS__REDIS__URL: REDIS_URL
+    DAS__RABBITMQ__URL: RABBITMQ_URL
+    DAS__LLM__API_KEY: LLM_API_KEY
+  worker:
+    DAS__REDIS__URL: REDIS_URL
+    DAS__RABBITMQ__URL: RABBITMQ_URL
+    DAS__LLM__API_KEY: LLM_API_KEY
+
+rabbitmq:
+  managementUrl: "http://rabbitmq.messaging.svc:15672"
+
+config:
+  common:
+    limits:
+      shutdown_timeout: 30
+  gateway:
+    client_limits:
+      default:
+        rate: 120
+        burst: 240
+    tenants:
+      - id: team-a
+        keys:
+          - {fingerprint: "1a2b3c4d", scopes: [submit, read]}
+          - {fingerprint: "5e6f7a8b", scopes: [submit, read, admin]}
+        max_active_requests: 200
+        max_priority: high
+  manager: {}
+  worker: {}
+
+gateway:
+  replicas: 3
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+  service:
+    type: ClusterIP
+    port: 8080
+manager:
+  replicas: 2
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+
+workers:
+  - name: research
+    capabilities: [research, summarize]
+    replicas: 2
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+  - name: review
+    capabilities: [code-review]
+    replicas: 1
+    resources: {}
+
+terminationGracePeriodSeconds: 60
+
+lifecycle:
+  preStopDrain:
+    enabled: true
+    gatewayUrl: ""
+    adminKeySecretKey: ADMIN_API_KEYS
+
+keda:
+  enabled: true
+  queueLength: 5
+  pollingInterval: 10
+  minReplicaCount: 1
+  maxReplicaCount: 8
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations:
+    example.com/purpose: das

@@ -9,7 +9,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
 ## Tasks
 
 - [ ] 1. Pure core `das/tenancy`
-  - [ ] 1.1 Implement scopes, Principal and the route table
+  - [x] 1.1 Implement scopes, Principal and the route table
     - `das/tenancy/__init__.py`, `das/tenancy/scopes.py`: `Scope`, `OPERATOR`, `Requirement`, `Principal`, `authorize(principal, requirement)`, `ROUTE_SCOPES` listing every route explicitly (design §2 table, health routes `public`)
     - _Requirements: 2.2, 2.5_
   - [ ] 1.2 Implement the key directory
@@ -18,7 +18,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [ ] 1.3 Implement settings layering
     - `das/tenancy/settings.py` and `das/client/settings.py` `resolve_settings(fingerprint, limits, tenant)`: key override > `tenant.settings` > `client_limits.default`, field by field, an override applying to its key whatever the tenant; the Effective_Budget default comes from the resolved settings
     - _Requirements: 1.6, 4.1, 4.2, 4.4_
-  - [ ] 1.4 Implement usage report assembly
+  - [x] 1.4 Implement usage report assembly
     - `das/tenancy/usage.py`: UTC date range validation (default last 7 days, at most 92, inverted or malformed rejected), merge of rollup hashes into per-day entries and totals, cost at read time through `das.ops.cost` (`null` without a Price_Table or for an unpriced model)
     - _Requirements: 6.3, 6.5_
   - [ ] 1.5 Write property test for Principal resolution
@@ -29,7 +29,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - **Validates: Requirements 4.1, 4.4, 4.5**
 
 - [ ] 2. Configuration
-  - [ ] 2.1 Add the tenant schema
+  - [x] 2.1 Add the tenant schema
     - `das/config/schema.py`: `TenantKeyConfig`, `TenantSettings` (the optional fields of `ClientOverride` without `fingerprint`), `TenantConfig`, `UsageConfig` (`retention_days`), `LabelLimitsConfig.tenant`, `AgentConfig.tenants` and `.usage`; Tenant_ID pattern, scope set, `max_priority` default `normal`
     - _Requirements: 1.1, 4.2, 4.3, 6.6, 7.1, 7.2, 8.1_
   - [ ] 2.2 Add cross-field validation
@@ -40,7 +40,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - _Requirements: 1.1, 1.4, 1.5_
 
 - [ ] 3. State_Store keys and scripts
-  - [ ] 3.1 Add the tenant keys and Lua helpers
+  - [x] 3.1 Add the tenant keys and Lua helpers
     - `das/state/keys.py`: tenant key functions; `_common.lua`: `tenant_of`, `tenant_twin`, `index_move(..., req_key)`, tenant maintenance inside `client_active_add` and `client_active_remove`, `usage_bump` (UTC day from `TIME`, `EXPIRE` from `usage.retention_days` passed in ARGV)
     - _Requirements: 3.5, 5.1, 6.1_
   - [ ] 3.2 Maintain the Tenant_Index in the Request scripts
@@ -156,7 +156,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
 - [ ] 9. Checkpoint - Ensure all tests pass
 
 - [ ] 10. Helm chart
-  - [ ] 10.1 Create the chart skeleton
+  - [x] 10.1 Create the chart skeleton
     - `deploy/helm/das/`: `Chart.yaml`, `values.yaml`, `values.schema.json` (unknown keys rejected), `_helpers.tpl` with the grace-period guard (`fail` below `limits.shutdown_timeout + 10`), `ci/values-min.yaml`, `ci/values-all.yaml`
     - _Requirements: 10.4, 10.7_
   - [ ] 10.2 Write the workload templates
@@ -179,8 +179,9 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [ ] 11.2 Update CI
     - Fast job: pinned `helm` and `kubeconform` (SHA-256 verified), `helm lint`, `helm template` for both values files, `kubeconform -strict`; the `Kind_Job` on `main` and manual dispatch (`DAS_REQUIRE_DOCKER=1`, pinned `kind` and `kubectl`, image build and load, test manifests, `helm install`, `pytest tests/integration/k8s`, pod logs as an artifact); `EXPECTED_TIMEOUTS` and the expected fast steps in `test_ci_workflow_static.py`; `actionlint` clean
     - _Requirements: 11.1, 11.2, 11.5, 11.6_
-  - [ ] 11.3 Rewrite the Compose-only test
+  - [x] 11.3 Rewrite the Compose-only test
     - `tests/unit/test_deploy_observability.py` (the v2 Req 20.6 test): Compose files still exist and are valid; Kubernetes manifests exist only under `deploy/helm/` and `tests/k8s/`
+    - Done together with 10.1 (wave 0), because the chart skeleton alone makes the old pin fail; `tests/integration/k8s/` (Python tests) is allowed as a directory name
     - _Requirements: 10.8, 11.4_
 
 - [ ] 12. Compose end-to-end tests
@@ -203,6 +204,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
 - Each task references specific requirement criteria. Each of the 8 design properties maps to exactly one property-test sub-task (1.5, 1.6, 3.6, 3.7, 3.9, 4.3, 5.7, 6.3).
 - Property tests live in `tests/property/`, carry `# Feature: das-multi-tenant, Property {n}: {title}`, and run at least 100 examples through the Hypothesis profiles.
 - No new runtime dependency for the `das` package; the chart tests need the `helm` binary and skip without it locally, while CI installs a pinned one.
+- Every task that changes the config schema or the environment variables regenerates `tests/fixtures/phase3_baseline/contract.json` deliberately (`uv run python -m tests.fixtures.phase3_baseline.capture`) and checks the diff is additive (no removed line) and that `codec_corpus.jsonl` stays byte-identical. Wave 0 did this for task 2.1.
 - The Phase 5 plan (`docs/superpowers/plans/2026-11-12-das-phase5-multi-tenant-deployable.md`) holds the G0 spike results this spec depends on.
 - Timing and multi-Gateway behaviour, priority weighting and Kubernetes behaviour are covered by e2e and integration tests, not property tests.
 - If implementation finds a missing or contradictory requirement, update `requirements.md` before changing the design.
@@ -213,8 +215,8 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
 {
   "waves": [
     { "id": 0, "tasks": ["1.1", "1.4", "2.1", "3.1", "10.1"] },
-    { "id": 1, "tasks": ["1.2", "1.3", "3.2", "3.3", "3.4", "6.4", "10.2"] },
-    { "id": 2, "tasks": ["1.5", "1.6", "2.2", "3.5", "3.6", "3.7", "3.8", "6.5", "10.3", "11.1", "11.3"] },
+    { "id": 1, "tasks": ["1.2", "1.3", "3.2", "3.3", "3.4", "6.4", "10.2", "11.3"] },
+    { "id": 2, "tasks": ["1.5", "1.6", "2.2", "3.5", "3.6", "3.7", "3.8", "6.5", "10.3", "11.1"] },
     { "id": 3, "tasks": ["2.3", "3.9", "4.1", "10.4", "10.5"] },
     { "id": 4, "tasks": ["4.2", "4.4", "4.5", "11.2"] },
     { "id": 5, "tasks": ["4.3", "5.1", "5.2", "5.3", "5.4", "5.5"] },

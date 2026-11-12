@@ -127,9 +127,9 @@ Places where property-based testing applies are marked by criteria of the form "
 
 1. THE State_Store SHALL add to the Usage_Rollup of the Request's tenant and the current UTC day (Redis `TIME`): `submitted` when a Request is created, `finished/{Completed|Failed|Cancelled}` on each terminal write, and, for every UsageRecord at the moment it is appended to a Request, `tokens/in/{provider}/{model}`, `tokens/out/{provider}/{model}` and `tokens/total/{provider}/{model}`. Each write SHALL happen in the script that makes the state change.
 2. FOR ALL sequences of operations, the token fields of each tenant's Usage_Rollup for a day SHALL equal, per `{provider}/{model}`, the sum of the UsageRecords appended to that tenant's Requests that day. A Replay SHALL add the usage of the extra attempts and one more terminal count, and nothing else.
-3. THE `GET /v1/usage` endpoint (Scope `read`) SHALL return the Usage_Report of the Principal's tenant for the UTC dates `from` and `to` (inclusive; default the last 7 days; range at most 92 days), one entry per day with request counters and per-model token totals, and SHALL reject an invalid or inverted range with 400 `invalid_query` naming the parameter.
+3. THE `GET /v1/usage` endpoint (Scope `read`) SHALL return the Usage_Report of the Principal's tenant for the UTC dates `from` and `to` (inclusive; default the last 7 days; range at most 92 days), one entry per day with request counters and per-model token totals, and SHALL reject an invalid range with 400 `invalid_query` naming `from` (malformed date or inverted range) or `to` (malformed date or a range longer than 92 days).
 4. THE `GET /v1/admin/usage` endpoint (Operator) SHALL return the same report for one tenant given by `tenant`, or for every tenant when it is absent.
-5. THE Usage_Report SHALL carry `estimated_cost` computed when the report is read, from the Gateway's Price_Table (v2 Req 10), per model and in total. It SHALL be `null` without a Price_Table, and `null` for a model the Price_Table does not price, as in v2 Req 10.7. No price SHALL be needed in a Lua script.
+5. THE Usage_Report SHALL carry `estimated_cost` computed when the report is read, from the Gateway's Price_Table (v2 Req 10), per model and in total. It SHALL be `null` without a Price_Table, and `null` for a model the Price_Table does not price, as in v2 Req 10.7; with a Price_Table the total is `{currency, amount, complete}`, where `amount` covers the priced models and `complete` is false when any model is unpriced. The report totals SHALL also carry the request counters of the range. No price SHALL be needed in a Lua script.
 6. THE `usage.retention_days` setting (default 400, range 30 to 3650) SHALL set the expiry of each Usage_Rollup hash, refreshed on every write.
 7. Usage recorded before the upgrade SHALL NOT appear in a Usage_Report; the README SHALL say so.
 
@@ -153,7 +153,7 @@ Places where property-based testing applies are marked by criteria of the form "
 
 #### Acceptance Criteria
 
-1. THE Gateway_API and Manager_Agent SHALL add a `tenant` label, limited by the new `label_limits.tenant` (default 100, range 1 to 500, handled as the other dynamic labels of v2 Req 5.3 and 5.8), to `das_requests_submitted_total` and `das_requests_finished_total` only.
+1. THE Gateway_API and Manager_Agent SHALL add a `tenant` label, limited by the new `metrics.label_limits.tenant` (default 100, range 1 to 500, handled as the other dynamic labels of v2 Req 5.3 and 5.8), to `das_requests_submitted_total` and `das_requests_finished_total` only.
 2. THE `das_client_rejections_total{reason}` SHALL gain the reasons `forbidden`, `tenant_quota_exceeded` and `priority_above_limit`.
 3. THE Spans `gateway.submit` and `manager.request` SHALL carry the attribute `das.tenant`. The attribute allow-list of the Tracer SHALL be extended by exactly that name.
 4. No metric label, Span attribute or index SHALL carry a Key_Fingerprint or a key value, and the global Request_Index SHALL gain no tenant data.
@@ -182,7 +182,7 @@ Places where property-based testing applies are marked by criteria of the form "
 2. THE Chart SHALL render the agent configuration into ConfigMaps from structured values, and SHALL take every secret (API keys, Admin_API_Keys, webhook secrets, LLM credentials, Redis and RabbitMQ URLs with credentials) from an existing Secret named in `existingSecret`, through `secretKeyRef`. FOR ALL values, no rendered ConfigMap or manifest other than a Secret reference SHALL contain a secret value.
 3. EVERY pod SHALL set `DAS__GRPC__ADVERTISE_HOST` from `status.podIP` and `DAS__AGENT_ID` from `metadata.name`, and SHALL declare `startupProbe` and `livenessProbe` on `/livez` and `readinessProbe` on `/readyz` of the health port.
 4. THE `terminationGracePeriodSeconds` SHALL default to 45, and the Chart SHALL refuse to render when it is less than `limits.shutdown_timeout` plus 10 seconds.
-5. THE Chart SHALL NOT deploy Redis or RabbitMQ and SHALL NOT include a RabbitMQ definitions job: it SHALL take `redis.url`, `rabbitmq.url` and `rabbitmq.managementUrl` as values.
+5. THE Chart SHALL NOT deploy Redis or RabbitMQ and SHALL NOT include a RabbitMQ definitions job: it SHALL take `redis.url`, `rabbitmq.url` (credential-free) and `rabbitmq.managementUrl` as values, or, for a URL that carries credentials, through `secretEnv` from the Secret.
 6. THE `lifecycle.preStopDrain.enabled` value (default false) SHALL add a `preStop` hook that runs `das drain` for the pod's agent id, with the Admin_API_Key taken from the Secret.
 7. THE Chart SHALL ship a `values.schema.json` that rejects unknown or mistyped values, and a README that states the Redis and RabbitMQ prerequisites and that a Job whose Worker is killed repeatedly is dead-lettered after the delivery limit.
 8. Docker Compose SHALL remain a supported deployment, and its files and e2e stacks SHALL be unchanged except where a requirement above names them.

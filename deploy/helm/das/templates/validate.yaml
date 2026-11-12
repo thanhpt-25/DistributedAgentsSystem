@@ -1,0 +1,2 @@
+{{- /* Renders nothing: it only runs the checks of "das.validate" when the chart is rendered. */ -}}
+{{- include "das.validate" . -}}

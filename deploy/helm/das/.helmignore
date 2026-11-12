@@ -1,0 +1,7 @@
+# Patterns to ignore when packaging the chart.
+# The ci/ values files are for lint, template and the kind job, not for users.
+ci/
+.git/
+*.swp
+*.bak
+*.tmp

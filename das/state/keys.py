@@ -37,7 +37,16 @@ Key                             Type    Content
 ``das:webhooks:due``            zset    rid with a Webhook_Delivery, scored by due time
 ``das:agent:{id}``              hash    AgentRecord fields
 ``das:agents``                  zset    agent_id scored by last_heartbeat
+``das:tenant:{t}:requests``     zset    Phase 5: twin of ``das:requests:index`` for tenant ``t``
+``das:tenant:{t}:requests:by_status:{s}`` zset  Phase 5: twin of ``das:requests:by_status:{s}``
+``das:tenant:{t}:active``       set     Phase 5: non-terminal rid of the tenant (Tenant_Quota)
+``das:tenant:{t}:dlq:index``, ``…:dlq:by_status:{s}``, ``…:dlq:by_reason:{r}``  zsets  Phase 5: twins of the DLQ indexes
+``das:tenant:{t}:usage:{yyyymmdd}`` hash  Phase 5: Usage_Rollup (counters, tokens per ``{provider}/{model}``)
+``das:tenant:index:ready``      string  Phase 5: ``1`` once the Tenant_Backfill completed
+``das:tenant:index:backfill_lock`` string  Phase 5: ``SET NX PX`` lock of the Tenant_Backfill
 ==============================  ======  ==================================================
+
+Request hash fields added in Phase 5: ``tenant`` (absent = ``default``) and ``priority`` (stored only when ``high``).
 
 Phase 2 supports a single Redis instance only (Req 20.7): scripts touch keys of
 different Requests and the global indexes in one call.
@@ -85,6 +94,15 @@ F_BUDGET: Final = "budget"  # Budget JSON
 F_WEBHOOK_URL: Final = "webhook_url"
 F_WEBHOOK_SECRET_NAME: Final = "webhook_secret_name"
 F_EVENTS_MAX_LEN: Final = "events_max_len"
+# Phase 5 fields of the request hash (das-multi-tenant Req 3.1, 7.3). Absent: tenant ``default``, priority ``normal``.
+F_TENANT: Final = "tenant"
+F_PRIORITY: Final = "priority"  # stored only when ``high``
+
+#: The implicit tenant that owns every Request without a ``tenant`` field (Phase 5 Req 3.1).
+DEFAULT_TENANT: Final = "default"
+#: ``1`` once the Tenant_Backfill completed; the lock of the backfill (Phase 5 Req 9.2).
+TENANT_INDEX_READY: Final = f"{PREFIX}:tenant:index:ready"
+TENANT_INDEX_BACKFILL_LOCK: Final = f"{PREFIX}:tenant:index:backfill_lock"
 
 # Phase 2 field of the lease hash: agent of the latest acquire, kept across release.
 F_LAST_OWNER: Final = "last_owner"
@@ -110,6 +128,8 @@ RESERVED_REQUEST_FIELDS: Final = frozenset(
         F_WEBHOOK_URL,
         F_WEBHOOK_SECRET_NAME,
         F_EVENTS_MAX_LEN,
+        F_TENANT,
+        F_PRIORITY,
     }
 )
 
@@ -197,6 +217,58 @@ def client_idem(fp: str, h: str) -> str:
 def client_streams(fp: str) -> str:
     """Open Event_Stream connections of one client (Phase 4 Req 7)."""
     return f"{PREFIX}:client:{fp}:streams"
+
+
+def tenant_requests(tenant: str) -> str:
+    """Twin of ``das:requests:index`` for one tenant (Phase 5 Req 3.5)."""
+    return f"{PREFIX}:tenant:{tenant}:requests"
+
+
+def tenant_requests_by_status(tenant: str, status: str) -> str:
+    """Twin of ``das:requests:by_status:{status}`` for one tenant."""
+    return f"{PREFIX}:tenant:{tenant}:requests:by_status:{status}"
+
+
+def tenant_active(tenant: str) -> str:
+    """Non-terminal Request_IDs of one tenant: the Tenant_Quota's set (Phase 5 Req 3.7)."""
+    return f"{PREFIX}:tenant:{tenant}:active"
+
+
+def tenant_dlq_index(tenant: str) -> str:
+    """Twin of ``das:dlq:index`` for one tenant (Phase 5 Req 5.1)."""
+    return f"{PREFIX}:tenant:{tenant}:dlq:index"
+
+
+def tenant_dlq_by_status(tenant: str, status: str) -> str:
+    return f"{PREFIX}:tenant:{tenant}:dlq:by_status:{status}"
+
+
+def tenant_dlq_by_reason(tenant: str, reason: str) -> str:
+    return f"{PREFIX}:tenant:{tenant}:dlq:by_reason:{reason}"
+
+
+def tenant_usage(tenant: str, day: str) -> str:
+    """Usage_Rollup hash of one tenant and UTC day, ``day`` as ``yyyymmdd`` (Phase 5 Req 6.1)."""
+    return f"{PREFIX}:tenant:{tenant}:usage:{day}"
+
+
+def tenant_twin(global_key: str, tenant: str) -> str:
+    """The tenant's twin of a global Request or DLQ index key; ``ValueError`` for a key that has none.
+
+    Mirrors ``tenant_twin`` in ``_common.lua``, which derives the same names inside the scripts.
+    """
+    if global_key == REQUESTS_INDEX:
+        return tenant_requests(tenant)
+    if global_key == DLQ_INDEX:
+        return tenant_dlq_index(tenant)
+    for kind, build in (
+        (f"{PREFIX}:requests:by_status:", tenant_requests_by_status),
+        (f"{PREFIX}:dlq:by_status:", tenant_dlq_by_status),
+        (f"{PREFIX}:dlq:by_reason:", tenant_dlq_by_reason),
+    ):
+        if global_key.startswith(kind):
+            return build(tenant, global_key[len(kind) :])
+    raise ValueError(f"no tenant twin for key {global_key!r}")
 
 
 def agent(agent_id: str) -> str:

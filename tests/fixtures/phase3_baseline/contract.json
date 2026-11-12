@@ -525,6 +525,13 @@
             "minimum": 1,
             "title": "Queue",
             "type": "integer"
+          },
+          "tenant": {
+            "default": 100,
+            "maximum": 500,
+            "minimum": 1,
+            "title": "Tenant",
+            "type": "integer"
           }
         },
         "title": "LabelLimitsConfig",
@@ -836,6 +843,194 @@
         "title": "RetentionConfig",
         "type": "object"
       },
+      "TenantConfig": {
+        "additionalProperties": false,
+        "description": "One entry of the ``tenants`` list (Phase 5 Req 1, 4, 7).\n\n``max_active_requests`` here is the Tenant_Quota (0 = none), distinct from the per-key field of ``settings``.",
+        "properties": {
+          "default_priority": {
+            "default": "normal",
+            "enum": [
+              "normal",
+              "high"
+            ],
+            "title": "Default Priority",
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "keys": {
+            "items": {
+              "$ref": "#/$defs/TenantKeyConfig"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Keys",
+            "type": "array"
+          },
+          "max_active_requests": {
+            "default": 0,
+            "maximum": 1000000,
+            "minimum": 0,
+            "title": "Max Active Requests",
+            "type": "integer"
+          },
+          "max_priority": {
+            "default": "normal",
+            "enum": [
+              "normal",
+              "high"
+            ],
+            "title": "Max Priority",
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/$defs/TenantSettings"
+          }
+        },
+        "required": [
+          "id",
+          "keys"
+        ],
+        "title": "TenantConfig",
+        "type": "object"
+      },
+      "TenantKeyConfig": {
+        "additionalProperties": false,
+        "description": "One key of a tenant, by Key_Fingerprint (not a secret), with the Scopes it holds (Phase 5 Req 1.1).",
+        "properties": {
+          "fingerprint": {
+            "pattern": "^[0-9a-f]{8}$",
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "enum": [
+                "submit",
+                "read",
+                "admin"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "fingerprint",
+          "scopes"
+        ],
+        "title": "TenantKeyConfig",
+        "type": "object"
+      },
+      "TenantSettings": {
+        "additionalProperties": false,
+        "description": "The Client_Settings layer of a tenant, between ``client_limits.default`` and a key override (Req 4.1, 4.2).\n\nThe fields of :class:`ClientOverride` without the fingerprint; a field left unset (``None``) inherits.",
+        "properties": {
+          "burst": {
+            "anyOf": [
+              {
+                "maximum": 1000000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Burst"
+          },
+          "default_budget": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BudgetConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "max_active_requests": {
+            "anyOf": [
+              {
+                "maximum": 1000000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Active Requests"
+          },
+          "max_streams": {
+            "anyOf": [
+              {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Streams"
+          },
+          "rate": {
+            "anyOf": [
+              {
+                "maximum": 100000,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rate"
+          },
+          "webhook_secret_name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Webhook Secret Name"
+          },
+          "webhook_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Webhook Url"
+          }
+        },
+        "title": "TenantSettings",
+        "type": "object"
+      },
       "TracingConfig": {
         "additionalProperties": false,
         "description": "OpenTelemetry tracing (Req 8.1). ``otlp_endpoint`` is checked in :func:`cross_field_errors`.",
@@ -932,6 +1127,21 @@
           "control"
         ],
         "title": "TransportsConfig",
+        "type": "object"
+      },
+      "UsageConfig": {
+        "additionalProperties": false,
+        "description": "``usage`` (Phase 5 Req 6.6): how long each per-day Usage_Rollup lives.",
+        "properties": {
+          "retention_days": {
+            "default": 400,
+            "maximum": 3650,
+            "minimum": 30,
+            "title": "Retention Days",
+            "type": "integer"
+          }
+        },
+        "title": "UsageConfig",
         "type": "object"
       },
       "WebhookConfig": {
@@ -1154,6 +1364,14 @@
         "default": null,
         "title": "Secrets File"
       },
+      "tenants": {
+        "items": {
+          "$ref": "#/$defs/TenantConfig"
+        },
+        "maxItems": 100,
+        "title": "Tenants",
+        "type": "array"
+      },
       "tracing": {
         "$ref": "#/$defs/TracingConfig"
       },
@@ -1167,6 +1385,9 @@
           }
         ],
         "default": null
+      },
+      "usage": {
+        "$ref": "#/$defs/UsageConfig"
       },
       "webhook": {
         "$ref": "#/$defs/WebhookConfig"
@@ -1265,6 +1486,7 @@
     "DAS__METRICS__LABEL_LIMITS__MODEL",
     "DAS__METRICS__LABEL_LIMITS__PROVIDER",
     "DAS__METRICS__LABEL_LIMITS__QUEUE",
+    "DAS__METRICS__LABEL_LIMITS__TENANT",
     "DAS__METRICS__QUEUE_SAMPLE_INTERVAL",
     "DAS__PRICING__CURRENCY",
     "DAS__PRICING__MODELS",
@@ -1279,6 +1501,7 @@
     "DAS__RETENTION__TERMINAL_REQUEST_TTL",
     "DAS__ROLE",
     "DAS__SECRETS_FILE",
+    "DAS__TENANTS",
     "DAS__TRACING__ENABLED",
     "DAS__TRACING__MAX_QUEUE_SIZE",
     "DAS__TRACING__OTLP_ENDPOINT",
@@ -1288,6 +1511,7 @@
     "DAS__TRACING__SERVICE_NAME",
     "DAS__TRANSPORTS__CONTROL",
     "DAS__TRANSPORTS__JOBS",
+    "DAS__USAGE__RETENTION_DAYS",
     "DAS__WEBHOOK_SECRETS",
     "DAS__WEBHOOK__BASE_BACKOFF",
     "DAS__WEBHOOK__MAX_ATTEMPTS",

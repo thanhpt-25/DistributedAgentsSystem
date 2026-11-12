@@ -295,6 +295,10 @@ def test_readme_documents_requirement_18_9(readme: str, section: str) -> None:
 
 # ---------------------------------------------------------------------------
 # Requirement 20.6: Compose is the only deployment artifact
+#
+# SUPERSEDED by das-multi-tenant Req 10 and 11.4 (Phase 5): the repository now also carries a Helm chart. The tests
+# below keep the rule that matters: Docker Compose stays the baseline, and Kubernetes artifacts exist only in their
+# sanctioned places (deploy/helm/ for the chart, tests/k8s/ for the cluster test manifests), never scattered.
 # ---------------------------------------------------------------------------
 
 _SKIP_DIRS = {
@@ -336,18 +340,50 @@ def _is_k8s_manifest(path: Path) -> bool:
     )
 
 
-def test_repo_has_no_kubernetes_manifests_or_helm_charts() -> None:
+#: Where Kubernetes artifacts may live (das-multi-tenant Req 11.4). ``tests/integration/k8s`` holds Python tests only.
+_CHART_DIR = "deploy/helm/"
+_MANIFEST_DIRS = (_CHART_DIR, "tests/k8s/")
+_K8S_DIR_NAMES = {"k8s", "kubernetes", "helm", "charts"}
+
+
+def _relative(p: Path) -> str:
+    return p.relative_to(ROOT).as_posix()
+
+
+def test_docker_compose_is_still_the_baseline_deployment() -> None:
+    compose = DEPLOY / "docker-compose.yml"
+    assert compose.is_file()
+    services = yaml.safe_load(compose.read_text())["services"]
+    assert {"gateway", "manager", "rabbitmq", "redis"} <= set(services)
+
+
+def test_kubernetes_artifacts_exist_only_in_their_sanctioned_places() -> None:
     files = _repo_files()
+    helm_names = {"Chart.yaml", "Chart.yml", "values.yaml", "kustomization.yaml", "helmfile.yaml"}
     helm = [
         p for p in files
-        if p.name in {"Chart.yaml", "Chart.yml", "values.yaml", "kustomization.yaml", "helmfile.yaml"}
-        or p.suffix == ".tpl"
+        if (p.name in helm_names or p.suffix == ".tpl") and not _relative(p).startswith(_CHART_DIR)
     ]
-    assert not helm, f"Helm/Kustomize artifacts found: {helm}"
-    manifests = [p for p in files if p.suffix in {".yaml", ".yml"} and _is_k8s_manifest(p)]
-    assert not manifests, f"Kubernetes manifests found: {manifests}"
-    dirs = {part.lower() for p in files for part in p.relative_to(ROOT).parts[:-1]}
-    assert not dirs & {"k8s", "kubernetes", "helm", "charts"}
+    assert not helm, f"Helm/Kustomize artifacts outside {_CHART_DIR}: {helm}"
+    manifests = [
+        p for p in files
+        if p.suffix in {".yaml", ".yml"} and _is_k8s_manifest(p) and not _relative(p).startswith(_MANIFEST_DIRS)
+    ]
+    assert not manifests, f"Kubernetes manifests outside {_MANIFEST_DIRS}: {manifests}"
+    allowed_dirs = (*_MANIFEST_DIRS, "tests/integration/k8s/")
+    stray = sorted(
+        {
+            _relative(p.parent)
+            for p in files
+            if _K8S_DIR_NAMES & {part.lower() for part in p.relative_to(ROOT).parts[:-1]}
+            and not _relative(p).startswith(allowed_dirs)
+        }
+    )
+    assert not stray, f"directories named like Kubernetes artifacts outside {allowed_dirs}: {stray}"
+
+
+def test_the_chart_is_where_the_rule_expects_it() -> None:
+    assert (DEPLOY / "helm" / "das" / "Chart.yaml").is_file()
 
 
 def test_k8s_detector_flags_a_manifest(tmp_path: Path) -> None:

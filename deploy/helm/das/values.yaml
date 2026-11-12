@@ -1,0 +1,87 @@
+# Default values of the DAS chart (das-multi-tenant Req 10). values.schema.json rejects unknown or mistyped keys.
+#
+# The chart deploys the three DAS roles only. Redis and RabbitMQ (with the management plugin) are prerequisites,
+# and every secret comes from a Secret that already exists (existingSecret). Nothing here is a secret.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# One image per role: <repository>-gateway, <repository>-manager, <repository>-worker.
+image:
+  repository: das
+  tag: ""            # defaults to the chart appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# REQUIRED: the name of an existing Secret. The chart never sees a secret value.
+existingSecret: ""
+
+# Environment variables filled from that Secret, per role: env name -> key in the Secret.
+secretEnv:
+  gateway:
+    DAS__API_KEYS: API_KEYS
+    DAS__ADMIN_API_KEYS: ADMIN_API_KEYS
+    DAS__REDIS__URL: REDIS_URL
+  manager:
+    DAS__REDIS__URL: REDIS_URL
+    DAS__RABBITMQ__URL: RABBITMQ_URL
+    DAS__LLM__API_KEY: LLM_API_KEY
+  worker:
+    DAS__REDIS__URL: REDIS_URL
+    DAS__RABBITMQ__URL: RABBITMQ_URL
+    DAS__LLM__API_KEY: LLM_API_KEY
+
+# Credential-free connection values. Leave a URL empty when it carries credentials and comes from secretEnv.
+redis:
+  url: ""
+rabbitmq:
+  url: ""
+  managementUrl: "http://rabbitmq:15672"
+
+# Agent configuration rendered into ConfigMaps (no secrets). "common" is merged into every role's file.
+config:
+  common:
+    limits:
+      shutdown_timeout: 30
+  gateway: {}
+  manager: {}
+  worker: {}
+
+gateway:
+  replicas: 2
+  resources: {}
+  service:
+    type: ClusterIP
+    port: 8080
+manager:
+  replicas: 2
+  resources: {}
+
+# One Deployment per entry. Entries share the worker image and config; only the Capabilities differ.
+workers:
+  - name: research
+    capabilities: [research, summarize]
+    replicas: 2
+    resources: {}
+
+# Must be at least config.common.limits.shutdown_timeout + 10 (checked when the chart is rendered).
+terminationGracePeriodSeconds: 45
+
+lifecycle:
+  preStopDrain:
+    enabled: false          # run `das drain` for the pod's agent id before it stops
+    gatewayUrl: ""          # defaults to the chart's own Gateway Service
+    adminKeySecretKey: ADMIN_API_KEYS
+
+# Scale Worker Deployments on the depth of their Capability queues (needs KEDA installed in the cluster).
+keda:
+  enabled: false
+  queueLength: 10
+  pollingInterval: 15
+  minReplicaCount: 0
+  maxReplicaCount: 10
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}

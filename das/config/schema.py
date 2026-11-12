@@ -213,6 +213,8 @@ class LabelLimitsConfig(_Section):
     queue: int = Field(default=50, ge=1, le=500)
     provider: int = Field(default=50, ge=1, le=500)
     model: int = Field(default=50, ge=1, le=500)
+    #: Phase 5 Req 8.1: the ``tenant`` label of ``das_requests_submitted_total`` and ``das_requests_finished_total``.
+    tenant: int = Field(default=100, ge=1, le=500)
 
 
 class BucketsConfig(_Section):
@@ -436,6 +438,70 @@ class ClientLimitsConfig(_Section):
         return self.merged(self.override_for(fingerprint))
 
 
+#: Tenant_ID (Phase 5 Req 1.1). ``default`` is reserved for the Default_Tenant (checked in ``tenant_errors``).
+TENANT_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"
+MAX_TENANTS = 100
+MAX_TENANT_KEYS = 50
+TenantScope = Literal["submit", "read", "admin"]
+PriorityClass = Literal["normal", "high"]
+_PRIORITY_RANK = {"normal": 0, "high": 1}
+
+
+class TenantKeyConfig(_Section):
+    """One key of a tenant, by Key_Fingerprint (not a secret), with the Scopes it holds (Phase 5 Req 1.1)."""
+
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{8}$")
+    scopes: list[TenantScope] = Field(min_length=1, max_length=3)
+
+    @field_validator("scopes")
+    @classmethod
+    def _distinct(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("scopes must not repeat a scope")
+        return value
+
+
+class TenantSettings(_Section):
+    """The Client_Settings layer of a tenant, between ``client_limits.default`` and a key override (Req 4.1, 4.2).
+
+    The fields of :class:`ClientOverride` without the fingerprint; a field left unset (``None``) inherits.
+    """
+
+    rate: Rate | None = None
+    burst: Burst | None = None
+    max_active_requests: ActiveRequests | None = None
+    max_streams: Streams | None = None
+    default_budget: BudgetConfig | None = None
+    webhook_url: WebhookUrl | None = None
+    webhook_secret_name: SecretName | None = None
+
+
+class TenantConfig(_Section):
+    """One entry of the ``tenants`` list (Phase 5 Req 1, 4, 7).
+
+    ``max_active_requests`` here is the Tenant_Quota (0 = none), distinct from the per-key field of ``settings``.
+    """
+
+    id: str = Field(pattern=TENANT_ID_PATTERN)
+    keys: list[TenantKeyConfig] = Field(min_length=1, max_length=MAX_TENANT_KEYS)
+    settings: TenantSettings = Field(default_factory=TenantSettings)
+    max_active_requests: ActiveRequests = 0
+    default_priority: PriorityClass = "normal"
+    max_priority: PriorityClass = "normal"
+
+    @model_validator(mode="after")
+    def _default_priority_within_maximum(self) -> TenantConfig:
+        if _PRIORITY_RANK[self.default_priority] > _PRIORITY_RANK[self.max_priority]:
+            raise ValueError("default_priority must not be above max_priority")
+        return self
+
+
+class UsageConfig(_Section):
+    """``usage`` (Phase 5 Req 6.6): how long each per-day Usage_Rollup lives."""
+
+    retention_days: int = Field(default=400, ge=30, le=3650)
+
+
 class EventsConfig(_Section):
     """Event_Stream and SSE_Endpoint limits (Phase 4 Req 6.5, 7.5, 7.7)."""
 
@@ -503,6 +569,9 @@ class AgentConfig(_Section):
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     # Webhook secrets by name: DAS__WEBHOOK_SECRETS__<NAME> or the secrets file only (Req 1.7).
     webhook_secrets: dict[SecretName, WebhookSecret] = Field(default_factory=dict)
+    # Phase 5 (Req 1, 6): tenants by Key_Fingerprint, and the Usage_Rollup retention.
+    tenants: list[TenantConfig] = Field(default_factory=list, max_length=MAX_TENANTS)
+    usage: UsageConfig = Field(default_factory=UsageConfig)
 
     @model_validator(mode="after")
     def _defaults(self) -> AgentConfig:
@@ -1018,9 +1087,12 @@ __all__ = [
     "MAX_ADMIN_API_KEYS",
     "MAX_BUCKETS",
     "MAX_CLIENT_OVERRIDES",
+    "MAX_TENANTS",
+    "MAX_TENANT_KEYS",
     "MIN_RATE",
     "SECRET_NAME_PATTERN",
     "SECRET_PREFIX_FIELDS",
+    "TENANT_ID_PATTERN",
     "WEBHOOK_SECRET_MIN_LENGTH",
     "AgentConfig",
     "BucketsConfig",
@@ -1041,8 +1113,12 @@ __all__ = [
     "RabbitMQConfig",
     "RedisConfig",
     "RetentionConfig",
+    "TenantConfig",
+    "TenantKeyConfig",
+    "TenantSettings",
     "TracingConfig",
     "TransportsConfig",
+    "UsageConfig",
     "WorkerConfig",
     "client_api_errors",
     "cross_field_errors",

@@ -1,0 +1,2 @@
+# The smallest values that render: only the required Secret name (lint, template and the kind job use this file).
+existingSecret: das-secrets
