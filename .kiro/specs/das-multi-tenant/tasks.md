@@ -184,16 +184,16 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - Done together with 10.1 (wave 0), because the chart skeleton alone makes the old pin fail; `tests/integration/k8s/` (Python tests) is allowed as a directory name
     - _Requirements: 10.8, 11.4_
 
-- [ ] 12. Compose end-to-end tests
+- [x] 12. Compose end-to-end tests
   - [x] 12.1 Write the tenancy e2e
     - `tests/integration/e2e/test_tenancy_e2e.py`, own project `das-e2e-tenant` with its override and Gateway config: two tenants and an Operator on two Gateways; isolation across every route, scopes, the tenant quota, usage report totals equal to the stub LLM's token counts, a `high` Request overtaking a `normal` backlog, backfill after data written without tenant fields; each test run against a deliberately broken variant and a control
     - _Requirements: 3.2, 3.3, 3.7, 5.3, 6.2, 6.3, 7.4, 7.6, 9.2, 9.3_
-  - [ ] 12.2 Run the full regression
+  - [x] 12.2 Run the full regression
     - `DAS_REQUIRE_DOCKER=1 uv run pytest`, `ruff`, `mypy`, `lint-imports`, the client suite on Python 3.10 to 3.13, `helm lint` and `kubeconform`; only the tests named in 8.1 and 11.3 changed, and the Compose files and Phase 3 and 4 e2e stacks are untouched
     - _Requirements: 9.6, 10.8_
 
-- [ ] 13. Documentation
-  - [ ] 13.1 Update README and CLAUDE.md
+- [x] 13. Documentation
+  - [x] 13.1 Update README and CLAUDE.md
     - README: tenants and scopes (with the config example), the upgrade steps (upgrade every replica, wait for `das:tenant:index:ready`, then add `tenants`), usage reports and the "before the upgrade not included" note, priority as a weighting, idempotency per key and key rotation, the Kubernetes section and Kind_Job names for branch protection, and a "not in Phase 5" list (Redis HA, key-management API, per-tenant worker pools, per-tenant token metrics); `CLAUDE.md` e2e and chart lines; drift tests extended
     - _Requirements: 3.8, 6.7, 7.6, 9.3, 11.6, 12.2_
 

@@ -123,7 +123,7 @@ curl -s -X POST $GW/v1/requests -H "X-API-Key: $KEY" \
 - The same key with the same prompt and budget answers `200` with the same `request_id` and the header `Idempotent-Replayed: true`. No Request is created, and a replay is answered even when the key's quota is full.
 - The same key with a different prompt or budget answers `422 {"error": "idempotency_key_reused"}`. `max_cost` is compared by value, so `"1.50"` and `"1.5"` are the same budget.
 - A key that is not 1 to 128 printable ASCII characters answers `400 {"error": "invalid_request", "parameter": "Idempotency-Key"}`.
-- Keys belong to the API key that sent them and are remembered for `client_limits.idempotency_ttl` seconds (default 86400).
+- Keys belong to the API key that sent them and are remembered for `client_limits.idempotency_ttl` seconds (default 86400). They stay **per API key, not per tenant**: two keys of one tenant never share an `Idempotency-Key`, and a **rotated key starts with no idempotency records** (a new key value has a new fingerprint), so a retry sent with the new key after a rotation creates a new Request. See [Rotating a key](#rotating-a-key).
 - Without the header, every submit creates a new Request, as before.
 
 ### Budgets
@@ -266,6 +266,105 @@ asyncio.run(main())
 - Errors derive from `DasError`: `AuthError` (401, 403), `NotFound` (404), `Conflict` (409), `IdempotencyKeyReused` (422), `InvalidRequest` and `BudgetAboveLimit` (400, with `.parameter`), `RateLimited` (with `.retry_after`) and `QuotaExceeded` (with `.limit`) after the retries, `ServiceUnavailable` (503) and `TransportFailure` (cannot connect), `WaitTimeout`, and `InvalidSignature` from `verify_webhook`.
 - Responses are read leniently: a field the server adds later does not break an older client.
 
+## Tenants and scopes
+
+Without a `tenants` section, every key in `DAS__API_KEYS` belongs to the **default tenant** with the Scopes `submit` and `read`, and every key in `DAS__ADMIN_API_KEYS` is an **Operator**: the single-team behaviour of earlier phases. A `tenants` section gives a team its own keys, Scopes, quota and priority. Its Requests, dead letters and usage are then invisible to every other tenant.
+
+```yaml
+# deploy/config/gateway.yaml
+tenants:
+  - id: team-a                     # lowercase letters, digits and hyphens, up to 32; not "default"
+    keys:
+      - fingerprint: "484857e0"    # the placeholder key `change-me-api-key`
+        scopes: [submit, read]
+      - fingerprint: "ee978a75"    # a second key of the same tenant that may also administer its dead letters
+        scopes: [read, admin]
+    max_active_requests: 200       # unfinished Requests the whole tenant may have
+    default_priority: normal
+    max_priority: high
+    settings:
+      rate: 120.0
+      burst: 240
+      default_budget:
+        max_total_tokens: 100000
+  - id: team-b
+    keys:
+      - fingerprint: "0d41cb3f"
+        scopes: [submit, read]
+```
+
+A key is named by its fingerprint, never by its value (`printf %s "$KEY" | shasum -a 256 | cut -c1-8`), and must also be one of `DAS__API_KEYS`. A fingerprint that matches no key, an Admin_API_Key, a fingerprint named twice or by two tenants, or a `default` tenant is refused when the Gateway starts, and the message names the field, never a key. A key that no tenant names stays in the default tenant. Configure `tenants` only after the upgrade has finished: see [Upgrading to Phase 5](#upgrading-to-phase-5).
+
+### Scopes
+
+| Scope | What it allows |
+|---|---|
+| `submit` | `POST /v1/requests` and `POST /v1/requests/{id}/cancel` |
+| `read` | `GET /v1/requests` (the listing), `GET /v1/requests/{id}`, `GET /v1/requests/{id}/events`, `GET /v1/agents`, `GET /v1/usage`, `GET /v1/openapi.json` |
+| `admin` | the dead-letter routes of the key's own tenant: `GET /v1/admin/dlq`, `GET /v1/admin/dlq/{id}`, `POST /v1/admin/dlq/{id}/replay`, `POST /v1/admin/dlq/{id}/discard` |
+| Operator | an Admin_API_Key: every Scope on every tenant, and the platform routes `POST /v1/admin/agents/{id}/drain`, `POST /v1/admin/agents/{id}/undrain` and `GET /v1/admin/usage` |
+
+A call without the Scope its route needs answers `403 {"error": "forbidden", "scope": "submit"}`, naming the Scope (or `operator`). The check comes before anything is read or written and before the rate limit, so a refused call costs no token and creates nothing. `GET /healthz` needs no key. When nothing in the configuration can administer (no Admin_API_Key and no key with `admin`), the admin routes keep answering `403 {"error": "admin_disabled"}` as before.
+
+### What a tenant sees
+
+- **Requests.** Another tenant's Request, by `GET`, cancel or events, answers `404 {"error": "not_found"}`, exactly as a Request that does not exist, so a Request_ID reveals nothing. A cancel of another tenant's Request writes nothing.
+- **The listing.** `GET /v1/requests` returns only the caller's tenant. A `next_cursor` belongs to the caller's scope: used by another tenant, or by an Operator, it answers `400 {"error": "invalid_query", "parameter": "cursor"}`. The `tenant` parameter is for Operators (`GET /v1/requests?tenant=team-a`); from anyone else it answers `400 {"error": "invalid_query", "parameter": "tenant"}`.
+- **Dead letters.** A key with `admin` lists, reads, replays and discards the dead letters of its own tenant. A record of another tenant, or a record whose Request no longer exists, answers `404`. An Operator sees every record and may filter with `tenant`.
+- **Agents.** `GET /v1/agents` shows a tenant key the Capabilities, status and load of the agents, without their `agent_id` and `host`. The default tenant and Operators see them.
+- **Quota.** `max_active_requests` directly under a tenant is a limit for the whole tenant, on top of the per-key one. At the limit a submit answers `429 {"error": "quota_exceeded", "limit": 200, "limit_scope": "tenant"}` and creates nothing; the per-key body is unchanged and is reported first when both limits are reached. The tenant's `settings` sit between `client_limits.default` and a per-key override: a field a layer leaves out is inherited from the layer below.
+- **The Operator** sees every tenant. Only the Operator may use `tenant` and the platform routes.
+
+Every Audit_Entry of an admin call carries the caller's `tenant` and whether it was an Operator, next to its key fingerprint; key values are never logged.
+
+### Tenant settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `tenants[].id` | none | The tenant's name: lowercase letters, digits and hyphens, up to 32, not `default` |
+| `tenants[].keys[].fingerprint` | none | An API key of this tenant, by fingerprint (8 hex characters) |
+| `tenants[].keys[].scopes` | none | Any of `submit`, `read`, `admin` |
+| `tenants[].max_active_requests` | 0 | Unfinished Requests the whole tenant may have; `0` means no tenant limit |
+| `tenants[].default_priority` | `normal` | The priority of a submit that names none; not above `max_priority` |
+| `tenants[].max_priority` | `normal` | The highest priority a submit may ask for (`normal` or `high`) |
+| `tenants[].settings` | none | The per-key settings of [Client API settings](#client-api-settings) for every key of the tenant |
+| `usage.retention_days` | 400 | Days a tenant's daily usage rollup is kept (30 to 3650) |
+| `metrics.label_limits.tenant` | 100 | Distinct tenant values of the `tenant` metric label (1 to 500) |
+
+### Rotating a key
+
+Add the new key to `DAS__API_KEYS` and its fingerprint to the tenant, redeploy the Gateways, move the clients to the new key, then remove the old key and its fingerprint. Both keys work during the overlap. Idempotency records are per key, so the new key starts with none: a retry sent with the new key after the move is a new submit.
+
+## Priority
+
+A submit may carry `"priority": "high"` (or `"normal"`). Without it the tenant's `default_priority` applies. A value above the tenant's `max_priority` answers `400 {"error": "priority_above_limit", "limit": "normal"}` and creates nothing; any other value answers `400 {"error": "invalid_request", "parameter": "priority"}`. The default tenant may use `high`. The Request view shows its `priority`, `normal` for a Request that has none.
+
+Priority is a **weighting, not a strict order**. With both classes queued, `high` Jobs are delivered about two for every `normal` one, and `normal` Jobs are never starved. Every dispatch of a `high` Request, a retry or a re-dispatch after a takeover or a Replay included, is published with the header `das-priority: high`; the RabbitMQ transport turns it into AMQP priority 9 on the quorum queues, which RabbitMQ serves as a second class. Queue declarations, the `das-jobs` policy and the message payload are unchanged.
+
+## Usage reports
+
+`GET /v1/usage` is the report of the caller's own tenant (Scope `read`); `GET /v1/admin/usage` is the Operator's, for one tenant (`?tenant=team-a`) or for every tenant (`{"tenants": [...]}`).
+
+```bash
+curl -s "$GW/v1/usage?from=2026-11-01&to=2026-11-07" -H "X-API-Key: $KEY"
+```
+
+- The range is UTC days, `from` and `to` inclusive, `YYYY-MM-DD`. Without them the report covers the last seven days up to today by the State_Store clock. A malformed, inverted or longer than 92 days range answers `400 {"error": "invalid_query", "parameter": "from"}` (or `"to"`).
+- The body has one entry per day with the Requests `submitted` and `finished` (`Completed`, `Failed`, `Cancelled`), the tokens in and out per `{provider}/{model}`, and `totals` for the range.
+- `estimated_cost` is computed when the report is read, from the [Price_Table](#price_table): `null` without one.
+- **Usage recorded before the upgrade is not in any report.** Requests written by Phase 4 never wrote the daily rollup, and no report is back-filled.
+- Tokens and cost per tenant are served by these reports, not by Prometheus. The only per-tenant metrics are the `tenant` label of `das_requests_submitted_total` and `das_requests_finished_total` (and the Grafana panel of them); `das_client_rejections_total` gains the reasons `forbidden`, `tenant_quota_exceeded` and `priority_above_limit`.
+
+## Kubernetes (Helm chart)
+
+Docker Compose stays a supported way to run DAS. The chart in `deploy/helm/das/` runs the same three roles on Kubernetes: Gateway, Manager and Worker Deployments, one Worker Deployment per Capability set, optional KEDA autoscaling of Workers, a `preStop` drain so a pod finishes its Jobs before it stops, and a `values.schema.json` that rejects unknown or mistyped values. Redis and RabbitMQ are prerequisites, not part of the chart, and every secret comes from a Secret that already exists.
+
+```bash
+helm install das deploy/helm/das -f my-values.yaml
+```
+
+The chart's own [README](deploy/helm/das/README.md) covers the prerequisites, the Secret keys, the values, tenants, the grace period rule, KEDA, draining and how to test it. CI renders the chart for two values files with `helm lint`, `helm template` and `kubeconform -strict`, and the `k8s` job installs it on a throwaway kind cluster. If you protect a branch, the required status checks are the job names of the workflow: `Fast_Job`, `Client_Job (Python 3.10)`, `Client_Job (Python 3.11)`, `Client_Job (Python 3.12)`, `Client_Job (Python 3.13)`, `Integration_Job`, `E2E_Job` and `Kind_Job`.
+
 ## Scaling
 
 Add capacity without restarting other agents:
@@ -313,7 +412,7 @@ The Admin_API lives under `/v1/admin` on the Gateway. It is disabled until you s
 | Status | Body | Meaning |
 |---|---|---|
 | 401 | `unauthorized` | Missing or unknown key |
-| 403 | `forbidden` | A normal API key was used on `/v1/admin` |
+| 403 | `forbidden` | The key lacks what the route needs; the body names it: `"scope": "admin"` on the dead-letter routes, `"scope": "operator"` on drain, undrain and `/v1/admin/usage` (see [Scopes](#scopes)) |
 | 403 | `admin_disabled` | No admin key is configured |
 
 Every admin call is written to an audit log entry with a key fingerprint, never the key itself.
@@ -382,6 +481,20 @@ Phase 4 adds idempotency keys, budgets, per-key limits, event streams, and webho
 - **Requests created before the upgrade** have no budget, no webhook, and do not count towards any key's quota. A stream of one sends its snapshot followed by whatever events exist.
 - **The limits are on by default.** After the upgrade each API key is limited to 60 requests per second (burst 120), 100 unfinished Requests, and 10 open event streams. A client that ran faster or wider before will see `429` responses until the limits are raised or set to `0`; see [Client API settings](#client-api-settings). Clients that retry should wait for `Retry-After`.
 - The new metrics are listed under [Ops_Port endpoints](#ops_port-endpoints-metrics-liveness-readiness).
+
+## Upgrading to Phase 5
+
+Phase 5 adds [tenants and scopes](#tenants-and-scopes), [priority](#priority), [usage reports](#usage-reports) and a [Helm chart](#kubernetes-helm-chart). A client of the default tenant that sends no `priority` and uses no new endpoint sees the same responses as in Phase 4, except that `GET /v1/requests/{id}` has one more field, `priority` (`normal` for a Request that has none), a 403 on an admin route names its Scope, and the Audit_Entry has the fields `tenant` and `operator`.
+
+1. **Upgrade every Gateway, Manager and Worker, in any order.** The keys Phase 5 adds are additive and ignored by Phase 4 instances, so a rollback loses no Phase 4 data.
+2. **Wait for the Tenant_Backfill.** The first Manager that starts files every existing Request and dead letter under the default tenant, then sets `das:tenant:index:ready` in Redis and logs `tenant_index_backfilled`. Until then a listing for the default tenant reads the global index and a listing for any other tenant answers `503 {"error": "index_not_ready"}`.
+3. **Then add `tenants`** to the Gateway configuration and redeploy the Gateways. Configure tenants only after the flag is set.
+
+What does not carry over: **usage from before the upgrade is not in any report**, and **idempotency records stay per key**, so a rotated key starts new ones. Requests created before the upgrade belong to the default tenant. Replay, drain and the other admin actions still need every instance upgraded, as in [Upgrading from v1](#upgrading-from-v1).
+
+### Not in Phase 5
+
+Redis replication, Sentinel or Cluster; a key-management API, or keys stored in Redis (keys and tenants come from the configuration); per-tenant worker pools or queues; SSO or OAuth; billing integration; tool use or code execution; HTTP or Kafka transports; and per-tenant token or cost metrics in Prometheus (use the usage reports).
 
 ## Configuration
 
