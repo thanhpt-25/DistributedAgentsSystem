@@ -89,6 +89,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -130,6 +131,7 @@ from das.manager.machine import (
     resume,
     step,
 )
+from das.manager.replan import build_context, replan_wanted
 from das.manager.planner import (
     PLAN_REJECTED_CODE,
     NoCapabilities,
@@ -287,6 +289,7 @@ class RequestDriver:
         self._snap: RequestSnapshot | None = None
         self._tenant = "default"
         self._priority = "normal"
+        self._replans = 0  # how often the plan was replaced (Phase 6 Req 3.4); re-read on every reload
         self._cursor = "0-0"
         self._agents: tuple[AgentRecord, ...] = ()
         self._finish: RunSummarizer | FinalizeFailed | None = None
@@ -414,6 +417,7 @@ class RequestDriver:
         self._snap = RequestSnapshot.from_stored(stored)
         self._tenant = stored.tenant  # for the per-tenant finished counter (Phase 5 Req 8.1), not for the reducer
         self._priority = stored.priority  # re-read on every reload, so a Replay or takeover sees the stored value
+        self._replans = stored.replans  # likewise: a new owner counts the replans already made
         self._cursor = stored.inbox_cursor or "0-0"
 
     def _check_lease(self) -> None:
@@ -982,10 +986,75 @@ class RequestDriver:
 
     # ------------------------------------------------------------------ finish
 
+    async def _maybe_replan(self, finish: RunSummarizer | FinalizeFailed) -> bool:
+        """Replace the Jobs that failed with a new plan instead of finishing (Phase 6 Req 3.2 to 3.8).
+
+        ``True``: the Request was replanned and the event loop goes on with the new Jobs. ``False``: finish as usual.
+        That is also the answer when replanning is off, does not apply (every Job succeeded, a budget stop, the limit
+        is reached) or could not be done (Req 3.5): the Request then ends exactly as it would have, and the tokens the
+        attempts used are carried into that final write (Req 3.8).
+        """
+        snap = self._snap
+        assert snap is not None
+        budget_kind = finish.budget_kind if isinstance(finish, FinalizeFailed) else None
+        if not replan_wanted(budget_kind, snap.jobs, self._replans, self.deps.planner_config.max_replans):
+            return False
+        context = build_context(snap.jobs, snap.results)
+        registry = await self._retry(self.deps.registry.snapshot)
+        outcome = await self._until_release(
+            self.deps.planner.replan(
+                snap.prompt, registry.advertised_capabilities(), context, self.deps.planner_config,
+                on_attempt=self._attempt_span("manager.replan"),
+            )
+        )
+        self._discard_if_lost("planner")
+        await self._check_release()
+        if not isinstance(outcome, PlanAccepted):
+            log.warning("replan_failed", outcome=type(outcome).__name__)
+            self._carry_usage.extend(outcome.usages)
+            return False
+        write = functools.partial(
+            self._store.replan,
+            kept=[s.job.job_id for s in context.succeeded],
+            failed=[f.job.job_id for f in context.failed],
+            previous_replans=self._replans,
+        )
+        result = await self._retry(write, self.lease, outcome.plan, (*self._carry_usage, *outcome.usages))
+        if result.status is StoreStatus.LEASE_LOST:
+            self._fail_code = LEASE_LOST_CODE
+            raise _Stop(DriverOutcome.LEASE_LOST)
+        if result.status is StoreStatus.REQUEST_TERMINAL:
+            self._fail_code = REQUEST_TERMINAL_CODE
+            await self.keeper.release()  # cancelled while replanning
+            raise _Stop(DriverOutcome.CANCELLED)
+        if not result.ok:
+            log.warning("replan_rejected", status=str(result.status), detail=result.detail)
+            self._carry_usage.extend(outcome.usages)
+            return False
+        self._carry_usage = []  # written with the plan
+        reloaded = await self._retry(self._load)
+        if reloaded is None:
+            await self.keeper.release()
+            raise _Stop(DriverOutcome.ABANDONED)
+        if reloaded.status is not RequestStatus.RUNNING:
+            await self._on_terminal(reloaded.status)
+        self._adopt(reloaded)
+        self._reload = False
+        self._finish = None
+        kept = {s.job.job_id for s in context.succeeded}
+        self._record_plan_committed(JobPlan(jobs=[job for job in outcome.plan.jobs if job.job_id not in kept]))
+        log.info("request_replanned", replans=self._replans, failed=len(context.failed), kept=len(kept))
+        await self._refresh_agents()
+        assert self._snap is not None
+        await self._start_events([], resume(self._snap, self._agents))
+        return True
+
     async def _finalize(self, finish: RunSummarizer | FinalizeFailed) -> DriverOutcome | None:
-        """Summarize (or not) and write the final status; ``None`` on REPLAY_PENDING."""
+        """Summarize (or not) and write the final status; ``None`` on REPLAY_PENDING or after a replan."""
         snap = self._snap
         assert snap is not None and snap.plan is not None
+        if await self._maybe_replan(finish):
+            return None  # the plan was replaced: back into the event loop, as after a Replay (Phase 6 Req 3.2)
         if isinstance(finish, FinalizeFailed):
             final = finish.final_result
             return await self._write_final(final, RequestStatus.FAILED,

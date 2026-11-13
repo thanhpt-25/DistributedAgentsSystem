@@ -59,6 +59,10 @@ class CheckFailure(StrEnum):
     JOB_COUNT_OUT_OF_RANGE = "job_count_out_of_range"
     UNADVERTISED_CAPABILITY = "unadvertised_capability"
     INVALID_OUTPUT_SCHEMA = "invalid_output_schema"  # Phase 6 Req 1.1
+    # The checks of a replacement plan (Phase 6 Req 3.3), run by ``das.plan.replan``.
+    KEEPS_SUCCEEDED = "keeps_succeeded"
+    FRESH_JOB_IDS = "fresh_job_ids"
+    NEW_JOB_REQUIRED = "new_job_required"
 
 
 @dataclass(frozen=True, slots=True)

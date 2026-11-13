@@ -63,6 +63,7 @@ class FakeWorker:
     status: str = "Succeeded"
     mode: str = "reply"  # reply | hold | requeue
     dispatches: list[JobDispatchMessage] = field(default_factory=list)
+    statuses: dict[str, str] = field(default_factory=dict)  # job_id -> status, overriding ``status`` for that Job
 
     async def start(self, caps=CAPS) -> None:
         await self.transport.start()
@@ -79,14 +80,15 @@ class FakeWorker:
             await self.transport.acknowledge(delivery, Outcome.REQUEUE)
             return
         p = msg.payload
+        status = self.statuses.get(p.job_id, self.status)
         result = JobResultPayload(
             request_id=p.request_id,
             job_id=p.job_id,
             attempt=p.attempt,
             worker_id=self.agent_id,
-            status=self.status,  # type: ignore[arg-type]
-            content=f"out-{p.job_id}" if self.status == "Succeeded" else "",
-            error=None if self.status == "Succeeded" else "boom",
+            status=status,  # type: ignore[arg-type]
+            content=f"out-{p.job_id}" if status == "Succeeded" else "",
+            error=None if status == "Succeeded" else "boom",
             usage=TokenUsage(input_tokens=2, output_tokens=3, total_tokens=5),
             duration_ms=1,
         )

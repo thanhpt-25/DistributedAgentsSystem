@@ -109,6 +109,7 @@ PHASE2_REQUEST_KEYS = {"token_usage", "estimated_cost", "replay_history"}
 #: Phase 4 Req 11.1: the only change for a client that sends nothing new.
 PHASE4_REQUEST_KEYS = {"budget", "webhook"}
 PHASE5_REQUEST_KEYS = {"priority"}  # das-multi-tenant Req 7.3
+PHASE6_REQUEST_KEYS = {"replans"}  # das-smarter-agents Req 3.6
 
 
 async def test_golden_v1_shapes_kept_with_default_config(state_store: StateStore) -> None:
@@ -145,8 +146,8 @@ async def test_golden_v1_shapes_kept_with_default_config(state_store: StateStore
     assert done.status_code == 200 and failed.status_code == 200
     assert_extends(V1_COMPLETED, shape(done.json()))
     assert_extends(V1_FAILED, shape(failed.json()))
-    # Phases 2, 4 and 5 only add fields (Req 9.13, 19.6; Phase 4 Req 11.1; Phase 5 Req 7.3).
-    added = PHASE2_REQUEST_KEYS | PHASE4_REQUEST_KEYS | PHASE5_REQUEST_KEYS
+    # Phases 2, 4, 5 and 6 only add fields (Req 9.13, 19.6; Phase 4 Req 11.1; Phase 5 Req 7.3; Phase 6 Req 3.6).
+    added = PHASE2_REQUEST_KEYS | PHASE4_REQUEST_KEYS | PHASE5_REQUEST_KEYS | PHASE6_REQUEST_KEYS
     assert set(done.json()) - set(V1_COMPLETED) == added
     assert set(failed.json()) - set(V1_FAILED) == added
     assert done.json()["budget"] is None and done.json()["webhook"] is None

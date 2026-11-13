@@ -203,6 +203,7 @@ def request_view(
         "request_id": snap.request_id,
         "status": snap.status.value,
         "priority": snap.priority,  # Phase 5 Req 7.3: ``normal`` when none is stored
+        "replans": snap.replans,  # Phase 6 Req 3.6: 0 for a Request never replanned
         "jobs": [{"job_id": jid, "state": rec.state.value} for jid, rec in snap.jobs.items()],
         "transitions": _transition_views(snap),
     }

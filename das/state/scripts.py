@@ -12,6 +12,7 @@ SCRIPT_NAMES: Final = (
     "renew_lease",
     "release_lease",
     "commit_plan",
+    "replan",
     "apply_transition",
     "finalize",
     "cancel_request",

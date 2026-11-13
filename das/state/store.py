@@ -20,7 +20,7 @@ from enum import StrEnum
 from typing import Any, Final, Literal
 
 from das.client.budget import Budget, budget_status, budget_view
-from das.client.events import planned_event_data
+from das.client.events import planned_event_data, replanned_event_data
 from das.models import (
     TERMINAL_JOB,
     TERMINAL_REQUEST,
@@ -449,6 +449,8 @@ class StoredRequest:
     # Phase 5 fields (absent on Requests written before: tenant ``default``, priority ``normal``).
     tenant: str = keys.DEFAULT_TENANT
     priority: Literal["normal", "high"] = "normal"
+    # Phase 6 field (Req 3.4, 3.6): how often the plan was replaced; absent on a Request never replanned.
+    replans: int = 0
 
 
 def _s(value: Any) -> str:
@@ -921,6 +923,42 @@ class StateStore:
         for job in plan.jobs:
             args += [job.job_id, JobRecord(job=job, state=JobState.WAITING).model_dump_json()]
         reply = await self._run("commit_plan", commit_plan_keys(rid), args)
+        return _write_result(reply)
+
+    async def replan(
+        self,
+        lease: Lease,
+        plan: JobPlan,
+        usage: Sequence[UsageRecord] = (),
+        *,
+        kept: Sequence[str],
+        failed: Sequence[str],
+        previous_replans: int,
+    ) -> WriteResult:
+        """Replace the unfinished part of a Running Request's plan atomically (Phase 6 Req 3.4).
+
+        ``plan`` lists every Job: the Succeeded ones in ``kept`` stay as they are, every other stored Job (they must
+        all be Failed or Skipped, in ``failed``) leaves the plan, and the rest of ``plan`` is written Waiting.
+        ``previous_replans`` is the count the caller read; the script refuses a different stored count. The
+        planning ``usage`` and a ``request.replanned`` Event are written in the same script. Nothing is written
+        unless the answer is OK: LEASE_LOST, REQUEST_TERMINAL, or INVALID_STATE with the reason in ``detail``.
+        """
+        rid = lease.request_id
+        kept_ids = set(kept)
+        new_jobs = [job for job in plan.jobs if job.job_id not in kept_ids]
+        event = replanned_event_data(previous_replans + 1, failed, [job.job_id for job in new_jobs])
+        args: list[Any] = [
+            rid,
+            lease.owner,
+            lease.epoch,
+            plan.model_dump_json(),
+            _usage_array(usage),
+            json.dumps(event, ensure_ascii=False),
+            previous_replans,
+        ]
+        for job in new_jobs:
+            args += [job.job_id, JobRecord(job=job, state=JobState.WAITING).model_dump_json()]
+        reply = await self._run("replan", replan_keys(rid), args)
         return _write_result(reply)
 
     async def apply_transition(self, lease: Lease, batch: TransitionBatch) -> WriteResult:
@@ -1752,6 +1790,7 @@ class StateStore:
             last_event_id=last_event_id,
             tenant=req.get(keys.F_TENANT) or keys.DEFAULT_TENANT,
             priority="high" if req.get(keys.F_PRIORITY) == "high" else "normal",
+            replans=_opt_int(req.get(keys.F_REPLANS)) or 0,
         )
 
 
@@ -1801,6 +1840,11 @@ def commit_plan_keys(rid: str) -> list[str]:
         keys.requests_by_status(RequestStatus.PENDING.value),
         keys.requests_by_status(RequestStatus.RUNNING.value),
     ]
+
+
+def replan_keys(rid: str) -> list[str]:
+    """KEYS of ``replan.lua``."""
+    return [keys.request(rid), keys.lease(rid), keys.jobs(rid), keys.transitions(rid), keys.usage(rid)]
 
 
 def apply_transition_keys(rid: str, dead_letter_reverts: Sequence[str] = ()) -> list[str]:
@@ -1994,6 +2038,7 @@ __all__ = [
     "apply_transition_keys",
     "cancel_request_keys",
     "commit_plan_keys",
+    "replan_keys",
     "finalize_keys",
     "index_request_keys",
     "purge_request_keys",

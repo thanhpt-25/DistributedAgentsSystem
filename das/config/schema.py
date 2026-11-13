@@ -191,6 +191,9 @@ class LimitsConfig(_Section):
     max_backoff: float = Field(default=60, ge=1, le=600)
     capability_wait: float = Field(default=60, ge=1, le=3600)
     job_timeout: int = Field(default=300, ge=1, le=3600)
+    #: How often the Manager may replace the Jobs that failed with a new plan before failing the Request
+    #: (Phase 6 Req 3.1). 0 turns replanning off.
+    max_replans: int = Field(default=0, ge=0, le=3)
     max_message_bytes: int = Field(default=1_048_576, ge=1024, le=134_217_728)
     heartbeat_interval: float = Field(default=5, ge=1, le=60)
     shutdown_timeout: float = Field(default=30, ge=1, le=300)

@@ -130,11 +130,11 @@ async def test_submit_and_the_idempotent_replay_answer_as_in_phase_4(gw: httpx.A
     assert (other.status_code, other.json()) == (422, {"error": "idempotency_key_reused"})
 
 
-async def test_the_request_view_is_the_phase_4_one_plus_priority(gw: httpx.AsyncClient) -> None:
+async def test_the_request_view_is_the_phase_4_one_plus_priority_and_replans(gw: httpx.AsyncClient) -> None:
     rid = (await submit(gw)).json()["request_id"]
     body = (await gw.get(f"/v1/requests/{rid}", headers=AUTH)).json()
-    assert set(body) - {"priority"} == PHASE_4_VIEW
-    assert body["priority"] == "normal"  # the one added field
+    assert set(body) - {"priority", "replans"} == PHASE_4_VIEW  # Phase 5 added priority, Phase 6 added replans
+    assert body["priority"] == "normal" and body["replans"] == 0  # the added fields, at their defaults
     assert (body["status"], body["jobs"], body["budget"], body["webhook"]) == ("Pending", [], None, None)
 
 

@@ -38,7 +38,7 @@ USAGE = [
 
 def test_terminal_types_are_event_types() -> None:
     assert TERMINAL_EVENT_TYPES <= set(EVENT_TYPES)
-    assert len(EVENT_TYPES) == 7
+    assert len(EVENT_TYPES) == 8  # + request.replanned (Phase 6 Req 3.6)
 
 
 @pytest.mark.parametrize(

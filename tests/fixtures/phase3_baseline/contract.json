@@ -640,6 +640,13 @@
             "title": "Max Reconnect Interval",
             "type": "number"
           },
+          "max_replans": {
+            "default": 0,
+            "maximum": 3,
+            "minimum": 0,
+            "title": "Max Replans",
+            "type": "integer"
+          },
           "planning_retries": {
             "default": 2,
             "maximum": 5,
@@ -1484,6 +1491,7 @@
     "DAS__LIMITS__MAX_MESSAGE_BYTES",
     "DAS__LIMITS__MAX_PROMPT_LENGTH",
     "DAS__LIMITS__MAX_RECONNECT_INTERVAL",
+    "DAS__LIMITS__MAX_REPLANS",
     "DAS__LIMITS__PLANNING_RETRIES",
     "DAS__LIMITS__REQUEST_REPLY_TIMEOUT",
     "DAS__LIMITS__SHUTDOWN_TIMEOUT",

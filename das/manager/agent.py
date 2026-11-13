@@ -221,7 +221,9 @@ class ManagerSettings:
             heartbeat_interval=float(limits.heartbeat_interval),
             shutdown_timeout=float(limits.shutdown_timeout),
             planner_config=PlannerConfig(
-                max_jobs=int(limits.max_jobs), planning_retries=int(limits.planning_retries)
+                max_jobs=int(limits.max_jobs),
+                planning_retries=int(limits.planning_retries),
+                max_replans=int(limits.max_replans),  # Phase 6 Req 3.1
             ),
             machine_config=MachineConfig.from_limits(limits),
             queue_sample_interval=float(config.metrics.queue_sample_interval),

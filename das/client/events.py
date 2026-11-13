@@ -22,6 +22,7 @@ EventType = Literal[
     "request.planned",
     "job.transition",
     "request.reopened",
+    "request.replanned",
     "request.completed",
     "request.failed",
     "request.cancelled",
@@ -31,6 +32,7 @@ EVENT_TYPES: Final[tuple[EventType, ...]] = (
     "request.planned",
     "job.transition",
     "request.reopened",
+    "request.replanned",  # Phase 6 Req 3.6
     "request.completed",
     "request.failed",
     "request.cancelled",
@@ -66,6 +68,13 @@ def planned_event_data(plan: JobPlan) -> dict[str, Any]:
             for j in plan.jobs
         ]
     }
+
+
+def replanned_event_data(replans: int, failed_jobs: Sequence[str], new_jobs: Sequence[str]) -> dict[str, Any]:
+    """Phase 6 Req 3.6: how often the Request was replanned, the Jobs that were replaced and the Jobs that replace them.
+
+    Job_IDs only, as for ``request.planned``: never instructions or results."""
+    return {"replans": replans, "failed_jobs": list(failed_jobs), "new_jobs": list(new_jobs)}
 
 
 def transition_event_data(entry: TransitionEntry) -> dict[str, Any]:

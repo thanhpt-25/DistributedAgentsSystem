@@ -97,6 +97,8 @@ F_EVENTS_MAX_LEN: Final = "events_max_len"
 # Phase 5 fields of the request hash (das-multi-tenant Req 3.1, 7.3). Absent: tenant ``default``, priority ``normal``.
 F_TENANT: Final = "tenant"
 F_PRIORITY: Final = "priority"  # stored only when ``high``
+# Phase 6 field of the request hash (das-smarter-agents Req 3.4): how often the plan was replaced. Absent: 0.
+F_REPLANS: Final = "replans"
 
 #: The implicit tenant that owns every Request without a ``tenant`` field (Phase 5 Req 3.1).
 DEFAULT_TENANT: Final = "default"
@@ -133,6 +135,7 @@ RESERVED_REQUEST_FIELDS: Final = frozenset(
         F_EVENTS_MAX_LEN,
         F_TENANT,
         F_PRIORITY,
+        F_REPLANS,
     }
 )
 

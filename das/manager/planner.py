@@ -21,7 +21,8 @@ rejected (Phase 2 Req 9.1). The Manager persists them with the plan or the failu
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Protocol, Union
 
@@ -33,6 +34,7 @@ from das.models.plan import JobPlan
 from das.models.results import TokenUsage
 from das.models.usage import LLMOperation, UsageRecord
 from das.plan.codec import plan_json_schema_text
+from das.plan.replan import ReplanContext, job_definition, replan_issues
 from das.plan.validate import (
     MAX_MAX_JOBS,
     MIN_MAX_JOBS,
@@ -43,9 +45,14 @@ from das.plan.validate import (
 
 MIN_PLANNING_RETRIES: Final = 0
 MAX_PLANNING_RETRIES: Final = 5
+MIN_MAX_REPLANS: Final = 0
+MAX_MAX_REPLANS: Final = 3
 NO_CAPABILITIES_MESSAGE: Final = "no Worker_Agent Capabilities are available"
 #: ``error.type`` of a planning attempt (and Request) whose plan was rejected (Req 6.10).
 PLAN_REJECTED_CODE: Final = "PlanRejected"
+#: Characters of a Job result or error shown to the Planner when it replans (Phase 6 Req 3.3): enough to see what
+#: happened, bounded so a long result cannot fill the prompt.
+RESULT_EXCERPT_LIMIT: Final = 2048
 
 
 class CompletionClient(Protocol):
@@ -62,11 +69,14 @@ class PlannerConfig:
 
     max_jobs: int = 10
     planning_retries: int = 2
+    #: How often the Manager may replace the Jobs that failed with a new plan (Phase 6 Req 3.1); 0 is off.
+    max_replans: int = 0
 
     def __post_init__(self) -> None:
         for name, value, lo, hi in (
             ("max_jobs", self.max_jobs, MIN_MAX_JOBS, MAX_MAX_JOBS),
             ("planning_retries", self.planning_retries, MIN_PLANNING_RETRIES, MAX_PLANNING_RETRIES),
+            ("max_replans", self.max_replans, MIN_MAX_REPLANS, MAX_MAX_REPLANS),
         ):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{name} must be an int, got {type(value).__name__}")
@@ -194,6 +204,44 @@ def build_correction_prompt(
     )
 
 
+def _excerpt(text: str) -> str:
+    return text if len(text) <= RESULT_EXCERPT_LIMIT else text[:RESULT_EXCERPT_LIMIT] + "\n[truncated]"
+
+
+def build_replan_prompt(
+    prompt: str, capabilities: frozenset[str], max_jobs: int, context: ReplanContext
+) -> str:
+    """The first replanning message (Phase 6 Req 3.3): the Request, what succeeded and what failed, and the rules."""
+    caps = "\n".join(f"- {c}" for c in sorted(capabilities))
+    succeeded = "\n\n".join(
+        f"{json.dumps(job_definition(s.job), ensure_ascii=False)}\nResult:\n{_excerpt(s.result)}"
+        for s in context.succeeded
+    ) or "(none)"
+    failed = "\n\n".join(
+        f"job_id {json.dumps(f.job.job_id)}: {f.job.instruction}\n"
+        f"Capabilities: {', '.join(f.job.capabilities)}\n"
+        f"Error: {_excerpt(f.error or 'it did not run, because a job it depends on failed')}"
+        for f in context.failed
+    ) or "(none)"
+    return (
+        "The request below was planned and executed, but some jobs failed. "
+        "Produce a new Job_Plan that finishes the work.\n\n"
+        "Rules:\n"
+        "- Keep every succeeded job exactly as given below (same job_id, instruction, capabilities, depends_on "
+        "and output_schema) and list it once.\n"
+        "- Replace every failed job with new jobs. Give each new job a job_id that was not used before by any "
+        "job of this request, failed jobs included.\n"
+        "- Include at least one new job. New jobs may depend on succeeded jobs and on each other.\n"
+        f"- The whole plan, succeeded jobs included, must contain between 1 and {max_jobs} jobs.\n"
+        "- New jobs must require only capabilities from the advertised list below.\n\n"
+        f"Advertised capabilities:\n{caps}\n\n"
+        f"Succeeded jobs (keep exactly), with their results:\n{succeeded}\n\n"
+        f"Failed jobs (replace):\n{failed}\n\n"
+        f"Job_Plan JSON schema:\n{plan_json_schema_text()}\n\n"
+        f"Request:\n{prompt}"
+    )
+
+
 # --------------------------------------------------------------------------- planner
 
 
@@ -227,10 +275,49 @@ class Planner:
         advertised = frozenset(capabilities)
         if not advertised:
             return NoCapabilities()
+        return await self._converse(
+            build_planning_prompt(prompt, advertised, cfg.max_jobs), advertised, advertised, cfg, on_attempt, None
+        )
 
-        messages: list[ChatMessage] = [
-            ChatMessage("user", build_planning_prompt(prompt, advertised, cfg.max_jobs))
-        ]
+    async def replan(
+        self,
+        prompt: str,
+        capabilities: frozenset[str],
+        context: ReplanContext,
+        cfg: PlannerConfig,
+        *,
+        on_attempt: AttemptHook = no_attempt_hook,
+    ) -> PlanOutcome:
+        """Plan again after Jobs failed: keep every Succeeded Job exactly, replace the rest (Phase 6 Req 3.3).
+
+        The same attempts and correction loop as :meth:`plan`. A candidate must also pass
+        :func:`das.plan.replan.replan_issues`: it keeps each Succeeded Job unchanged, gives the new Jobs fresh ids and
+        advertised Capabilities, and has at least one new Job. The Capabilities of the Succeeded Jobs are accepted
+        as they are, even when no Worker advertises them any more.
+        """
+        advertised = frozenset(capabilities)
+        if not advertised:
+            return NoCapabilities()
+        return await self._converse(
+            build_replan_prompt(prompt, advertised, cfg.max_jobs, context),
+            advertised,
+            advertised | context.kept_capabilities,
+            cfg,
+            on_attempt,
+            lambda plan: replan_issues(plan, context, advertised),
+        )
+
+    async def _converse(
+        self,
+        first_message: str,
+        advertised: frozenset[str],
+        allowed: frozenset[str],
+        cfg: PlannerConfig,
+        on_attempt: AttemptHook,
+        extra_issues: Callable[[JobPlan], list[CheckIssue]] | None,
+    ) -> PlanOutcome:
+        """The attempts: ask, validate (``allowed`` Capabilities, then ``extra_issues``), correct, up to the limit."""
+        messages: list[ChatMessage] = [ChatMessage("user", first_message)]
         usage = TokenUsage.zero()
         usages: list[UsageRecord] = []
         issues: tuple[CheckIssue, ...] = ()
@@ -243,11 +330,15 @@ class Planner:
                     return PlanLLMFailed(exc, tuple(usages))
                 usage = _add_usage(usage, reply.usage)
                 usages.append(usage_record(self._llm, "plan", reply))
-                result = validate_plan_text(reply.content, advertised, cfg.max_jobs)
-                if result.plan is not None:
+                result = validate_plan_text(reply.content, allowed, cfg.max_jobs)
+                found = result.issues
+                if result.plan is not None and extra_issues is not None:
+                    found = tuple(extra_issues(result.plan))
+                if not found:
+                    assert result.plan is not None
                     return PlanAccepted(result.plan, attempt, usage, tuple(usages))
                 observer.fail(PLAN_REJECTED_CODE)
-            issues = result.issues
+            issues = found
             if attempt < cfg.max_attempts:
                 messages.append(ChatMessage("assistant", reply.content))
                 messages.append(
@@ -259,6 +350,7 @@ class Planner:
 __all__ = [
     "NO_CAPABILITIES_MESSAGE",
     "PLAN_REJECTED_CODE",
+    "RESULT_EXCERPT_LIMIT",
     "SYSTEM_PROMPT",
     "CompletionClient",
     "NoCapabilities",
@@ -270,5 +362,6 @@ __all__ = [
     "PlannerConfig",
     "build_correction_prompt",
     "build_planning_prompt",
+    "build_replan_prompt",
     "llm_failure_message",
 ]
