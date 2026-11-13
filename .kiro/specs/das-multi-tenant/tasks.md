@@ -197,7 +197,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - README: tenants and scopes (with the config example), the upgrade steps (upgrade every replica, wait for `das:tenant:index:ready`, then add `tenants`), usage reports and the "before the upgrade not included" note, priority as a weighting, idempotency per key and key rotation, the Kubernetes section and Kind_Job names for branch protection, and a "not in Phase 5" list (Redis HA, key-management API, per-tenant worker pools, per-tenant token metrics); `CLAUDE.md` e2e and chart lines; drift tests extended
     - _Requirements: 3.8, 6.7, 7.6, 9.3, 11.6, 12.2_
 
-- [ ] 14. Final checkpoint - Ensure all tests pass, ask the user if questions arise.
+- [x] 14. Final checkpoint - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
 

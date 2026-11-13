@@ -18,6 +18,7 @@ from das.clock import FakeClock
 from das.config.schema import TenantConfig
 from das.gateway.app import create_app
 from das.manager.retention import TenantIndexBackfill
+from das.models import RequestStatus
 from das.ops.keys import key_fingerprint
 from das.registry import AgentRegistry
 from das.state import IndexNotReady, StateStore, keys
@@ -130,8 +131,13 @@ async def test_writes_between_the_upgrade_and_the_backfill_end_up_in_the_right_i
     """The new release already writes tenant keys for every Request it handles (Req 9.1) while the backfill has not
     run; the backfill then reconciles (Req 9.2): each tenant index equals the global one it mirrors."""
     old = await phase_4_store(state_store)
-    victim = sorted(old)[0]
-    await state_store.cancel_request(victim, prices=None)  # an old Request, changed by the new scripts
+    # An old Request that can still be cancelled: Request ids are random, so "the first by id" could be a finished one.
+    open_ones = await state_store.list_requests(
+        tenant=None, statuses=[RequestStatus.PENDING, RequestStatus.RUNNING], limit=100
+    )
+    victim = open_ones.items[0].request_id
+    assert victim in old
+    assert (await state_store.cancel_request(victim, prices=None)).ok  # an old Request, changed by the new scripts
     fresh = await state_store.create_request("created after the upgrade, before the backfill")
     await upgrade(state_store)
 
