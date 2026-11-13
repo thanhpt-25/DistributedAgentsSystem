@@ -203,6 +203,39 @@ class LimitsConfig(_Section):
     startup_retry_interval: float = Field(default=2, ge=0.1, le=60)
 
 
+#: The built-in tools a Worker can enable (Phase 6 Req 5.3).
+ToolName = Literal["calculator", "http_fetch", "current_time"]
+#: A host name or IPv4 literal: letters, digits, dots and hyphens; no scheme, port, wildcard or path.
+HostName = Annotated[str, Field(pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")]
+
+
+class HttpFetchConfig(_Section):
+    """``http_fetch``: GET only, https only, the allowed hosts only (Phase 6 Req 5.9)."""
+
+    allowed_hosts: Annotated[list[HostName], BeforeValidator(_split_csv), Field(max_length=50)] = Field(
+        default_factory=list
+    )
+    allow_http: bool = False
+    timeout: float = Field(default=10, ge=1, le=60)
+    max_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
+
+
+class ToolsConfig(_Section):
+    """The tools a Worker lets the model call (Phase 6 Req 5.3). Nothing is enabled by default."""
+
+    enabled: Annotated[list[ToolName], BeforeValidator(_split_csv), Field(max_length=3)] = Field(default_factory=list)
+    max_rounds: int = Field(default=4, ge=1, le=10)
+    max_result_bytes: int = Field(default=16_384, ge=256, le=262_144)
+    http_fetch: HttpFetchConfig = Field(default_factory=HttpFetchConfig)
+
+    @field_validator("enabled")
+    @classmethod
+    def _unique(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("must not list a tool twice")
+        return v
+
+
 class WorkerConfig(_Section):
     capabilities: Annotated[
         list[Capability], BeforeValidator(_split_csv), Field(min_length=1, max_length=50)
@@ -559,6 +592,8 @@ class AgentConfig(_Section):
     llm: LLMConfig | None = None
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     worker: WorkerConfig | None = None
+    #: Phase 6 Req 5.3: the tools a Worker enables; the default enables none.
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     tracing: TracingConfig = Field(default_factory=TracingConfig)
     #: ``None`` means no Price_Table (Req 10.7).
@@ -697,6 +732,21 @@ def cross_field_errors(data: Mapping[str, Any]) -> list[FieldError]:
                         "api_keys",
                         "at least 1 API key required for role gateway "
                         "(set DAS__API_KEYS or the secrets file)",
+                    )
+                )
+
+    # Tools (Phase 6 Req 5.3, 5.9): only a Worker enables them, and http_fetch needs an allow-list.
+    enabled = _valid(ToolsConfig, "enabled", _lookup(data, "tools.enabled"))
+    if enabled is not _MISSING and enabled:
+        if role is not _MISSING and role != "worker":
+            errors.append(FieldError("tools.enabled", "tools can only be enabled for role worker"))
+        if "http_fetch" in enabled:
+            hosts = _valid(HttpFetchConfig, "allowed_hosts", _lookup(data, "tools.http_fetch.allowed_hosts"))
+            if hosts is not _MISSING and not hosts:
+                errors.append(
+                    FieldError(
+                        "tools.http_fetch.allowed_hosts",
+                        "at least 1 host required to enable http_fetch (it fetches only from allowed hosts)",
                     )
                 )
 

@@ -361,6 +361,42 @@
         "title": "GrpcConfig",
         "type": "object"
       },
+      "HttpFetchConfig": {
+        "additionalProperties": false,
+        "description": "``http_fetch``: GET only, https only, the allowed hosts only (Phase 6 Req 5.9).",
+        "properties": {
+          "allow_http": {
+            "default": false,
+            "title": "Allow Http",
+            "type": "boolean"
+          },
+          "allowed_hosts": {
+            "items": {
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Allowed Hosts",
+            "type": "array"
+          },
+          "max_bytes": {
+            "default": 1048576,
+            "maximum": 10485760,
+            "minimum": 1024,
+            "title": "Max Bytes",
+            "type": "integer"
+          },
+          "timeout": {
+            "default": 10,
+            "maximum": 60,
+            "minimum": 1,
+            "title": "Timeout",
+            "type": "number"
+          }
+        },
+        "title": "HttpFetchConfig",
+        "type": "object"
+      },
       "LLMConfig": {
         "additionalProperties": false,
         "properties": {
@@ -1061,6 +1097,44 @@
         "title": "TenantSettings",
         "type": "object"
       },
+      "ToolsConfig": {
+        "additionalProperties": false,
+        "description": "The tools a Worker lets the model call (Phase 6 Req 5.3). Nothing is enabled by default.",
+        "properties": {
+          "enabled": {
+            "items": {
+              "enum": [
+                "calculator",
+                "http_fetch",
+                "current_time"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Enabled",
+            "type": "array"
+          },
+          "http_fetch": {
+            "$ref": "#/$defs/HttpFetchConfig"
+          },
+          "max_result_bytes": {
+            "default": 16384,
+            "maximum": 262144,
+            "minimum": 256,
+            "title": "Max Result Bytes",
+            "type": "integer"
+          },
+          "max_rounds": {
+            "default": 4,
+            "maximum": 10,
+            "minimum": 1,
+            "title": "Max Rounds",
+            "type": "integer"
+          }
+        },
+        "title": "ToolsConfig",
+        "type": "object"
+      },
       "TracingConfig": {
         "additionalProperties": false,
         "description": "OpenTelemetry tracing (Req 8.1). ``otlp_endpoint`` is checked in :func:`cross_field_errors`.",
@@ -1402,6 +1476,9 @@
         "title": "Tenants",
         "type": "array"
       },
+      "tools": {
+        "$ref": "#/$defs/ToolsConfig"
+      },
       "tracing": {
         "$ref": "#/$defs/TracingConfig"
       },
@@ -1535,6 +1612,13 @@
     "DAS__ROLE",
     "DAS__SECRETS_FILE",
     "DAS__TENANTS",
+    "DAS__TOOLS__ENABLED",
+    "DAS__TOOLS__HTTP_FETCH__ALLOWED_HOSTS",
+    "DAS__TOOLS__HTTP_FETCH__ALLOW_HTTP",
+    "DAS__TOOLS__HTTP_FETCH__MAX_BYTES",
+    "DAS__TOOLS__HTTP_FETCH__TIMEOUT",
+    "DAS__TOOLS__MAX_RESULT_BYTES",
+    "DAS__TOOLS__MAX_ROUNDS",
     "DAS__TRACING__ENABLED",
     "DAS__TRACING__MAX_QUEUE_SIZE",
     "DAS__TRACING__OTLP_ENDPOINT",

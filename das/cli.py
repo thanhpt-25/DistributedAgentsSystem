@@ -68,6 +68,9 @@ from das.transport.loader import EntryPointSource, load_transport
 
 log = get_logger("das.cli")
 
+#: The most Capabilities a Worker may declare (mirrors ``das.worker.worker.MAX_CAPABILITIES``).
+MAX_WORKER_CAPABILITIES: Final = 50
+
 #: Exit code after Ctrl-C during startup (conventional 128 + SIGINT).
 EXIT_INTERRUPTED: Final = 130
 #: Agent ID used in log lines emitted before the config is loaded.
@@ -434,6 +437,31 @@ def _job_executor(llm: Any, agent_id: str, job_timeout: float, llm_config: Any) 
     return JobExecutor(llm, agent_id, job_timeout=job_timeout, capability_models=models)
 
 
+def _worker_tools(tools_config: Any, llm: Any, clock: Clock) -> Any:
+    """The Worker's tool registry; with a tool enabled, a provider that cannot call tools is refused (Req 5.1)."""
+    from das.tools.registry import build_registry, refuse_unsupported_provider
+
+    registry = build_registry(tools_config, clock)
+    refuse_unsupported_provider(registry, llm)
+    return registry
+
+
+def _worker_capabilities(own: Sequence[str], registry: Any) -> frozenset[str]:
+    """The Worker's Capabilities and a ``tool-<name>`` one per enabled tool (Phase 6 Req 5.4), at most 50 in all."""
+    capabilities = frozenset(own) | registry.capabilities
+    if len(capabilities) > MAX_WORKER_CAPABILITIES:
+        raise ConfigError(
+            [
+                FieldError(
+                    "worker.capabilities",
+                    f"at most {MAX_WORKER_CAPABILITIES} capabilities including one per enabled tool "
+                    f"(this worker has {len(capabilities)})",
+                )
+            ]
+        )
+    return capabilities
+
+
 def _attach_worker_llm_observability(
     llm: Any, metrics: Any, tracer: Any, price_table: Any
 ) -> None:
@@ -623,10 +651,11 @@ async def run_agent(
 
             assert config.worker is not None and config.grpc is not None
             assert llm is not None  # built above for every non-gateway role
+            tool_registry = _worker_tools(config.tools, llm, ops_clock)
             settings = WorkerSettings(
                 agent_id=agent_id,
                 host=config.host,
-                capabilities=frozenset(config.worker.capabilities),
+                capabilities=_worker_capabilities(config.worker.capabilities, tool_registry),
                 concurrency_limit=config.worker.concurrency_limit,
                 heartbeat_interval=limits.heartbeat_interval,
                 shutdown_timeout=limits.shutdown_timeout,

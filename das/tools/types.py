@@ -14,6 +14,11 @@ from das.llm.base import ChatMessage
 from das.models.results import TokenUsage
 
 
+class ToolError(Exception):
+    """A tool could not do what it was asked. The text is what the model reads as the tool's answer (Req 5.7), so it
+    says what was wrong in a few words and never repeats what the model sent."""
+
+
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
     """A tool offered to the model: its name, what it does, and a JSON Schema object for its arguments."""
@@ -81,4 +86,6 @@ class ToolTurn:
         return AssistantTurn(self.text, self.calls)
 
 
-__all__ = ["AssistantTurn", "ToolCall", "ToolResult", "ToolResults", "ToolSpec", "ToolTurn", "Turn"]
+__all__ = [
+    "AssistantTurn", "ToolCall", "ToolError", "ToolResult", "ToolResults", "ToolSpec", "ToolTurn", "Turn",
+]
