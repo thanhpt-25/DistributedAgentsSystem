@@ -24,6 +24,7 @@ dependencies = [
     "opentelemetry-sdk==1.45.1",
     "opentelemetry-exporter-otlp-proto-grpc==1.45.1",
     "opentelemetry-exporter-otlp-proto-http==1.45.1",
+    "jsonschema==4.26.0",
 ]
 
 [project.scripts]
@@ -56,6 +57,7 @@ dev = [
     # Phase 4 Client_Package, for the contract test and Property 8 (Req 9.10). A path source, not a workspace
     # member: the client supports Python 3.10 to 3.13 and a member would pin it to this project's 3.12.
     "das-client",
+    "types-jsonschema==4.26.0.20261006",
 ]
 
 [tool.uv.sources]

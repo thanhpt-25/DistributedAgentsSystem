@@ -56,6 +56,13 @@ PLAN_JSON_SCHEMA: Final[dict[str, Any]] = {
                         "items": {"type": "string"},
                         "default": [],
                     },
+                    "output_schema": {
+                        "type": "object",
+                        "description": (
+                            "Optional JSON Schema (draft 2020-12, at most 16 KiB, no remote $ref). When present, "
+                            "the job's result must be JSON that matches it."
+                        ),
+                    },
                 },
             },
         }
@@ -144,6 +151,7 @@ def print_plan(plan: JobPlan) -> str:
                 "instruction": job.instruction,
                 "capabilities": list(job.capabilities),
                 "depends_on": list(job.depends_on),
+                **({"output_schema": job.output_schema} if job.output_schema is not None else {}),
             }
             for job in plan.jobs
         ]

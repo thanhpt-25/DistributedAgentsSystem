@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from das.models.base import DasModel
+from das.models.base import DasModel, WithOutputSchema
 from das.models.job import JobState
 
 
@@ -37,8 +37,10 @@ class JobResultPayload(DasModel):
     duration_ms: int = Field(ge=0)
 
 
-class JobDispatchPayload(DasModel):
-    """Job dispatch sent by a Manager; ``dependency_results`` maps dep Job_ID to content."""
+class JobDispatchPayload(WithOutputSchema):
+    """Job dispatch sent by a Manager; ``dependency_results`` maps dep Job_ID to content.
+
+    ``output_schema`` (Phase 6 Req 1.3) is present only for a Structured_Job."""
 
     request_id: str = Field(min_length=1)
     job_id: str = Field(min_length=1)

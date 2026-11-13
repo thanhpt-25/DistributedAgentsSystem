@@ -39,7 +39,9 @@ from tests.unit.test_rabbitmq_transport import FakeBroker, heartbeat
 from tests.unit.test_state_phase2_dlq import fields
 
 DL = "b" * 32
-PAYLOAD_FIELDS = set(JobDispatchPayload.model_fields)
+#: The dispatch's fields as Phase 5 shipped them. ``output_schema`` (Phase 6 Req 1.3) is on the wire only for a
+#: Structured_Job, and these Requests have none; the point here is that no priority field was ever added.
+PAYLOAD_FIELDS = set(JobDispatchPayload.model_fields) - {"output_schema"}
 #: Req 7.5, stated here and not read from the adapter: 5 to 9 are the "high" class of a RabbitMQ quorum queue, and 9 is
 #: the one the adapter sets (spike G0a).
 AMQP_HIGH = 9

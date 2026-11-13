@@ -5,11 +5,11 @@ fault-injection pass. One commit per wave.
 
 ## Tasks
 
-- [ ] 1. Structured output (Wave 1)
-  - [ ] 1.1 Add `jsonschema` (pinned) and `das/structured/` (`check_schema`, `parse_and_validate`, canonical JSON) with unit tests (Req 1.1, 1.4, 1.7, 1.8)
-  - [ ] 1.2 `output_schema` on `PlannedJob` and `JobDispatchPayload`; the codec omits it when unset; the check `invalid_output_schema` in plan validation; the Planner prompt (Req 1.1 to 1.3)
-  - [ ] 1.3 The executor's validation and single corrective completion, usage summed, `output_schema_violation` (Req 1.5, 1.6)
-  - [ ] 1.4 Property 1: validation agrees with `jsonschema` (Req 8.1)
+- [x] 1. Structured output (Wave 1)
+  - [x] 1.1 Add `jsonschema` (pinned) and `das/structured/` (`check_schema`, `parse_and_validate`, canonical JSON) with unit tests (Req 1.1, 1.4, 1.7, 1.8)
+  - [x] 1.2 `output_schema` on `PlannedJob` and `JobDispatchPayload`; the codec omits it when unset; the check `invalid_output_schema` in plan validation; the Planner prompt (Req 1.1 to 1.3)
+  - [x] 1.3 The executor's validation and single corrective completion, usage summed, `output_schema_violation` (Req 1.5, 1.6)
+  - [x] 1.4 Property 1: validation agrees with `jsonschema` (Req 8.1)
 - [ ] 2. Models and fallback (Wave 2)
   - [ ] 2.1 `AuthLLMError`; `error_for_status` returns it for 401 and 403 (Req 2.4)
   - [ ] 2.2 `capability_models`, `fallback_model` in `LLMConfig`, with range checks (Req 2.1, 2.8)

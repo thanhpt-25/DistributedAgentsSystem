@@ -39,6 +39,7 @@ from das.plan.codec import (
     load_plan_json,
     parse_plan_obj,
 )
+from das.structured.schema import check_schema
 
 MIN_MAX_JOBS: Final = 1
 MAX_MAX_JOBS: Final = 100
@@ -57,6 +58,7 @@ class CheckFailure(StrEnum):
     CYCLE = "cycle"
     JOB_COUNT_OUT_OF_RANGE = "job_count_out_of_range"
     UNADVERTISED_CAPABILITY = "unadvertised_capability"
+    INVALID_OUTPUT_SCHEMA = "invalid_output_schema"  # Phase 6 Req 1.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +219,12 @@ def _structural_issues(obj: Any, advertised: frozenset[str], max_jobs: int) -> l
                 issues.append(
                     CheckIssue(CheckFailure.EMPTY_INSTRUCTION, f"job {label} has a blank instruction", jid)
                 )
+
+        schema = job.get("output_schema")
+        if schema is not None:  # Phase 6 Req 1.1: absent and null both mean "no structured output"
+            reason = check_schema(schema)
+            if reason is not None:
+                issues.append(CheckIssue(CheckFailure.INVALID_OUTPUT_SCHEMA, f"job {label}: {reason}", jid))
 
         for cap in _str_list(job.get("capabilities")):
             if cap not in advertised:

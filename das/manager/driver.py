@@ -923,6 +923,7 @@ class RequestDriver:
             instruction=record.job.instruction,
             required_capabilities=list(record.job.capabilities),
             dependency_results=deps,
+            output_schema=record.job.output_schema,  # a dead letter is a faithful copy of the dispatch
         )
         headers = {
             DLQ_REQUEST_ID_HEADER: self.rid,

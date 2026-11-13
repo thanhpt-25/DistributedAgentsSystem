@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from das.models.base import DasModel
+from das.models.base import DasModel, WithOutputSchema
 
 JOB_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 MAX_INSTRUCTION_LENGTH = 8000
 
 
-class PlannedJob(DasModel):
-    """One Job of a Job_Plan. ``capabilities`` and ``depends_on`` are compared as sets."""
+class PlannedJob(WithOutputSchema):
+    """One Job of a Job_Plan. ``capabilities`` and ``depends_on`` are compared as sets.
+
+    ``output_schema`` (Phase 6) is validated by ``das.plan.validate``, not here: the model only carries it."""
 
     job_id: str = Field(pattern=JOB_ID_PATTERN)
     instruction: str = Field(min_length=1, max_length=MAX_INSTRUCTION_LENGTH)

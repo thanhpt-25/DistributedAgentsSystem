@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Any, Final
 
 from das.client.budget import Budget, ExceededKind, budget_status
 from das.manager.backoff import backoff
@@ -318,6 +318,7 @@ class PublishDispatch:
     instruction: str
     required_capabilities: tuple[str, ...]
     dependency_results: Mapping[str, str]  # dep Job_ID -> content
+    output_schema: dict[str, Any] | None = None  # Phase 6 Req 1.3: only a Structured_Job has one
 
     @property
     def destination(self) -> str:
@@ -331,6 +332,7 @@ class PublishDispatch:
             instruction=self.instruction,
             required_capabilities=list(self.required_capabilities),
             dependency_results=dict(self.dependency_results),
+            output_schema=self.output_schema,
         )
 
 
@@ -667,6 +669,7 @@ def _dispatch_effect(
         instruction=record.job.instruction,
         required_capabilities=tuple(record.job.capabilities),
         dependency_results=_dependency_inputs(record, jobs, results),
+        output_schema=record.job.output_schema,
     )
 
 
