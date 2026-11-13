@@ -164,6 +164,14 @@ class Cluster:
         arch = {"x86_64": "amd64", "amd64": "amd64", "arm64": "arm64", "aarch64": "arm64"}.get(
             platform.machine().lower(), "amd64"
         )
+        if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0:
+            # The DAS images are built before the tests, but the infrastructure images come from a registry: a
+            # developer machine has them from earlier Compose runs, a clean CI runner has never pulled them.
+            pulled = subprocess.run(
+                ["docker", "pull", "--platform", f"linux/{arch}", image], capture_output=True, text=True
+            )
+            if pulled.returncode != 0:
+                raise ClusterError(f"docker pull {image} failed ({pulled.returncode}): {pulled.stderr[-600:]}")
         archive = workdir / (image.replace("/", "_").replace(":", "_") + ".tar")
         saved = subprocess.run(
             ["docker", "save", "--platform", f"linux/{arch}", "-o", str(archive), image], capture_output=True
