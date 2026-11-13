@@ -411,6 +411,14 @@ async def _start_ops_server(server: Any, port: int) -> None:
     log.info("ops server listening", port=server.port)
 
 
+def _job_executor(llm: Any, agent_id: str, job_timeout: float, llm_config: Any) -> Any:
+    """The Worker's JobExecutor, with the Capability_Models of ``llm.capability_models`` (Phase 6 Req 2.2)."""
+    from das.worker.executor import JobExecutor
+
+    models = llm_config.capability_models if llm_config is not None else None
+    return JobExecutor(llm, agent_id, job_timeout=job_timeout, capability_models=models)
+
+
 def _attach_worker_llm_observability(
     llm: Any, metrics: Any, tracer: Any, price_table: Any
 ) -> None:
@@ -596,7 +604,6 @@ async def run_agent(
                 supervisor=supervisor,
             )
         else:
-            from das.worker.executor import JobExecutor
             from das.worker.worker import Worker, WorkerSettings
 
             assert config.worker is not None and config.grpc is not None
@@ -612,7 +619,7 @@ async def run_agent(
             )
             worker_metrics = WorkerMetrics(recorder)
             _attach_worker_llm_observability(llm, worker_metrics, tracer, price_table)
-            executor = JobExecutor(llm, settings.agent_id, job_timeout=limits.job_timeout)
+            executor = _job_executor(llm, settings.agent_id, limits.job_timeout, config.llm)
             agent = Worker(
                 settings,
                 queue=queue,

@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from typing import Literal, Protocol, runtime_checkable
 
 from das.clock import Clock, SystemClock
 from das.llm.base import ROLES, ChatMessage, Completion, ModelParams, ProviderAdapter
 from das.llm.errors import (
+    AuthLLMError,
     LLMCallFailed,
     LLMInputError,
     PermanentLLMError,
@@ -40,7 +42,14 @@ LLMOutcome = Literal["success", "rate_limited", "transient_error", "timeout", "n
 
 @runtime_checkable
 class LLMCallObserver(Protocol):
-    """Hears about LLM call progress; implemented by ``LLMMetricsObserver`` (Req 4)."""
+    """Hears about LLM call progress; implemented by ``LLMMetricsObserver`` (Req 4).
+
+    Phase 6: a call may run on another model than the provider's own (a Capability_Model, or the Fallback_Model).
+    The provider then passes that model as the keyword ``model`` to ``on_retry_scheduled`` and ``on_finished``; it
+    passes nothing when the provider's own model is used, so an observer written before Phase 6 keeps working. An
+    observer may also implement ``on_fallback(operation, model)``, called with the model that failed (Req 2.6); the
+    provider looks it up with ``getattr``, so it is optional and is not part of this protocol.
+    """
 
     def on_retry_scheduled(self, operation: LLMOperation) -> None:
         """Called once per retry, right before the backoff sleep (Req 4.3)."""
@@ -126,7 +135,10 @@ class LLMProvider:
         clock: Clock | None = None,
         observer: LLMCallObserver | None = None,
         tracer: Tracer | None = None,
+        fallback_model: str | None = None,
     ) -> None:
+        if fallback_model is not None and not fallback_model.strip():
+            raise LLMInputError("fallback_model must not be empty")
         if not (MIN_RETRY_COUNT <= retry_count <= MAX_RETRY_COUNT):
             raise LLMInputError(
                 f"retry_count {retry_count} outside allowed range {MIN_RETRY_COUNT}-{MAX_RETRY_COUNT}"
@@ -144,10 +156,15 @@ class LLMProvider:
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._observer = observer
         self._tracer: Tracer = tracer if tracer is not None else NoopTracer()
+        self._fallback_model = fallback_model.strip() if fallback_model is not None else None
 
     @property
     def provider(self) -> str:
         return self._adapter.provider
+
+    @property
+    def fallback_model(self) -> str | None:
+        return self._fallback_model
 
     @property
     def params(self) -> ModelParams:
@@ -181,9 +198,19 @@ class LLMProvider:
         self._tracer = tracer if tracer is not None else NoopTracer()
 
     async def complete(
-        self, system: str, messages: Sequence[ChatMessage], *, operation: LLMOperation
+        self,
+        system: str,
+        messages: Sequence[ChatMessage],
+        *,
+        operation: LLMOperation,
+        model: str | None = None,
     ) -> Completion:
         """Run one completion, retrying transient failures up to ``retry_count`` times.
+
+        ``model`` runs this one call on another model than the provider's own (Phase 6 Req 2.2). After a
+        permanent error that is not an authentication error, a configured Fallback_Model gets exactly one
+        further call, when it differs from the model that failed (Req 2.3, 2.4). The Completion's ``model`` names
+        the model that answered unless it is the provider's own (Req 2.5).
 
         Raises :class:`LLMInputError` for invalid arguments (no call is made or
         observed) and :class:`LLMCallFailed` on a permanent error or exhausted
@@ -192,9 +219,23 @@ class LLMProvider:
         """
         _validate_messages(messages)
         msgs = tuple(messages)
+        used = self._params if model is None else replace(self._params, model=model)
+        try:
+            return await self._attempt(system, msgs, used, operation)
+        except LLMCallFailed as failure:
+            fallback = self._fallback_model
+            if fallback is None or not failure.permanent or failure.auth or fallback == used.model:
+                raise
+            self._notify_fallback(operation, used.model)
+            return await self._attempt(system, msgs, replace(self._params, model=fallback), operation)
+
+    async def _attempt(
+        self, system: str, msgs: tuple[ChatMessage, ...], params: ModelParams, operation: LLMOperation
+    ) -> Completion:
+        """One model's turn: the call and its transient retries (the Phase 2 loop, bound to ``params``)."""
         attrs = {
             "llm.provider": self._adapter.provider,
-            "llm.model": self._params.model,
+            "llm.model": params.model,
             "llm.operation": operation,
         }
         with self._tracer.span("llm.completion", attributes=attrs) as span:
@@ -205,15 +246,18 @@ class LLMProvider:
                 try:
                     async with asyncio.timeout(self._timeout):
                         completion = await self._adapter.complete_once(
-                            system, msgs, self._params, self._timeout
+                            system, msgs, params, self._timeout
                         )
                     if not isinstance(completion, Completion):
                         raise PermanentLLMError(
                             f"adapter returned {type(completion).__name__}, expected Completion"
                         )
                 except PermanentLLMError as exc:
-                    self._finish(operation, classify_outcome(exc), start, None)
-                    raise self._failed(str(exc) or type(exc).__name__, attempts) from exc
+                    self._finish(operation, classify_outcome(exc), start, None, params)
+                    raise self._failed(
+                        str(exc) or type(exc).__name__, attempts, params,
+                        permanent=True, auth=isinstance(exc, AuthLLMError),
+                    ) from exc
                 except TimeoutError as exc:
                     reason = f"timeout after {self._timeout:g}s"
                     cause: BaseException = exc
@@ -224,28 +268,28 @@ class LLMProvider:
                     raise
                 except Exception:
                     # Unexpected adapter failure: still one finished, non-retried call.
-                    self._finish(operation, "non_transient_error", start, None)
+                    self._finish(operation, "non_transient_error", start, None, params)
                     raise
                 else:
-                    return self._succeeded(operation, completion, start, span)
+                    return self._succeeded(operation, completion, start, span, params)
                 if attempts > self._retry_count:
-                    self._finish(operation, classify_outcome(cause), start, None)
-                    raise self._failed(reason, attempts) from cause
+                    self._finish(operation, classify_outcome(cause), start, None, params)
+                    raise self._failed(reason, attempts, params) from cause
                 span.add_event(
                     "retry", {"das.attempt": attempts, "error.type": type(cause).__name__}
                 )
-                self._notify_retry(operation)
+                self._notify_retry(operation, params)
                 await self._sleep(retry_delay(attempts))
 
     def _succeeded(
-        self, operation: LLMOperation, completion: Completion, start: float, span: SpanHandle
+        self, operation: LLMOperation, completion: Completion, start: float, span: SpanHandle, params: ModelParams
     ) -> Completion:
         if completion.usage_problems:
             log.warning(
                 "llm_usage_invalid",
                 operation=operation,
                 provider=self._adapter.provider,
-                model=self._params.model,
+                model=params.model,
                 fields=list(completion.usage_problems),
             )
         usage = completion.usage if completion.usage_reported else None
@@ -253,30 +297,54 @@ class LLMProvider:
             span.set_attributes(
                 {"llm.input_tokens": usage.input_tokens, "llm.output_tokens": usage.output_tokens}
             )
-        self._finish(operation, "success", start, usage)
+        self._finish(operation, "success", start, usage, params)
+        if params.model != self._params.model:  # Req 2.5: say which model answered, unless it is the usual one
+            return replace(completion, model=params.model)
         return completion
 
-    def _notify_retry(self, operation: LLMOperation) -> None:
+    def _observer_model(self, params: ModelParams) -> dict[str, str]:
+        """The ``model`` keyword for an observer, only when this call is not on the provider's own model."""
+        return {} if params.model == self._params.model else {"model": params.model}
+
+    def _notify_retry(self, operation: LLMOperation, params: ModelParams) -> None:
         if self._observer is None:
             return
         try:
-            self._observer.on_retry_scheduled(operation)
+            self._observer.on_retry_scheduled(operation, **self._observer_model(params))
         except Exception:  # observers must never break the call
             log.warning("llm_observer_failed", hook="on_retry_scheduled", exc_info=True)
 
+    def _notify_fallback(self, operation: LLMOperation, failed_model: str) -> None:
+        hook = getattr(self._observer, "on_fallback", None)
+        if hook is None:
+            return
+        try:
+            hook(operation, failed_model)
+        except Exception:  # observers must never break the call
+            log.warning("llm_observer_failed", hook="on_fallback", exc_info=True)
+
     def _finish(
-        self, operation: LLMOperation, outcome: LLMOutcome, start: float, usage: TokenUsage | None
+        self,
+        operation: LLMOperation,
+        outcome: LLMOutcome,
+        start: float,
+        usage: TokenUsage | None,
+        params: ModelParams,
     ) -> None:
         if self._observer is None:
             return
         duration = max(0.0, self._clock.monotonic() - start)
         try:
-            self._observer.on_finished(operation, outcome, duration, usage)
+            self._observer.on_finished(operation, outcome, duration, usage, **self._observer_model(params))
         except Exception:  # observers must never break the call
             log.warning("llm_observer_failed", hook="on_finished", exc_info=True)
 
-    def _failed(self, reason: str, attempts: int) -> LLMCallFailed:
-        return LLMCallFailed(self._adapter.provider, self._params.model, reason, attempts)
+    def _failed(
+        self, reason: str, attempts: int, params: ModelParams, *, permanent: bool = False, auth: bool = False
+    ) -> LLMCallFailed:
+        return LLMCallFailed(
+            self._adapter.provider, params.model, reason, attempts, permanent=permanent, auth=auth
+        )
 
 
 __all__ = [

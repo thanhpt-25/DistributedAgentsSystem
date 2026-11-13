@@ -86,7 +86,8 @@ def build_llm_provider(config: AgentConfig | LLMConfig) -> LLMProvider:
         max_output_tokens=cfg.max_output_tokens,
     )
     return LLMProvider(
-        build_adapter(cfg), params, retry_count=cfg.retry_count, timeout=cfg.timeout
+        build_adapter(cfg), params, retry_count=cfg.retry_count, timeout=cfg.timeout,
+        fallback_model=cfg.fallback_model,  # Phase 6 Req 2.3, 2.7: every role's provider has it, Planner included
     )
 
 

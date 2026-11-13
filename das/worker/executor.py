@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import replace
 
 from das.clock import Clock, SystemClock
@@ -60,10 +62,15 @@ def _llm_failure(provider: object, model: object, reason: object) -> str:
 class _AttemptFailed(Exception):
     """A structured attempt that fails after spending tokens, so the Job_Result still reports them (Req 1.5, 1.6)."""
 
-    def __init__(self, error: str, usage: TokenUsage) -> None:
+    def __init__(self, error: str, usage: TokenUsage, model: str | None = None) -> None:
         super().__init__(error)
         self.error = error
         self.usage = usage
+        self.model = model  # the model of the last completion; ``None`` is the provider's own
+
+
+#: Results whose headers were never asked for (a publish that did not happen) must not pile up.
+MAX_REMEMBERED_MODELS = 4096
 
 
 class JobExecutor:
@@ -75,6 +82,7 @@ class JobExecutor:
         worker_id: str,
         job_timeout: float = 300,
         clock: Clock | None = None,
+        capability_models: Mapping[str, str] | None = None,
     ) -> None:
         if not worker_id:
             raise ValueError("worker_id must be non-empty")
@@ -84,6 +92,9 @@ class JobExecutor:
         self._worker_id = worker_id
         self._job_timeout = float(job_timeout)
         self._clock: Clock = clock or SystemClock()
+        self._capability_models: dict[str, str] = dict(capability_models or {})  # Phase 6 Req 2.2
+        #: The model that answered each attempt, until its result headers are built (Req 2.5).
+        self._models: OrderedDict[tuple[str, str, int], str] = OrderedDict()
 
     @property
     def job_timeout(self) -> float:
@@ -100,13 +111,39 @@ class JobExecutor:
             MODEL_HEADER: str(self._provider.params.model),
         }
 
-    async def execute(self, job: JobDispatchPayload, cancel: asyncio.Event) -> JobResultPayload:
+    def headers_for(self, result: JobResultPayload) -> dict[str, str]:
+        """Headers for one Job_Result: the provider and the model that answered it (Phase 6 Req 2.5, D2).
+
+        The model is remembered when the attempt ends and handed out once; a result this executor does not remember
+        (it was already asked for, or the attempt never reached a model) gets the provider's own, as in Phase 5.
+        """
+        headers = self.result_headers()
+        model = self._models.pop((result.request_id, result.job_id, result.attempt), None)
+        if model is not None:
+            headers[MODEL_HEADER] = model
+        return headers
+
+    def _remember(self, job: JobDispatchPayload, model: str | None) -> None:
+        """Note which model answered ``job``'s attempt; ``None`` is the provider's own, which needs no note."""
+        if model is None:
+            return
+        self._models[(job.request_id, job.job_id, job.attempt)] = model
+        while len(self._models) > MAX_REMEMBERED_MODELS:
+            self._models.popitem(last=False)
+
+    async def execute(
+        self, job: JobDispatchPayload, cancel: asyncio.Event, routing_capability: str | None = None
+    ) -> JobResultPayload:
         """Run the completion, racing it against the timeout and the cancel event.
+
+        ``routing_capability`` is the Capability whose queue the dispatch came from; its Capability_Model, when one
+        is configured, runs the Job (Phase 6 Req 2.2), otherwise the provider's own model does.
 
         If the calling task itself is cancelled (shutdown), the provider call is
         cancelled too and ``CancelledError`` propagates.
         """
         start = self._clock.monotonic()
+        model = self._capability_models.get(routing_capability) if routing_capability is not None else None
 
         if cancel.is_set():
             return self._result(job, "Cancelled", start, error="job cancelled")
@@ -117,7 +154,7 @@ class JobExecutor:
                 return self._result(job, "Failed", start, error=f"output_schema_invalid: {reason}")
 
         messages = [ChatMessage(role="user", content=build_user_message(job))]
-        call = asyncio.create_task(self._complete(job, messages))
+        call = asyncio.create_task(self._complete(job, messages, model))
         cancelled = asyncio.create_task(cancel.wait())
         try:
             try:
@@ -135,9 +172,12 @@ class JobExecutor:
             try:
                 completion: Completion = call.result()
             except _AttemptFailed as exc:
-                return self._result(job, "Failed", start, error=exc.error, usage=exc.usage)
+                return self._result(job, "Failed", start, error=exc.error, usage=exc.usage, model=exc.model)
             except LLMCallFailed as exc:
-                return self._result(job, "Failed", start, error=_llm_failure(exc.provider, exc.model, exc.reason))
+                return self._result(
+                    job, "Failed", start, error=_llm_failure(exc.provider, exc.model, exc.reason),
+                    model=exc.model if exc.model != self._provider.params.model else None,
+                )
             except Exception as exc:  # noqa: BLE001 - any other failure fails the attempt
                 return self._result(
                     job, "Failed", start,
@@ -146,7 +186,7 @@ class JobExecutor:
                     ),
                 )
             return self._result(
-                job, "Succeeded", start, content=completion.content, usage=completion.usage
+                job, "Succeeded", start, content=completion.content, usage=completion.usage, model=completion.model
             )
         finally:
             for task in (call, cancelled):
@@ -156,13 +196,16 @@ class JobExecutor:
             # outer cancellation of this coroutine.
             await asyncio.gather(call, cancelled, return_exceptions=True)
 
-    async def _complete(self, job: JobDispatchPayload, messages: list[ChatMessage]) -> Completion:
+    async def _complete(
+        self, job: JobDispatchPayload, messages: list[ChatMessage], model: str | None = None
+    ) -> Completion:
         """One completion, or for a Structured_Job up to two (Req 1.4 to 1.7).
 
-        A reply that does not match gets exactly one corrective completion in the same attempt. The tokens of both
-        are summed into the returned Completion, or into :class:`_AttemptFailed` when the Job fails.
+        A reply that does not match gets exactly one corrective completion in the same attempt, on the model that
+        answered the first (so a Fallback_Model that rescued it is not asked to fail again). The tokens of both are
+        summed into the returned Completion, or into :class:`_AttemptFailed` when the Job fails.
         """
-        first = await self._provider.complete(SYSTEM_PROMPT, messages, operation="job")
+        first = await self._provider.complete(SYSTEM_PROMPT, messages, operation="job", model=model)
         schema = job.output_schema
         if schema is None:
             return first
@@ -175,13 +218,14 @@ class JobExecutor:
             ChatMessage(role="user", content=build_correction_message(verdict)),
         ]
         try:
-            second = await self._provider.complete(SYSTEM_PROMPT, retry, operation="job")
+            second = await self._provider.complete(SYSTEM_PROMPT, retry, operation="job", model=first.model)
         except LLMCallFailed as exc:
-            raise _AttemptFailed(_llm_failure(exc.provider, exc.model, exc.reason), first.usage) from exc
+            failed_model = exc.model if exc.model != self._provider.params.model else None
+            raise _AttemptFailed(_llm_failure(exc.provider, exc.model, exc.reason), first.usage, failed_model) from exc
         usage = _add_usage(first.usage, second.usage)
         final = parse_and_validate(second.content, schema)
         if isinstance(final, Violation):
-            raise _AttemptFailed(f"output_schema_violation: {final.path}: {final.message}", usage)
+            raise _AttemptFailed(f"output_schema_violation: {final.path}: {final.message}", usage, second.model)
         return replace(second, content=final.text, usage=usage)
 
     def _result(
@@ -193,7 +237,9 @@ class JobExecutor:
         content: str = "",
         usage: TokenUsage | None = None,
         error: str | None = None,
+        model: str | None = None,
     ) -> JobResultPayload:
+        self._remember(job, model)
         elapsed = self._clock.monotonic() - start
         return JobResultPayload(
             request_id=job.request_id,

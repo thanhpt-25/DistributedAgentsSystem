@@ -148,9 +148,21 @@ class GrpcConfig(_Section):
         return v
 
 
+def _trim(value: object) -> object:
+    return value.strip() if isinstance(value, str) else value
+
+
+#: A model name: trimmed, never empty (Phase 6 Req 2.8).
+ModelName = Annotated[str, BeforeValidator(_trim), Field(min_length=1)]
+
+
 class LLMConfig(_Section):
     provider: Provider
     model: str = Field(min_length=1)
+    #: Model per Capability (Phase 6 Req 2.1, 2.2); a Job runs on the model of its routing Capability, else ``model``.
+    capability_models: dict[Capability, ModelName] = Field(default_factory=dict)
+    #: Tried once after a permanent, non-authentication provider error (Phase 6 Req 2.3).
+    fallback_model: ModelName | None = None
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     max_output_tokens: int = Field(default=4096, ge=1)
     timeout: float = Field(default=60, ge=1, le=600)

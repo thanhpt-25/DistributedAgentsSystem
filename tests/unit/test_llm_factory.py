@@ -36,6 +36,17 @@ async def test_builds_one_provider_bound_to_configured_adapter_and_model(setting
     await provider._adapter.aclose()
 
 
+async def test_the_configured_fallback_model_reaches_the_provider():
+    """Phase 6 Req 2.3: ``llm.fallback_model`` is the provider's, so the Planner and Summarizer have it (Req 2.7)."""
+    cfg = LLMConfig(provider="ollama", base_url="http://ollama:11434", model="m-1", fallback_model="m-2")
+    provider = build_llm_provider(cfg)
+    assert provider.fallback_model == "m-2" and provider.params.model == "m-1"
+    await provider._adapter.aclose()
+    plain = build_llm_provider(LLMConfig(provider="ollama", base_url="http://ollama:11434", model="m-1"))
+    assert plain.fallback_model is None
+    await plain._adapter.aclose()
+
+
 @pytest.mark.parametrize(
     ("settings", "field"),
     [

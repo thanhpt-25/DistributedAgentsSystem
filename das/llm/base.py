@@ -46,6 +46,9 @@ class Completion:
     usage: TokenUsage
     usage_reported: bool = True
     usage_problems: tuple[str, ...] = ()
+    #: The model that answered when it is not the LLMProvider's own (a Capability_Model or the Fallback_Model,
+    #: Phase 6 Req 2.5); ``None`` means the provider's configured model.
+    model: str | None = None
 
 
 @runtime_checkable

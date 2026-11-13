@@ -66,7 +66,7 @@ def value(rec: MetricsRecorder, sample_name: str, **labels: str) -> float | None
 
 def test_catalog_names_and_labels_are_allowed() -> None:
     names = [s.name for s in CATALOG]
-    assert len(names) == len(set(names)) == 31  # + 5 Phase 4 metrics (Req 10.1, 10.2)
+    assert len(names) == len(set(names)) == 32  # + 5 Phase 4 metrics (Req 10.1, 10.2); + 1 Phase 6: llm_fallbacks
     for spec in CATALOG:
         assert spec.name.startswith("das_")
         assert set(spec.labels) <= ALLOWED_LABEL_NAMES

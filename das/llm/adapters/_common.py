@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from das.llm.base import ChatMessage, Completion
-from das.llm.errors import LLMError, PermanentLLMError, RateLimitedLLMError, TransientLLMError
+from das.llm.errors import AuthLLMError, LLMError, PermanentLLMError, RateLimitedLLMError, TransientLLMError
 from das.models.results import TokenUsage
 from das.ops.usage import normalize_usage
 
@@ -15,6 +15,9 @@ TRANSIENT_STATUSES: frozenset[int] = frozenset({408, 429})
 
 #: HTTP status that means the provider is rate limiting the caller.
 RATE_LIMIT_STATUS = 429
+
+#: Unauthenticated or unauthorized: no other model will do better (Phase 6 Req 2.4).
+AUTH_STATUSES: frozenset[int] = frozenset({401, 403})
 
 
 def is_transient_status(status: int) -> bool:
@@ -26,6 +29,8 @@ def error_for_status(provider: str, status: int, detail: str) -> LLMError:
     reason = f"{provider} HTTP {status}"
     if detail:
         reason = f"{reason}: {detail}"
+    if status in AUTH_STATUSES:
+        return AuthLLMError(reason)
     if status == RATE_LIMIT_STATUS:
         return RateLimitedLLMError(reason)
     if is_transient_status(status):

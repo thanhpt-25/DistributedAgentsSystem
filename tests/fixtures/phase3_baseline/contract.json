@@ -444,6 +444,29 @@
             "default": null,
             "title": "Base Url"
           },
+          "capability_models": {
+            "patternProperties": {
+              "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "title": "Capability Models",
+            "type": "object"
+          },
+          "fallback_model": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fallback Model"
+          },
           "max_output_tokens": {
             "default": 4096,
             "minimum": 1,
@@ -1472,6 +1495,8 @@
     "DAS__LLM__AWS_SECRET_ACCESS_KEY",
     "DAS__LLM__AWS_SESSION_TOKEN",
     "DAS__LLM__BASE_URL",
+    "DAS__LLM__CAPABILITY_MODELS",
+    "DAS__LLM__FALLBACK_MODEL",
     "DAS__LLM__MAX_OUTPUT_TOKENS",
     "DAS__LLM__MODEL",
     "DAS__LLM__PROVIDER",
@@ -2337,6 +2362,17 @@
         "currency"
       ],
       "name": "das_llm_estimated_cost_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "LLM calls repeated on the Fallback_Model after a permanent error, by the model that failed.",
+      "labels": [
+        "provider",
+        "model"
+      ],
+      "name": "das_llm_fallbacks_total",
       "type": "counter"
     },
     {

@@ -57,7 +57,9 @@ class BlockingExecutor:
         self.started: list[str] = []
         self.max_concurrent = 0
 
-    async def execute(self, job: JobDispatchPayload, cancel: asyncio.Event) -> JobResultPayload:
+    async def execute(
+        self, job: JobDispatchPayload, cancel: asyncio.Event, routing_capability: str | None = None
+    ) -> JobResultPayload:
         gate = self.gates.setdefault(job.job_id, asyncio.Event())
         self.executing.add(job.job_id)
         self.started.append(job.job_id)

@@ -227,6 +227,11 @@ CATALOG: tuple[MetricSpec, ...] = (
         ("provider", "model", "operation"), operation=LLM_OPERATIONS,
     ),
     _spec(
+        "das_llm_fallbacks_total", "counter",
+        "LLM calls repeated on the Fallback_Model after a permanent error, by the model that failed.",
+        ("provider", "model"),
+    ),
+    _spec(
         "das_llm_tokens_total", "counter", "LLM tokens reported by successful calls.",
         ("provider", "model", "operation", "direction"),
         operation=LLM_OPERATIONS, direction=TOKEN_DIRECTIONS,
@@ -545,6 +550,10 @@ class LLMMetrics(_Facade):
             "das_llm_retries_total", {"provider": provider, "model": model, "operation": operation}
         )
 
+    def fallback(self, provider: str, model: str) -> None:
+        """A call is repeated on the Fallback_Model; ``model`` is the one that failed (Phase 6 Req 2.6)."""
+        self._r.inc("das_llm_fallbacks_total", {"provider": provider, "model": model})
+
     def tokens(
         self, provider: str, model: str, operation: LLMOperation, input_tokens: int, output_tokens: int
     ) -> None:
@@ -589,13 +598,25 @@ class LLMMetricsObserver:
         self._m = llm_metrics
         self._provider = provider
         self._model = model
-        self._entry: PriceEntry | None = (
-            price_table.lookup(provider, model) if price_table is not None else None
-        )
+        self._price_table = price_table
+        self._entries: dict[str, PriceEntry | None] = {}
 
-    def on_retry_scheduled(self, operation: LLMOperation) -> None:
+    def _entry(self, model: str) -> PriceEntry | None:
+        """The Price_Table entry of ``model``, looked up once (a Capability_Model has its own price, Req 2.5)."""
+        if model not in self._entries:
+            table = self._price_table
+            self._entries[model] = table.lookup(self._provider, model) if table is not None else None
+        return self._entries[model]
+
+    def on_retry_scheduled(self, operation: LLMOperation, model: str | None = None) -> None:
         try:
-            self._m.retry_scheduled(self._provider, self._model, operation)
+            self._m.retry_scheduled(self._provider, model or self._model, operation)
+        except Exception:
+            pass
+
+    def on_fallback(self, operation: LLMOperation, model: str) -> None:
+        try:
+            self._m.fallback(self._provider, model)
         except Exception:
             pass
 
@@ -605,17 +626,18 @@ class LLMMetricsObserver:
         outcome: LLMOutcome,
         duration: float,
         usage: TokenUsage | None,
+        model: str | None = None,
     ) -> None:
+        used = model or self._model  # a Capability_Model or the Fallback_Model, else the bound model
         try:
-            self._m.call_finished(self._provider, self._model, operation, outcome, duration)
+            self._m.call_finished(self._provider, used, operation, outcome, duration)
             if outcome != "success" or usage is None:  # Req 4.5
                 return
-            self._m.tokens(
-                self._provider, self._model, operation, usage.input_tokens, usage.output_tokens
-            )
-            if self._entry is not None:  # Req 4.6: unrounded Estimated_Cost
-                call = _PricedCall(self._provider, self._model, usage)
-                self._m.estimated_cost(self._provider, self._model, record_cost(call, self._entry))
+            self._m.tokens(self._provider, used, operation, usage.input_tokens, usage.output_tokens)
+            entry = self._entry(used)
+            if entry is not None:  # Req 4.6: unrounded Estimated_Cost
+                call = _PricedCall(self._provider, used, usage)
+                self._m.estimated_cost(self._provider, used, record_cost(call, entry))
         except Exception:
             pass
 

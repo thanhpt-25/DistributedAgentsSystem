@@ -144,7 +144,7 @@ async def test_llm_error_publishes_failed_result_with_provider_model_reason(fake
 
 async def test_executor_crash_publishes_failed_result(fake_redis):
     class Broken:
-        async def execute(self, job, cancel):
+        async def execute(self, job, cancel, routing_capability=None):
             raise RuntimeError("bug")
 
     h = Harness(fake_redis, FakeAdapter(), executor=Broken())

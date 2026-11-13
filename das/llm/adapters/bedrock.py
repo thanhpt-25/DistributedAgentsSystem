@@ -15,12 +15,24 @@ import aioboto3
 import botocore.exceptions as bexc
 from botocore.config import Config as BotoConfig
 
-from das.llm.adapters._common import is_transient_status, make_completion, split_system, truncate
+from das.llm.adapters._common import AUTH_STATUSES, is_transient_status, make_completion, split_system, truncate
 from das.llm.base import ChatMessage, Completion, ModelParams
-from das.llm.errors import LLMError, PermanentLLMError, RateLimitedLLMError, TransientLLMError
+from das.llm.errors import AuthLLMError, LLMError, PermanentLLMError, RateLimitedLLMError, TransientLLMError
 
 #: Error codes that mean Bedrock is throttling the caller.
 RATE_LIMIT_CODES: frozenset[str] = frozenset({"ThrottlingException", "TooManyRequestsException"})
+
+#: Error codes for bad, expired or unauthorized credentials (Phase 6 Req 2.4).
+AUTH_CODES: frozenset[str] = frozenset(
+    {
+        "AccessDeniedException",
+        "UnrecognizedClientException",
+        "ExpiredTokenException",
+        "InvalidSignatureException",
+        "InvalidClientTokenId",
+        "UnauthorizedOperation",
+    }
+)
 
 TRANSIENT_CODES: frozenset[str] = frozenset(
     {
@@ -48,6 +60,8 @@ def classify_bedrock_error(exc: BaseException) -> LLMError:
         msg = err.get("Message")
         if msg:
             reason += f": {truncate(str(msg))}"
+        if code in AUTH_CODES or status in AUTH_STATUSES:
+            return AuthLLMError(reason)
         if code in RATE_LIMIT_CODES or status == 429:
             return RateLimitedLLMError(reason)
         if code in TRANSIENT_CODES or (status and is_transient_status(status)):
@@ -58,7 +72,7 @@ def classify_bedrock_error(exc: BaseException) -> LLMError:
     if isinstance(exc, (bexc.HTTPClientError, bexc.ConnectionError)):
         return TransientLLMError(f"bedrock connection error: {type(exc).__name__}")
     if isinstance(exc, (bexc.NoCredentialsError, bexc.PartialCredentialsError)):
-        return PermanentLLMError(f"bedrock credentials error: {type(exc).__name__}")
+        return AuthLLMError(f"bedrock credentials error: {type(exc).__name__}")
     return PermanentLLMError(f"bedrock error {type(exc).__name__}: {truncate(str(exc))}")
 
 

@@ -133,11 +133,13 @@ class RegistryLike(Protocol):
 
 class ExecutorLike(Protocol):
     async def execute(
-        self, job: JobDispatchPayload, cancel: asyncio.Event
+        self, job: JobDispatchPayload, cancel: asyncio.Event, routing_capability: str | None = None
     ) -> JobResultPayload: ...
 
     # Optional: ``result_headers() -> Mapping[str, str]`` (``x-llm-provider`` /
     # ``x-llm-model``, design D2). Executors without it publish no such headers.
+    # Optional: ``headers_for(result) -> Mapping[str, str]`` (Phase 6 Req 2.5), the same headers for one
+    # Job_Result, naming the model that answered it; preferred over ``result_headers`` when present.
 
 
 @dataclass(frozen=True, slots=True)
@@ -655,7 +657,8 @@ class Worker:
         """Run one attempt; ``None`` means it was abandoned at shutdown (requeue it)."""
         entry.started = self._clock.monotonic()
         # The task copies the current context, so ``llm.completion`` nests under ``worker.job``.
-        entry.task = asyncio.create_task(self._executor.execute(job, entry.cancel))
+        routing = self._capability_of(entry.delivery, job)  # Phase 6 Req 2.2: the queue names the Capability
+        entry.task = asyncio.create_task(self._executor.execute(job, entry.cancel, routing))
         try:
             return await entry.task
         except asyncio.CancelledError:
@@ -689,12 +692,14 @@ class Worker:
         caps = sorted(job.required_capabilities)
         return caps[0] if caps else "unknown"
 
-    def _result_headers(self) -> dict[str, str]:
+    def _result_headers(self, result: JobResultPayload) -> dict[str, str]:
+        per_result = getattr(self._executor, "headers_for", None)
         getter = getattr(self._executor, "result_headers", None)
-        if getter is None:
+        if per_result is None and getter is None:
             return {}
         try:
-            return {str(k): str(v) for k, v in dict(getter()).items()}
+            headers = per_result(result) if per_result is not None else getter()  # type: ignore[misc]
+            return {str(k): str(v) for k, v in dict(headers).items()}
         except Exception as exc:  # noqa: BLE001 - headers are best effort (D2)
             log.warning("job result headers unavailable", error=type(exc).__name__)
             return {}
@@ -708,7 +713,7 @@ class Worker:
         message = new_message(result, correlation_id=request_id, trace_context=trace_context)
         try:
             await self._queue.publish(
-                RESULTS_DESTINATION, message, headers=self._result_headers() or None
+                RESULTS_DESTINATION, message, headers=self._result_headers(result) or None
             )
         except Exception as exc:  # noqa: BLE001 - dispatch stays un-ACKed
             log.warning(

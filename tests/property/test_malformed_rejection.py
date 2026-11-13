@@ -183,7 +183,9 @@ class _SpyExecutor:
         self._inner = inner
         self.jobs: list[JobDispatchPayload] = []
 
-    async def execute(self, job: JobDispatchPayload, cancel: asyncio.Event) -> JobResultPayload:
+    async def execute(
+        self, job: JobDispatchPayload, cancel: asyncio.Event, routing_capability: str | None = None
+    ) -> JobResultPayload:
         self.jobs.append(job)
         return await self._inner.execute(job, cancel)
 
