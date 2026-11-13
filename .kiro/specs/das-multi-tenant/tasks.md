@@ -8,7 +8,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
 
 ## Tasks
 
-- [ ] 1. Pure core `das/tenancy`
+- [x] 1. Pure core `das/tenancy`
   - [x] 1.1 Implement scopes, Principal and the route table
     - `das/tenancy/__init__.py`, `das/tenancy/scopes.py`: `Scope`, `OPERATOR`, `Requirement`, `Principal`, `authorize(principal, requirement)`, `ROUTE_SCOPES` listing every route explicitly (design §2 table, health routes `public`)
     - _Requirements: 2.2, 2.5_
@@ -28,7 +28,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - **Property 6: Settings layering**
     - **Validates: Requirements 4.1, 4.4, 4.5**
 
-- [ ] 2. Configuration
+- [x] 2. Configuration
   - [x] 2.1 Add the tenant schema
     - `das/config/schema.py`: `TenantKeyConfig`, `TenantSettings` (the optional fields of `ClientOverride` without `fingerprint`), `TenantConfig`, `UsageConfig` (`retention_days`), `LabelLimitsConfig.tenant`, `AgentConfig.tenants` and `.usage`; Tenant_ID pattern, scope set, `max_priority` default `normal`
     - _Requirements: 1.1, 4.2, 4.3, 6.6, 7.1, 7.2, 8.1_
@@ -39,7 +39,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - Every rule of 1.4 with a sentinel key value that must not appear in any message; absent `tenants` equals Phase 4; ranges and defaults; `deploy/config/gateway.yaml` sample gains a commented tenants example that a drift test loads
     - _Requirements: 1.1, 1.4, 1.5_
 
-- [ ] 3. State_Store keys and scripts
+- [x] 3. State_Store keys and scripts
   - [x] 3.1 Add the tenant keys and Lua helpers
     - `das/state/keys.py`: tenant key functions; `_common.lua`: `tenant_of`, `tenant_twin`, `index_move(..., req_key)`, tenant maintenance inside `client_active_add` and `client_active_remove`, `usage_bump` (UTC day from `TIME`, `EXPIRE` from `usage.retention_days` passed in ARGV)
     - _Requirements: 3.5, 5.1, 6.1_
@@ -68,7 +68,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - **Property 7: Tenant_Backfill is idempotent and complete**
     - **Validates: Requirements 5.1, 5.2, 5.5, 9.1, 9.2**
 
-- [ ] 4. Gateway authentication and scopes
+- [x] 4. Gateway authentication and scopes
   - [x] 4.1 Authenticate to a Principal
     - `das/gateway/auth.py`: `api_key_auth` uses the `KeyDirectory`, stores `request.state.principal` and the resolved `client_settings`; `admin_key_auth` keeps `admin_disabled` for a Phase 4 configuration with no admin capability anywhere
     - _Requirements: 1.2, 1.3, 2.1_
@@ -85,7 +85,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - `GET /v1/agents` drops `agent_id` and `host` for a non-Operator outside the Default_Tenant
     - _Requirements: 2.6_
 
-- [ ] 5. Tenant-scoped routes
+- [x] 5. Tenant-scoped routes
   - [x] 5.1 Isolate get, cancel and events
     - Compare the Request's `tenant` with the Principal's (Operators excepted) before starting a stream or writing; 404 `not_found` with the body of a missing Request
     - _Requirements: 3.2_
@@ -111,7 +111,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - Every row of the design Error Handling table, including cursor reuse across tenants, the `admin_disabled` compatibility case and 503 when Redis is unreachable
     - _Requirements: 2.3, 3.2, 3.3, 3.4, 3.7, 5.3, 6.3, 7.1, 7.2_
 
-- [ ] 6. Priority
+- [x] 6. Priority
   - [x] 6.1 Validate and store priority
     - `priority` in the submit body (`invalid_request` naming `priority`), tenant `default_priority` and `max_priority` (`priority_above_limit`), stored only when `high`, `priority` in the Request view
     - _Requirements: 7.1, 7.2, 7.3_
@@ -128,7 +128,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - `tests/integration/test_rabbitmq_priority.py` (testcontainers, RabbitMQ 4.1): delivery order from `basic.get`, the 2:1 weighting with no starvation, requeue keeps the class, a dead-lettered message keeps its priority, no `x-max-priority`
     - _Requirements: 7.5, 7.6_
 
-- [ ] 7. Observability
+- [x] 7. Observability
   - [x] 7.1 Add the tenant label to two metrics
     - `DYNAMIC_LABELS` gains `tenant`, limited by `label_limits.tenant`; `das_requests_submitted_total` (Gateway, from the Principal) and `das_requests_finished_total` (Manager, from the snapshot)
     - _Requirements: 8.1_
@@ -142,7 +142,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - Requests submitted and finished per tenant in the dashboard JSON; the existing dashboard static test is extended
     - _Requirements: 8.5_
 
-- [ ] 8. Compatibility and regression
+- [x] 8. Compatibility and regression
   - [x] 8.1 Change the tests that pin superseded boundaries
     - Find and update the tests that assert v2 Req 20.1 (listing not filtered by key) and v2 Req 20.3 (no tenant identity in labels, Spans, indexes), each with a comment citing this spec; list them in the task report
     - _Requirements: 9.6, 12.1_
@@ -153,9 +153,9 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - With no `tenants` configured, the Phase 4 contract tests and Gateway tests pass unchanged and responses match Phase 4 apart from the added fields; the wire-format baselines stay byte-identical
     - _Requirements: 9.5, 9.6_
 
-- [ ] 9. Checkpoint - Ensure all tests pass
+- [x] 9. Checkpoint - Ensure all tests pass
 
-- [ ] 10. Helm chart
+- [x] 10. Helm chart
   - [x] 10.1 Create the chart skeleton
     - `deploy/helm/das/`: `Chart.yaml`, `values.yaml`, `values.schema.json` (unknown keys rejected), `_helpers.tpl` with the grace-period guard (`fail` below `limits.shutdown_timeout + 10`), `ci/values-min.yaml`, `ci/values-all.yaml`
     - _Requirements: 10.4, 10.7_
@@ -172,7 +172,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - Prerequisites (Redis, RabbitMQ with the management plugin), the secret keys, tenant configuration, the grace period rule, the KEDA and preStop options, and the delivery-limit caveat for a Worker killed repeatedly
     - _Requirements: 10.7_
 
-- [ ] 11. Kubernetes verification and CI
+- [x] 11. Kubernetes verification and CI
   - [x] 11.1 Write the cluster tests
     - `tests/k8s/` manifests for Redis, RabbitMQ and the stub LLM; `tests/integration/k8s/` tests: pods Ready, a Request completes, an admin drain reaches an agent (advertise host), Worker and Manager pod deletion and rolling restarts with Requests in flight lose none
     - _Requirements: 11.3_
