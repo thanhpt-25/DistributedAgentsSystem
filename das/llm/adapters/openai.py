@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from typing import Any, ClassVar
 
 import openai
 
-from das.llm.adapters._common import error_for_status, make_completion, truncate
+from das.llm.adapters._common import (
+    error_for_status,
+    make_completion,
+    make_tool_turn,
+    parse_arguments,
+    truncate,
+)
 from das.llm.base import ChatMessage, Completion, ModelParams
 from das.llm.errors import LLMError, PermanentLLMError, TransientLLMError
+from das.tools.types import AssistantTurn, ToolCall, ToolSpec, ToolTurn, Turn
 
 
 def classify_openai_error(exc: BaseException) -> LLMError:
@@ -79,6 +87,75 @@ class OpenAIAdapter:
         except openai.OpenAIError as exc:
             raise classify_openai_error(exc) from exc
         return self.parse_response(resp)
+
+    @staticmethod
+    def build_tool_request(
+        system: str, turns: Sequence[Turn], tools: Sequence[ToolSpec], params: ModelParams
+    ) -> dict[str, Any]:
+        """A Chat Completions request with ``tools``, the assistant's tool calls and the tool results (Req 5.2)."""
+        msgs: list[dict[str, Any]] = []
+        if system:
+            msgs.append({"role": "system", "content": system})
+        for turn in turns:
+            if isinstance(turn, ChatMessage):
+                msgs.append({"role": turn.role, "content": turn.content})
+            elif isinstance(turn, AssistantTurn):
+                message: dict[str, Any] = {"role": "assistant", "content": turn.text or None}
+                if turn.calls:
+                    message["tool_calls"] = [
+                        {"id": c.id, "type": "function",
+                         "function": {"name": c.name, "arguments": json.dumps(c.arguments)}}
+                        for c in turn.calls
+                    ]
+                msgs.append(message)
+            else:
+                msgs.extend({"role": "tool", "tool_call_id": r.call_id, "content": r.content} for r in turn.results)
+        return {
+            "model": params.model,
+            "messages": msgs,
+            "tools": [
+                {"type": "function",
+                 "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
+                for t in tools
+            ],
+            "temperature": params.temperature,
+            "max_completion_tokens": params.max_output_tokens,
+        }
+
+    @staticmethod
+    def parse_tool_response(resp: Any) -> ToolTurn:
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            raise PermanentLLMError("openai response contained no choices")
+        message = choices[0].message
+        calls: list[ToolCall] = []
+        for call in getattr(message, "tool_calls", None) or []:
+            function = getattr(call, "function", None)
+            if function is None:  # a kind of tool call this adapter never offers
+                continue
+            arguments, error = parse_arguments(getattr(function, "arguments", None))
+            calls.append(ToolCall(str(call.id), str(function.name), arguments, error))
+        u = getattr(resp, "usage", None)
+        return make_tool_turn(
+            getattr(message, "content", None) or "", calls,
+            getattr(u, "prompt_tokens", None), getattr(u, "completion_tokens", None), getattr(u, "total_tokens", None),
+        )
+
+    async def complete_with_tools_once(
+        self,
+        system: str,
+        turns: Sequence[Turn],
+        tools: Sequence[ToolSpec],
+        params: ModelParams,
+        timeout: float,
+    ) -> ToolTurn:
+        try:
+            resp = await self._client.chat.completions.create(
+                **self.build_tool_request(system, turns, tools, params), timeout=timeout
+            )
+        except openai.OpenAIError as exc:
+            raise classify_openai_error(exc) from exc
+        return self.parse_tool_response(resp)
 
     async def ping(self) -> bool:
         try:

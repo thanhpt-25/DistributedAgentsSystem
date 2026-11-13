@@ -15,9 +15,18 @@ import aioboto3
 import botocore.exceptions as bexc
 from botocore.config import Config as BotoConfig
 
-from das.llm.adapters._common import AUTH_STATUSES, is_transient_status, make_completion, split_system, truncate
+from das.llm.adapters._common import (
+    AUTH_STATUSES,
+    is_transient_status,
+    make_completion,
+    make_tool_turn,
+    split_system,
+    split_system_turns,
+    truncate,
+)
 from das.llm.base import ChatMessage, Completion, ModelParams
 from das.llm.errors import AuthLLMError, LLMError, PermanentLLMError, RateLimitedLLMError, TransientLLMError
+from das.tools.types import AssistantTurn, ToolCall, ToolSpec, ToolTurn, Turn
 
 #: Error codes that mean Bedrock is throttling the caller.
 RATE_LIMIT_CODES: frozenset[str] = frozenset({"ThrottlingException", "TooManyRequestsException"})
@@ -161,6 +170,78 @@ class BedrockAdapter:
         except bexc.ClientError as exc:
             raise classify_bedrock_error(exc) from exc
         return self.parse_response(resp)
+
+    @staticmethod
+    def build_tool_request(
+        system: str, turns: Sequence[Turn], tools: Sequence[ToolSpec], params: ModelParams
+    ) -> dict[str, Any]:
+        """A Converse request with ``toolConfig``, ``toolUse`` blocks for calls and ``toolResult`` blocks (Req 5.2)."""
+        sys_prompt, rest = split_system_turns(system, turns)
+        messages: list[dict[str, Any]] = []
+        for turn in rest:
+            if isinstance(turn, ChatMessage):
+                messages.append({"role": turn.role, "content": [{"text": turn.content}]})
+            elif isinstance(turn, AssistantTurn):
+                blocks: list[dict[str, Any]] = [{"text": turn.text}] if turn.text else []
+                blocks += [
+                    {"toolUse": {"toolUseId": c.id, "name": c.name, "input": c.arguments}} for c in turn.calls
+                ]
+                messages.append({"role": "assistant", "content": blocks})
+            else:
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"toolResult": {"toolUseId": r.call_id, "content": [{"text": r.content}],
+                                        "status": "error" if r.is_error else "success"}}
+                        for r in turn.results
+                    ],
+                })
+        req: dict[str, Any] = {
+            "modelId": params.model,
+            "messages": messages,
+            "toolConfig": {"tools": [
+                {"toolSpec": {"name": t.name, "description": t.description, "inputSchema": {"json": t.parameters}}}
+                for t in tools
+            ]},
+            "inferenceConfig": {"maxTokens": params.max_output_tokens, "temperature": params.temperature},
+        }
+        if sys_prompt:
+            req["system"] = [{"text": sys_prompt}]
+        return req
+
+    @staticmethod
+    def parse_tool_response(resp: Any) -> ToolTurn:
+        try:
+            blocks = resp["output"]["message"]["content"]
+        except (KeyError, TypeError) as exc:
+            raise PermanentLLMError("bedrock response is missing output.message.content") from exc
+        text = "".join(b["text"] for b in blocks if isinstance(b, dict) and "text" in b)
+        calls = [
+            ToolCall(str(b["toolUse"]["toolUseId"]), str(b["toolUse"]["name"]), dict(b["toolUse"].get("input") or {}))
+            for b in blocks if isinstance(b, dict) and isinstance(b.get("toolUse"), dict)
+        ]
+        u = resp.get("usage") or {}
+        return make_tool_turn(text, calls, u.get("inputTokens"), u.get("outputTokens"), u.get("totalTokens"))
+
+    async def complete_with_tools_once(
+        self,
+        system: str,
+        turns: Sequence[Turn],
+        tools: Sequence[ToolSpec],
+        params: ModelParams,
+        timeout: float,
+    ) -> ToolTurn:
+        req = self.build_tool_request(system, turns, tools, params)
+        if not req["messages"]:
+            raise PermanentLLMError("bedrock requires at least one user or assistant message")
+        try:
+            client = await self._runtime()
+            resp = await client.converse(**req)
+        except bexc.BotoCoreError as exc:
+            raise classify_bedrock_error(exc) from exc
+        except bexc.ClientError as exc:
+            raise classify_bedrock_error(exc) from exc
+        return self.parse_tool_response(resp)
 
     async def ping(self) -> bool:
         """Connected when credentials resolve and the Bedrock control plane answers.

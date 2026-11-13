@@ -31,6 +31,7 @@ from das.models.results import TokenUsage
 from das.models.usage import LLMOperation
 from das.observability.logging import get_logger
 from das.observability.tracing import NoopTracer, SpanHandle, Tracer
+from das.tools.types import ToolSpec, ToolTurn, Turn
 
 log = get_logger(__name__)
 
@@ -120,6 +121,19 @@ def _validate_messages(messages: Sequence[ChatMessage]) -> None:
             raise LLMInputError(f"messages[{i}].role {m.role!r} is not one of {sorted(ROLES)}")
         if not isinstance(m.content, str):
             raise LLMInputError(f"messages[{i}].content must be text")
+
+
+def _validate_turns(turns: Sequence[Turn]) -> None:
+    """The size and the roles of a conversation with tool turns (the checks of :func:`_validate_messages`)."""
+    if not (MIN_MESSAGES <= len(turns) <= MAX_MESSAGES):
+        raise LLMInputError(f"turn count {len(turns)} outside allowed range {MIN_MESSAGES}-{MAX_MESSAGES}")
+    for i, turn in enumerate(turns):
+        if not isinstance(turn, ChatMessage):
+            continue
+        if turn.role not in ROLES:
+            raise LLMInputError(f"turns[{i}].role {turn.role!r} is not one of {sorted(ROLES)}")
+        if not isinstance(turn.content, str):
+            raise LLMInputError(f"turns[{i}].content must be text")
 
 
 class LLMProvider:
@@ -225,19 +239,66 @@ class LLMProvider:
         """
         _validate_messages(messages)
         msgs = tuple(messages)
+        return await self._run(
+            lambda used: self._adapter.complete_once(system, msgs, used, self._timeout), Completion, model, operation
+        )
+
+    @property
+    def supports_tools(self) -> bool:
+        """Whether the adapter can call tools (Phase 6 Req 5.1)."""
+        return callable(getattr(self._adapter, "complete_with_tools_once", None))
+
+    async def complete_with_tools(
+        self,
+        system: str,
+        turns: Sequence[Turn],
+        tools: Sequence[ToolSpec],
+        *,
+        operation: LLMOperation,
+        model: str | None = None,
+    ) -> ToolTurn:
+        """One completion in a conversation with tools: the model's text, its tool calls, or both (Req 5.2, 5.6).
+
+        Retried, observed and rescued by the Fallback_Model exactly as :meth:`complete` is; the tools stay on the call
+        so the Fallback_Model is offered the same ones. Raises :class:`LLMInputError` when the adapter cannot call
+        tools, there is no tool, or the conversation is outside the allowed size.
+        """
+        adapter = getattr(self._adapter, "complete_with_tools_once", None)
+        if adapter is None:
+            raise LLMInputError(f"provider {self._adapter.provider} does not support tools")
+        if not tools:
+            raise LLMInputError("at least one tool is required")
+        _validate_turns(turns)
+        conversation, offered = tuple(turns), tuple(tools)
+        return await self._run(
+            lambda used: adapter(system, conversation, offered, used, self._timeout), ToolTurn, model, operation
+        )
+
+    async def _run[R: (Completion, ToolTurn)](
+        self,
+        call: Callable[[ModelParams], Awaitable[R]],
+        expected: type[R],
+        model: str | None,
+        operation: LLMOperation,
+    ) -> R:
+        """One call on ``model`` (the provider's own when ``None``), then at most one more on the Fallback_Model."""
         used = self._params if model is None else replace(self._params, model=model)
         try:
-            return await self._attempt(system, msgs, used, operation)
+            return await self._attempt(call, expected, used, operation)
         except LLMCallFailed as failure:
             fallback = self._fallback_model
             if fallback is None or not failure.permanent or failure.auth or fallback == used.model:
                 raise
             self._notify_fallback(operation, used.model)
-            return await self._attempt(system, msgs, replace(self._params, model=fallback), operation)
+            return await self._attempt(call, expected, replace(self._params, model=fallback), operation)
 
-    async def _attempt(
-        self, system: str, msgs: tuple[ChatMessage, ...], params: ModelParams, operation: LLMOperation
-    ) -> Completion:
+    async def _attempt[R: (Completion, ToolTurn)](
+        self,
+        call: Callable[[ModelParams], Awaitable[R]],
+        expected: type[R],
+        params: ModelParams,
+        operation: LLMOperation,
+    ) -> R:
         """One model's turn: the call and its transient retries (the Phase 2 loop, bound to ``params``)."""
         attrs = {
             "llm.provider": self._adapter.provider,
@@ -251,12 +312,10 @@ class LLMProvider:
                 attempts += 1
                 try:
                     async with asyncio.timeout(self._timeout):
-                        completion = await self._adapter.complete_once(
-                            system, msgs, params, self._timeout
-                        )
-                    if not isinstance(completion, Completion):
+                        completion = await call(params)
+                    if not isinstance(completion, expected):
                         raise PermanentLLMError(
-                            f"adapter returned {type(completion).__name__}, expected Completion"
+                            f"adapter returned {type(completion).__name__}, expected {expected.__name__}"
                         )
                 except PermanentLLMError as exc:
                     self._finish(operation, classify_outcome(exc), start, None, params)
@@ -287,9 +346,9 @@ class LLMProvider:
                 self._notify_retry(operation, params)
                 await self._sleep(retry_delay(attempts))
 
-    def _succeeded(
-        self, operation: LLMOperation, completion: Completion, start: float, span: SpanHandle, params: ModelParams
-    ) -> Completion:
+    def _succeeded[R: (Completion, ToolTurn)](
+        self, operation: LLMOperation, completion: R, start: float, span: SpanHandle, params: ModelParams
+    ) -> R:
         if completion.usage_problems:
             log.warning(
                 "llm_usage_invalid",

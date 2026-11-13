@@ -24,7 +24,7 @@ fault-injection pass. One commit per wave.
   - [x] 4.1 `das/eval/plans.py`: dataset loading, pure scoring, report (Req 4.2 to 4.5)
   - [x] 4.2 `das eval-plans` command and exit codes (Req 4.1, 4.4)
 - [ ] 5. Tool use (Wave 5)
-  - [ ] 5.1 Tool types; `complete_with_tools_once` in the four adapters and `LLMProvider.complete_with_tools` (Req 5.1, 5.2)
+  - [x] 5.1 Tool types; `complete_with_tools_once` in the four adapters and `LLMProvider.complete_with_tools` (Req 5.1, 5.2)
   - [ ] 5.2 Tool registry, `tools` configuration, Capability advertisement, startup refusal (Req 5.3, 5.4, 5.1)
   - [ ] 5.3 `calculator` with Property 3 and fault injection (Req 5.8, 8.3)
   - [ ] 5.4 `http_fetch` with Property 4 and fault injection (Req 5.9, 8.4); `current_time` (Req 5.10)

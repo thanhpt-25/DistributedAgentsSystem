@@ -7,9 +7,17 @@ from typing import Any, ClassVar
 
 import anthropic
 
-from das.llm.adapters._common import error_for_status, make_completion, split_system, truncate
+from das.llm.adapters._common import (
+    error_for_status,
+    make_completion,
+    make_tool_turn,
+    split_system,
+    split_system_turns,
+    truncate,
+)
 from das.llm.base import ChatMessage, Completion, ModelParams
 from das.llm.errors import LLMError, PermanentLLMError, TransientLLMError
+from das.tools.types import AssistantTurn, ToolCall, ToolSpec, ToolTurn, Turn
 
 
 def classify_anthropic_error(exc: BaseException) -> LLMError:
@@ -81,6 +89,68 @@ class AnthropicAdapter:
         except anthropic.AnthropicError as exc:
             raise classify_anthropic_error(exc) from exc
         return self.parse_response(resp)
+
+    @staticmethod
+    def build_tool_request(
+        system: str, turns: Sequence[Turn], tools: Sequence[ToolSpec], params: ModelParams
+    ) -> dict[str, Any]:
+        """A Messages request with ``tools``, ``tool_use`` blocks for the calls and ``tool_result`` blocks (Req 5.2)."""
+        sys_prompt, rest = split_system_turns(system, turns)
+        messages: list[dict[str, Any]] = []
+        for turn in rest:
+            if isinstance(turn, ChatMessage):
+                messages.append({"role": turn.role, "content": turn.content})
+            elif isinstance(turn, AssistantTurn):
+                blocks: list[dict[str, Any]] = [{"type": "text", "text": turn.text}] if turn.text else []
+                blocks += [{"type": "tool_use", "id": c.id, "name": c.name, "input": c.arguments} for c in turn.calls]
+                messages.append({"role": "assistant", "content": blocks})
+            else:
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": r.call_id, "content": r.content, "is_error": r.is_error}
+                        for r in turn.results
+                    ],
+                })
+        req: dict[str, Any] = {
+            "model": params.model,
+            "messages": messages,
+            "tools": [{"name": t.name, "description": t.description, "input_schema": t.parameters} for t in tools],
+            "max_tokens": params.max_output_tokens,
+            "extra_body": {"temperature": params.temperature},
+        }
+        if sys_prompt:
+            req["system"] = sys_prompt
+        return req
+
+    @staticmethod
+    def parse_tool_response(resp: Any) -> ToolTurn:
+        blocks = getattr(resp, "content", None) or []
+        text = "".join(getattr(b, "text", "") for b in blocks if getattr(b, "type", None) == "text")
+        calls = [
+            ToolCall(str(b.id), str(b.name), dict(b.input) if isinstance(b.input, dict) else {},
+                     None if isinstance(b.input, dict) else "the arguments must be a JSON object")
+            for b in blocks if getattr(b, "type", None) == "tool_use"
+        ]
+        u = getattr(resp, "usage", None)
+        return make_tool_turn(text, calls, getattr(u, "input_tokens", None), getattr(u, "output_tokens", None))
+
+    async def complete_with_tools_once(
+        self,
+        system: str,
+        turns: Sequence[Turn],
+        tools: Sequence[ToolSpec],
+        params: ModelParams,
+        timeout: float,
+    ) -> ToolTurn:
+        req = self.build_tool_request(system, turns, tools, params)
+        if not req["messages"]:
+            raise PermanentLLMError("anthropic requires at least one user or assistant message")
+        try:
+            resp = await self._client.messages.create(**req, timeout=timeout)
+        except anthropic.AnthropicError as exc:
+            raise classify_anthropic_error(exc) from exc
+        return self.parse_tool_response(resp)
 
     async def ping(self) -> bool:
         try:
