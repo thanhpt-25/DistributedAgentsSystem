@@ -366,7 +366,7 @@ async def test_metrics_wired_into_drivers_samplers_and_llm(state_store, fake_red
         text = _render(recorder)
         assert 'das_lease_acquisitions_total{kind="initial"} 1.0' in text
         assert "das_leases_held 0.0" in text
-        assert 'das_requests_finished_total{status="Completed"} 1.0' in text
+        assert 'das_requests_finished_total{status="Completed",tenant="default"} 1.0' in text
         # Planner and Summarizer providers got an LLMMetricsObserver.
         assert len(env.agent.llm_observers) == 2
         assert 'das_llm_calls_total{' in text and 'operation="plan"' in text

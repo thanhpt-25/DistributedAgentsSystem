@@ -2453,7 +2453,8 @@
       "buckets_key": null,
       "help": "Requests that reached a terminal status.",
       "labels": [
-        "status"
+        "status",
+        "tenant"
       ],
       "name": "das_requests_finished_total",
       "type": "counter"
@@ -2462,7 +2463,9 @@
       "allowed": {},
       "buckets_key": null,
       "help": "Requests created by the Gateway_API.",
-      "labels": [],
+      "labels": [
+        "tenant"
+      ],
       "name": "das_requests_submitted_total",
       "type": "counter"
     },

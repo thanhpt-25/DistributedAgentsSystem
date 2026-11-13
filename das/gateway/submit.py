@@ -8,17 +8,19 @@ offending ``parameter``) or a :class:`das.client.budget.BudgetError` (400 ``budg
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated, Any, Final
+from typing import Annotated, Any, Final, cast, get_args
 
 from pydantic import Field, StrictInt, ValidationError
 
 from das.client.budget import Budget, BudgetError, decimal_text
 from das.client.idempotency import body_hash, idem_key_hash, validate_idempotency_key
 from das.client.settings import ClientSettings
-from das.config.schema import BudgetConfig, ClientLimitsConfig, EventsConfig
+from das.config.schema import BudgetConfig, ClientLimitsConfig, EventsConfig, PriorityClass
 from das.state.store import ClientRequestSpec
 
 IDEMPOTENCY_KEY_PARAMETER: Final = "Idempotency-Key"
+#: The classes in rising order (the order of the ``PriorityClass`` literal): ``normal`` 0, ``high`` 1.
+_PRIORITY_RANK: Final = {name: rank for rank, name in enumerate(get_args(PriorityClass))}
 
 
 class InvalidRequest(ValueError):
@@ -68,6 +70,32 @@ def parse_budget(raw: Any) -> Budget | None:
     return None if budget.is_empty() else budget
 
 
+class PriorityAboveLimit(ValueError):
+    """The body asks for a priority above the tenant's ``max_priority`` (400 ``priority_above_limit``)."""
+
+    def __init__(self, limit: str) -> None:
+        super().__init__(f"priority above {limit}")
+        self.limit = limit
+
+    def to_body(self) -> dict[str, str]:
+        return {"error": "priority_above_limit", "limit": self.limit}
+
+
+def parse_priority(raw: Any, settings: ClientSettings) -> PriorityClass:
+    """The priority of a new Request (Phase 5 Req 7.1, 7.2): the body's, else the tenant's default.
+
+    Anything but the strings ``normal`` and ``high`` is a 400 ``invalid_request`` naming ``priority`` (``null`` counts
+    as absent). A value above ``settings.max_priority`` is :class:`PriorityAboveLimit`; a lower one is always allowed.
+    """
+    if raw is None:
+        return settings.default_priority
+    if not isinstance(raw, str) or raw not in _PRIORITY_RANK:  # type first: a list or object is unhashable
+        raise InvalidRequest("priority")
+    if _PRIORITY_RANK[raw] > _PRIORITY_RANK[settings.max_priority]:
+        raise PriorityAboveLimit(settings.max_priority)
+    return cast(PriorityClass, raw)
+
+
 def above_limit_body(error: BudgetError) -> dict[str, Any]:
     """400 body of ``budget_above_limit``; ``max_cost`` limits are decimal text, as in the Request view."""
     limit = error.limit
@@ -87,6 +115,7 @@ def client_spec(
     idempotency_key: str | None,
     limits: ClientLimitsConfig,
     events: EventsConfig,
+    priority: PriorityClass = "normal",
 ) -> ClientRequestSpec:
     """The Phase 4 fields stored with a new Request (Req 3.1, 4.2, 5.4, 6.5, 8.1), and its tenant (Phase 5 Req 3.1).
 
@@ -106,14 +135,17 @@ def client_spec(
         events_max_len=events.max_len,
         tenant=settings.tenant,  # Phase 5 Req 3.1, 3.7
         tenant_max_active=settings.tenant_max_active,
+        priority=priority,  # the store keeps it only when ``high`` (Phase 5 Req 7.3)
     )
 
 
 __all__ = [
     "BudgetBody",
     "InvalidRequest",
+    "PriorityAboveLimit",
     "above_limit_body",
     "client_spec",
     "parse_budget",
     "parse_idempotency_key",
+    "parse_priority",
 ]

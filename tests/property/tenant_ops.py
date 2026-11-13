@@ -116,6 +116,11 @@ class World:
         ):
             self._count(tenant, f"tokens/{direction}/{record.provider}/{record.model}", n)
 
+    def adopt(self, rid: str, tenant: str) -> None:
+        """A Request created outside the model (through the Gateway): from here on the model knows it."""
+        self.recs.append(Rec(rid, tenant, "Pending"))
+        self._count(tenant, "submitted")
+
     def _pick(self, target: int, *statuses: str) -> Rec | None:
         pool = [r for r in self.recs if r.status in statuses]
         return pool[target % len(pool)] if pool else None

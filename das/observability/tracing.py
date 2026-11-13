@@ -60,6 +60,7 @@ ALLOWED_ATTRIBUTES: Final = frozenset(
         "das.capability",
         "das.agent_id",
         "das.role",
+        "das.tenant",  # Phase 5 Req 8.3: on gateway.submit and manager.request only; never a key or a fingerprint
         "llm.provider",
         "llm.model",
         "llm.operation",

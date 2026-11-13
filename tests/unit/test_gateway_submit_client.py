@@ -77,7 +77,7 @@ async def test_submit_creates_a_request_owned_by_the_key(client, fake_redis, rec
     assert await active(fake_redis) == {rid}  # Req 3.1
     stored = await fake_redis.hget(keys.request(rid), keys.F_CLIENT_FP)
     assert (stored.decode() if isinstance(stored, bytes) else stored) == fp(KEY)
-    assert recorders.value("das_requests_submitted_total") == 1
+    assert recorders.value("das_requests_submitted_total", tenant="default") == 1
 
 
 # --------------------------------------------------------------------------- idempotency
@@ -92,7 +92,7 @@ async def test_replay_returns_the_original_request_without_creating_another(clie
     assert again.headers["Idempotent-Replayed"] == "true"
     assert "Idempotent-Replayed" not in first.headers
     assert len(await active(fake_redis)) == 1
-    assert recorders.value("das_requests_submitted_total") == 1  # Req 4.3: a replay is not a submit
+    assert recorders.value("das_requests_submitted_total", tenant="default") == 1  # Req 4.3: a replay is not a submit
     assert recorders.value("das_idempotent_replays_total") == 1
 
 

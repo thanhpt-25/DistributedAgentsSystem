@@ -285,6 +285,7 @@ class RequestDriver:
         self._clock = deps.clock
         self._now_source: TimeSource = deps.time_source or deps.store.server_time
         self._snap: RequestSnapshot | None = None
+        self._tenant = "default"
         self._cursor = "0-0"
         self._agents: tuple[AgentRecord, ...] = ()
         self._finish: RunSummarizer | FinalizeFailed | None = None
@@ -363,7 +364,7 @@ class RequestDriver:
                 "manager.request",
                 parent=stored.trace_context,
                 root=stored.trace_context is None,
-                attributes={"das.request_id": self.rid},
+                attributes={"das.request_id": self.rid, "das.tenant": stored.tenant},  # Phase 5 Req 8.3
             )
         )
         self._request_span = span
@@ -410,6 +411,7 @@ class RequestDriver:
 
     def _adopt(self, stored: StoredRequest) -> None:
         self._snap = RequestSnapshot.from_stored(stored)
+        self._tenant = stored.tenant  # for the per-tenant finished counter (Phase 5 Req 8.1), not for the reducer
         self._cursor = stored.inbox_cursor or "0-0"
 
     def _check_lease(self) -> None:
@@ -1100,7 +1102,7 @@ class RequestDriver:
         duration = 0.0
         if finished is not None and created is not None:
             duration = max(0, finished - created) / 1000.0
-        self._metrics.request_finished(status, duration)
+        self._metrics.request_finished(status, duration, self._tenant)
 
 
 def _llm_meta(entry: InboxEntry) -> dict[str, str] | None:

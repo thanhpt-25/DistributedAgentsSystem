@@ -107,7 +107,7 @@ HTTP_METHODS: frozenset[str] = _values(HttpMethod)
 STATUS_CODES: frozenset[str] = frozenset(str(code) for code in range(100, 600))
 
 #: Labels bounded by a configured distinct-value limit (Req 5.3).
-DYNAMIC_LABELS: frozenset[str] = frozenset({"capability", "queue", "provider", "model"})
+DYNAMIC_LABELS: frozenset[str] = frozenset({"capability", "queue", "provider", "model", "tenant"})
 #: Labels whose allowed set is only known at runtime (route templates, Price_Table currency).
 RUNTIME_LABELS: frozenset[str] = frozenset({"route", "currency"})
 #: Every label name the recorder may use (Req 5.1).
@@ -115,7 +115,7 @@ ALLOWED_LABEL_NAMES: frozenset[str] = frozenset(
     {
         "status", "state", "capability", "route", "method", "status_code", "queue", "kind",
         "reason", "role", "action", "outcome", "provider", "model", "operation", "direction",
-        "currency",
+        "currency", "tenant",
     }
 )
 
@@ -145,10 +145,11 @@ def _spec(
 
 
 CATALOG: tuple[MetricSpec, ...] = (
-    _spec("das_requests_submitted_total", "counter", "Requests created by the Gateway_API."),
+    # The only two metrics with a ``tenant`` label (Phase 5 Req 8.1); the duration histogram below has none.
+    _spec("das_requests_submitted_total", "counter", "Requests created by the Gateway_API.", ("tenant",)),
     _spec(
         "das_requests_finished_total", "counter", "Requests that reached a terminal status.",
-        ("status",), status=REQUEST_FINISH_STATUSES,
+        ("status", "tenant"), status=REQUEST_FINISH_STATUSES,
     ),
     _spec(
         "das_request_duration_seconds", "histogram",
@@ -512,10 +513,12 @@ class _Facade:
 
 
 class _RequestFinishMixin(_Facade):
-    def request_finished(self, status: RequestStatus, duration_seconds: float) -> None:
-        """Req 2.2 / 2.3: one increment plus one duration observation (clamped at 0)."""
+    def request_finished(self, status: RequestStatus, duration_seconds: float, tenant: str) -> None:
+        """Req 2.2 / 2.3: one increment plus one duration observation (clamped at 0).
+
+        Only the counter is per tenant; the duration histogram keeps its ``status`` label alone (Phase 5 Req 8.1)."""
         labels = {"status": status}
-        self._r.inc("das_requests_finished_total", labels)
+        self._r.inc("das_requests_finished_total", {**labels, "tenant": tenant})
         self._r.observe("das_request_duration_seconds", labels, _seconds(duration_seconds))
 
 
@@ -617,8 +620,8 @@ class LLMMetricsObserver:
 class GatewayMetrics(_RequestFinishMixin):
     """Gateway_API metrics (Req 2.1, 2.3, 2.10, 3.9)."""
 
-    def request_submitted(self) -> None:
-        self._r.inc("das_requests_submitted_total")
+    def request_submitted(self, tenant: str) -> None:
+        self._r.inc("das_requests_submitted_total", {"tenant": tenant})
 
     def http_request(
         self, route: str | None, method: str, status_code: int, duration_seconds: float

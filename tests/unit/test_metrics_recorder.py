@@ -83,8 +83,8 @@ def test_render_content_type_and_one_help_type_per_metric() -> None:
     for spec in CATALOG:
         assert sum(1 for ln in lines if ln.startswith(f"# HELP {spec.name} ")) == 1, spec.name
         assert sum(1 for ln in lines if ln.startswith(f"# TYPE {spec.name} ")) == 1, spec.name
-    rec.inc("das_requests_submitted_total")
-    rec.inc("das_requests_finished_total", {"status": "Failed"})
+    rec.inc("das_requests_submitted_total", {"tenant": "default"})
+    rec.inc("das_requests_finished_total", {"status": "Failed", "tenant": "default"})
     rec.observe("das_job_attempts", {"capability": "c"}, 1)
     for fam in text_string_to_metric_families(rec.render()[0].decode()):
         assert not any(s.name.endswith("_created") for s in fam.samples)
@@ -117,10 +117,11 @@ def test_default_and_configured_buckets() -> None:
 
 def test_counter_and_histogram_recording() -> None:
     rec, _, _ = make()
-    rec.inc("das_requests_submitted_total")
-    rec.inc("das_requests_submitted_total", amount=2)
+    tenant = {"tenant": "default"}
+    rec.inc("das_requests_submitted_total", tenant)
+    rec.inc("das_requests_submitted_total", tenant, amount=2)
     rec.observe("das_request_duration_seconds", {"status": RequestStatus.FAILED}, 1.5)
-    assert value(rec, "das_requests_submitted_total") == 3
+    assert value(rec, "das_requests_submitted_total", tenant="default") == 3
     assert value(rec, "das_request_duration_seconds_count", status="Failed") == 1
     assert value(rec, "das_request_duration_seconds_sum", status="Failed") == 1.5
 
@@ -128,9 +129,9 @@ def test_counter_and_histogram_recording() -> None:
 def test_enumerated_label_outside_set_becomes_other_and_warns_once() -> None:
     rec, log, _ = make()
     for _ in range(3):
-        rec.inc("das_requests_finished_total", {"status": "Running"})
+        rec.inc("das_requests_finished_total", {"status": "Running", "tenant": "default"})
     rec.inc("das_http_requests_total", {"route": "/x/123", "method": "GET", "status_code": 700})
-    assert value(rec, "das_requests_finished_total", status="_other") == 3
+    assert value(rec, "das_requests_finished_total", status="_other", tenant="default") == 3
     assert value(
         rec, "das_http_requests_total", route="_other", method="GET", status_code="_other"
     ) == 1
@@ -178,7 +179,7 @@ def test_recording_errors_are_swallowed_and_rate_limited() -> None:
     rec, log, clock = make()
     rec.inc("das_unknown_total")
     rec.inc("das_unknown_total")
-    rec.inc("das_requests_submitted_total", amount=-1)  # prometheus rejects negative
+    rec.inc("das_requests_submitted_total", {"tenant": "default"}, amount=-1)  # prometheus rejects negative
     rec.observe("das_requests_submitted_total", None, 1)  # wrong kind
     rec.inc("das_requests_finished_total", {"bogus": "x"})  # wrong labels
     events = log.events("metric_record_failed")
@@ -192,8 +193,8 @@ def test_recording_errors_are_swallowed_and_rate_limited() -> None:
     rec.inc("das_unknown_total")
     assert len(log.events("metric_record_failed")) == 4
     # other observations still recorded
-    rec.inc("das_requests_submitted_total")
-    assert value(rec, "das_requests_submitted_total") == 1
+    rec.inc("das_requests_submitted_total", {"tenant": "default"})
+    assert value(rec, "das_requests_submitted_total", tenant="default") == 1
 
 
 def test_set_function_and_failing_fn_keeps_last_value() -> None:
@@ -229,8 +230,8 @@ def test_noop_recorder_and_build_recorder() -> None:
     clock = FakeClock()
     noop = build_recorder(MetricsConfig(enabled=False), clock=clock)
     assert isinstance(noop, NoopRecorder)
-    noop.inc("das_requests_submitted_total")
-    GatewayMetrics(noop).request_submitted()
+    noop.inc("das_requests_submitted_total", {"tenant": "default"})
+    GatewayMetrics(noop).request_submitted("default")
     assert noop.render() == (b"", CONTENT_TYPE)
     real = build_recorder(MetricsConfig(), clock=clock, log=ListLog())
     assert not isinstance(real, NoopRecorder)
@@ -239,9 +240,9 @@ def test_noop_recorder_and_build_recorder() -> None:
 def test_two_recorders_are_independent() -> None:
     a, _, _ = make()
     b, _, _ = make()
-    a.inc("das_requests_submitted_total")
-    assert value(a, "das_requests_submitted_total") == 1
-    assert value(b, "das_requests_submitted_total") == 0
+    a.inc("das_requests_submitted_total", {"tenant": "default"})
+    assert value(a, "das_requests_submitted_total", tenant="default") == 1
+    assert value(b, "das_requests_submitted_total", tenant="default") is None
 
 
 # --- facades ----------------------------------------------------------------------------
@@ -250,7 +251,7 @@ def test_two_recorders_are_independent() -> None:
 def test_manager_facade() -> None:
     rec, _, _ = make()
     m = ManagerMetrics(rec)
-    m.request_finished(RequestStatus.COMPLETED, -4)
+    m.request_finished(RequestStatus.COMPLETED, -4, "default")
     m.job_transition("research", JobState.SUCCEEDED)
     m.job_attempts("research", 2)
     m.queue_depth("das.results", 5)
@@ -265,7 +266,7 @@ def test_manager_facade() -> None:
     m.retention_deleted("inbox", 3)
     m.retention_deleted("request", 0)
     assert value(rec, "das_request_duration_seconds_sum", status="Completed") == 0
-    assert value(rec, "das_requests_finished_total", status="Completed") == 1
+    assert value(rec, "das_requests_finished_total", status="Completed", tenant="default") == 1
     assert value(rec, "das_job_transitions_total", capability="research", state="Succeeded") == 1
     assert value(rec, "das_job_attempts_sum", capability="research") == 2
     assert value(rec, "das_queue_depth", queue="das.results") == 5
@@ -307,15 +308,15 @@ def test_gateway_dlq_admin_and_cancel() -> None:
     rec, _, _ = make()
     g = GatewayMetrics(rec)
     g.dlq_admin_action("replay", "lease_held")
-    g.request_finished(RequestStatus.CANCELLED, 2)
+    g.request_finished(RequestStatus.CANCELLED, 2, "default")
     assert value(rec, "das_dlq_admin_actions_total", action="replay", outcome="lease_held") == 1
-    assert value(rec, "das_requests_finished_total", status="Cancelled") == 1
+    assert value(rec, "das_requests_finished_total", status="Cancelled", tenant="default") == 1
 
 
 def test_output_has_no_secret_like_values() -> None:
     rec, _, _ = make()
     secret = "sk-SECRET-123"
-    rec.inc("das_requests_finished_total", {"status": secret})
+    rec.inc("das_requests_finished_total", {"status": secret, "tenant": "default"})
     body, _ = rec.render()
     assert secret.encode() not in body
 

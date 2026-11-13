@@ -98,12 +98,12 @@ async def client(state_store: StateStore, fake_redis, recorders: Recorders):
 
 async def test_submitted_counter_only_on_ok(client, recorders: Recorders):
     assert (await client.post("/v1/requests", json={"prompt": "hi"}, headers=AUTH)).status_code == 202
-    assert recorders.value("das_requests_submitted_total") == 1
+    assert recorders.value("das_requests_submitted_total", tenant="default") == 1
     # 400 (validation), 400 (body), 401 (auth) never count (Req 2.1).
     await client.post("/v1/requests", json={"prompt": "   "}, headers=AUTH)
     await client.post("/v1/requests", json={"text": "x"}, headers=AUTH)
     await client.post("/v1/requests", json={"prompt": "hi"}, headers={"X-API-Key": "bad"})
-    assert recorders.value("das_requests_submitted_total") == 1
+    assert recorders.value("das_requests_submitted_total", tenant="default") == 1
 
 
 async def test_submitted_counter_unchanged_on_store_failure(fake_redis, recorders: Recorders):
@@ -118,7 +118,7 @@ async def test_submitted_counter_unchanged_on_store_failure(fake_redis, recorder
     async with _client(app) as c:
         r = await c.post("/v1/requests", json={"prompt": "hi"}, headers=AUTH)
     assert r.status_code == 503 and r.json() == {"error": "service_unavailable"}
-    assert recorders.value("das_requests_submitted_total") == 0
+    assert recorders.value("das_requests_submitted_total", tenant="default") == 0
 
 
 @pytest.mark.parametrize("ratio", [1.0, 0.0])
@@ -163,11 +163,12 @@ async def test_cancel_finished_metrics_only_on_ok(client, state_store, recorders
     rid = await state_store.create_request("hello")
     assert (await client.post(f"/v1/requests/{rid}/cancel", headers=AUTH)).status_code == 202
     labels = {"status": "Cancelled"}
-    assert recorders.value("das_requests_finished_total", **labels) == 1
+    finished = {**labels, "tenant": "default"}  # the counter is per tenant; the histogram is not (Phase 5 Req 8.1)
+    assert recorders.value("das_requests_finished_total", **finished) == 1
     assert recorders.value("das_request_duration_seconds_count", **labels) == 1
     # TERMINAL (409) leaves both unchanged (Req 2.13).
     assert (await client.post(f"/v1/requests/{rid}/cancel", headers=AUTH)).status_code == 409
-    assert recorders.value("das_requests_finished_total", **labels) == 1
+    assert recorders.value("das_requests_finished_total", **finished) == 1
     assert recorders.value("das_request_duration_seconds_count", **labels) == 1
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from das.client.budget import Budget
-from das.config.schema import BudgetConfig, ClientLimitsConfig, TenantConfig
+from das.config.schema import BudgetConfig, ClientLimitsConfig, PriorityClass, TenantConfig
 from das.tenancy.settings import layered
 
 
@@ -27,6 +27,10 @@ class ClientSettings:
     #: above (Phase 5 Req 3.7, 4.3).
     tenant: str = "default"
     tenant_max_active: int = 0
+    #: What a submit with no ``priority`` gets, and the highest it may ask for (Phase 5 Req 7.1, 7.2). The
+    #: Default_Tenant has no TenantConfig and may use ``high``.
+    default_priority: PriorityClass = "normal"
+    max_priority: PriorityClass = "high"
 
 
 def _budget(config: BudgetConfig | None) -> Budget | None:
@@ -53,4 +57,6 @@ def resolve_settings(
         webhook_secret_name=s.webhook_secret_name,
         tenant=tenant.id if tenant is not None else "default",
         tenant_max_active=tenant.max_active_requests if tenant is not None else 0,
+        default_priority=tenant.default_priority if tenant is not None else "normal",
+        max_priority=tenant.max_priority if tenant is not None else "high",
     )

@@ -104,7 +104,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [ ] 5.6 Update the OpenAPI schema
     - New routes, `tenant` and `priority` parameters, the new error bodies; the OpenAPI test lists every route
     - _Requirements: 2.2, 6.3, 7.1_
-  - [ ] 5.7 Write stateful property test for tenant isolation
+  - [x] 5.7 Write stateful property test for tenant isolation
     - **Property 1: Tenant isolation**
     - **Validates: Requirements 3.2, 3.3, 3.4, 3.6, 5.3**
   - [ ] 5.8 Write unit tests for the error responses
@@ -112,7 +112,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - _Requirements: 2.3, 3.2, 3.3, 3.4, 3.7, 5.3, 6.3, 7.1, 7.2_
 
 - [ ] 6. Priority
-  - [ ] 6.1 Validate and store priority
+  - [x] 6.1 Validate and store priority
     - `priority` in the submit body (`invalid_request` naming `priority`), tenant `default_priority` and `max_priority` (`priority_above_limit`), stored only when `high`, `priority` in the Request view
     - _Requirements: 7.1, 7.2, 7.3_
   - [ ] 6.2 Carry priority to dispatch
@@ -129,13 +129,13 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - _Requirements: 7.5, 7.6_
 
 - [ ] 7. Observability
-  - [ ] 7.1 Add the tenant label to two metrics
+  - [x] 7.1 Add the tenant label to two metrics
     - `DYNAMIC_LABELS` gains `tenant`, limited by `label_limits.tenant`; `das_requests_submitted_total` (Gateway, from the Principal) and `das_requests_finished_total` (Manager, from the snapshot)
     - _Requirements: 8.1_
   - [ ] 7.2 Add rejection reasons
     - `das_client_rejections_total` reasons `forbidden`, `tenant_quota_exceeded`, `priority_above_limit`
     - _Requirements: 8.2_
-  - [ ] 7.3 Add the Span attribute
+  - [x] 7.3 Add the Span attribute
     - `das.tenant` in the Tracer allow-list, set on `gateway.submit` and `manager.request`; a test that no label, attribute or index carries a Key_Fingerprint or key value
     - _Requirements: 8.3, 8.4_
   - [ ] 7.4 Add the Grafana panel

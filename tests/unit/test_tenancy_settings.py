@@ -86,8 +86,11 @@ def test_a_tenant_with_no_settings_changes_nothing() -> None:
     plain = TenantConfig.model_validate({"id": "team-a", "keys": [{"fingerprint": FP, "scopes": ["read"]}]})
     resolved = resolve_settings(FP, lim, plain)
     assert (resolved.tenant, resolved.tenant_max_active) == ("team-a", 0)  # the tenant is named; it limits nothing
+    # A tenant with no settings keeps the default priorities too: normal, and no higher than normal (Req 7.1, 7.2).
+    assert (resolved.default_priority, resolved.max_priority) == ("normal", "normal")
     # Every limit, budget and webhook field is exactly what the same key gets without a tenant.
-    assert replace(resolved, tenant="default") == resolve_settings(FP, lim)
+    same = replace(resolved, tenant="default", max_priority="high")  # only the Default_Tenant may use high
+    assert same == resolve_settings(FP, lim)
 
 
 # --------------------------------------------------------------------------- budget and webhook
@@ -130,6 +133,7 @@ def test_the_resolved_settings_keep_their_phase_4_fields_and_add_the_tenant() ->
         "fingerprint", "rate", "burst", "max_active_requests", "max_streams",
         "default_budget", "webhook_url", "webhook_secret_name",
         "tenant", "tenant_max_active",  # Phase 5: whose key it is, and that tenant's own quota
+        "default_priority", "max_priority",  # Phase 5 Req 7.1, 7.2
     }  # fmt: skip
     assert (s.tenant, s.tenant_max_active) == ("team-a", 0)
     with_quota = TenantConfig.model_validate(

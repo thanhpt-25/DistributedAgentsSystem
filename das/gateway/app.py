@@ -69,10 +69,12 @@ from das.gateway.openapi import (
 )
 from das.gateway.submit import (
     InvalidRequest,
+    PriorityAboveLimit,
     above_limit_body,
     client_spec,
     parse_budget,
     parse_idempotency_key,
+    parse_priority,
 )
 from das.gateway.validation import validate_prompt
 from das.gateway.webhooks import webhook_senders
@@ -126,6 +128,9 @@ class SubmitBody(BaseModel):
     prompt: str
     #: Raw ``budget`` value: parsed by ``parse_budget`` so a bad field is a 400 naming it (Phase 4 Req 5.1).
     budget: Any = None
+    #: Raw ``priority`` value, ``normal`` or ``high``: parsed by ``parse_priority`` so a bad one is a 400 naming it
+    #: (Phase 5 Req 7.1).
+    priority: Any = None
 
 
 async def _bounded(op: Awaitable[T], timeout: float = STORE_TIMEOUT) -> T:
@@ -190,6 +195,7 @@ def request_view(
     body: dict[str, Any] = {
         "request_id": snap.request_id,
         "status": snap.status.value,
+        "priority": snap.priority,  # Phase 5 Req 7.3: ``normal`` when none is stored
         "jobs": [{"job_id": jid, "state": rec.state.value} for jid, rec in snap.jobs.items()],
         "transitions": _transition_views(snap),
     }
@@ -377,7 +383,7 @@ def create_app(
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> Any:
         settings: ClientSettings = request.state.client_settings
-        with tracer.span("gateway.submit") as span:
+        with tracer.span("gateway.submit", attributes={"das.tenant": settings.tenant}) as span:
             problem = validate_prompt(body.prompt, max_prompt_length)
             if problem is not None:
                 span.fail(problem.error)
@@ -386,8 +392,12 @@ def create_app(
                 key = parse_idempotency_key(idempotency_key)
                 client_budget = parse_budget(body.budget)
                 effective_budget = resolve_budget(client_budget, settings.default_budget)
+                priority = parse_priority(body.priority, settings)
             except InvalidRequest as exc:
                 span.fail("invalid_request")
+                return _error(status.HTTP_400_BAD_REQUEST, exc.to_body())
+            except PriorityAboveLimit as exc:
+                span.fail("priority_above_limit")
                 return _error(status.HTTP_400_BAD_REQUEST, exc.to_body())
             except BudgetError as exc:
                 metrics.client_rejected("budget_above_limit")
@@ -401,6 +411,7 @@ def create_app(
                 idempotency_key=key,
                 limits=limits_config,
                 events=events_config,
+                priority=priority,
             )
             # Persisted in the same atomic write that creates the Request (Req 6.1); the same
             # script answers a replay or a quota rejection without writing (Req 4.2-4.5, 3.2).
@@ -440,7 +451,7 @@ def create_app(
                 content={"request_id": rid},
                 headers={"Idempotent-Replayed": "true"},
             )
-        metrics.request_submitted()  # only after submit_request created the Request (Req 2.1)
+        metrics.request_submitted(request.state.principal.tenant)  # only after the Request was created (Req 2.1)
         with bind_request(rid):
             log.info("request created")
         return {"request_id": rid}
@@ -481,6 +492,7 @@ def create_app(
         metrics.request_finished(
             RequestStatus.CANCELLED,
             _duration_seconds(result.finished_at_ms, result.created_at_ms),
+            owner or DEFAULT_TENANT,  # the pre-read above found the Request; the fallback is a creation race
         )
         background.add_task(notify_owner, request_id)
         return {"status": RequestStatus.CANCELLED.value}

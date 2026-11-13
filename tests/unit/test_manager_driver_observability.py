@@ -23,7 +23,7 @@ from das.models import JobState, RequestStatus
 from das.observability.metrics import ManagerMetrics, MetricsRecorder
 from das.observability.trace_context import TraceContext
 from das.observability.tracing import OtelTracer, build_tracer
-from das.state import StateStore, WriteResult, keys
+from das.state import ClientRequestSpec, StateStore, WriteResult, keys
 from das.transport.base import Delivery
 from tests.fakes.memory_transport import MemoryTransport
 from tests.unit.test_manager_driver import (
@@ -98,9 +98,9 @@ async def test_completed_request_records_finish_transitions_and_attempts(
     assert await asyncio.wait_for(task, TIMEOUT) is DriverOutcome.COMPLETED
 
     completed = {"status": "Completed"}
-    assert _value(rec, "das_requests_finished_total", completed) == 1  # Req 2.2
-    assert _value(rec, "das_request_duration_seconds_count", completed) == 1
-    assert _value(rec, "das_requests_finished_total", {"status": "Failed"}) == 0
+    assert _value(rec, "das_requests_finished_total", {**completed, "tenant": "default"}) == 1  # Req 2.2
+    assert _value(rec, "das_request_duration_seconds_count", completed) == 1  # per status only (Phase 5 Req 8.1)
+    assert _value(rec, "das_requests_finished_total", {"status": "Failed", "tenant": "default"}) == 0
 
     for cap in ("search", "write"):  # Req 2.4: one per transition entry, routing cap
         for state in (JobState.WAITING, JobState.READY, JobState.DISPATCHED, JobState.SUCCEEDED):
@@ -146,7 +146,7 @@ async def test_rejected_writes_record_nothing(state_store: StateStore, fake_redi
 
     assert _transitions_total(rec) == before  # Req 2.5
     for status in ("Completed", "Failed"):
-        assert _value(rec, "das_requests_finished_total", {"status": status}) == 0
+        assert _value(rec, "das_requests_finished_total", {"status": status, "tenant": "default"}) == 0
     stored = await state_store.load_snapshot(rid, include_transitions=True)
     assert stored is not None
     assert _transitions_total(rec) <= len([t for t in stored.transitions or [] if t.job_id])
@@ -162,7 +162,7 @@ async def test_failed_request_counts_failed_and_attempts(state_store: StateStore
     env.worker.status = "Failed"
     _, task = await env.submit_and_claim()
     assert await asyncio.wait_for(task, TIMEOUT) is DriverOutcome.FAILED
-    assert _value(rec, "das_requests_finished_total", {"status": "Failed"}) == 1
+    assert _value(rec, "das_requests_finished_total", {"status": "Failed", "tenant": "default"}) == 1
     # "a" Failed after 1 attempt; "b" Skipped before any dispatch: attempts 0 (Req 2.7).
     assert _value(rec, "das_job_attempts_sum", {"capability": "search"}) == 1
     assert _value(rec, "das_job_attempts_count", {"capability": "write"}) == 1
@@ -324,7 +324,7 @@ async def test_finalize_lease_lost_records_no_finish_and_counts_loss(
     assert [a.ok for a in answers] == [False]
 
     for status in ("Completed", "Failed"):
-        assert _value(rec, "das_requests_finished_total", {"status": status}) == 0
+        assert _value(rec, "das_requests_finished_total", {"status": status, "tenant": "default"}) == 0
         assert _value(rec, "das_request_duration_seconds_count", {"status": status}) == 0
     assert _value(rec, "das_lease_losses_total", {"reason": "held_by_other"}) == 1  # Req 3.4
     assert _value(rec, "das_lease_losses_total", {"reason": "store_unreachable"}) == 0
@@ -374,7 +374,23 @@ async def test_request_cancel_by_gateway_records_no_manager_job_metrics(
     for cap in ("search", "write"):
         assert _value(rec, "das_job_attempts_count", {"capability": cap}) == 0
     for status in ("Completed", "Failed", "Cancelled"):
-        assert _value(rec, "das_requests_finished_total", {"status": status}) == 0
+        assert _value(rec, "das_requests_finished_total", {"status": status, "tenant": "default"}) == 0
+
+
+async def test_a_finished_request_is_counted_for_its_own_tenant(state_store: StateStore, fake_redis):
+    """Phase 5 Req 8.1: the Manager takes the tenant from the Request it finished, not from anything it was started
+    with, so a Request of ``team-a`` never lands on ``default``."""
+    rec = _recorder()
+    env = await make_env(state_store, fake_redis, tweak=_wire(rec))
+    spec = ClientRequestSpec(fingerprint="cbabecbd", tenant="team-a")
+    rid = (await state_store.submit_request("hello", spec)).request_id
+    assert rid is not None
+    acquired = await state_store.acquire_lease(rid, "m1", env.drivers.lease_duration)
+    assert acquired.ok and acquired.lease is not None
+    assert await asyncio.wait_for(env.drivers.on_claimed(acquired.lease), TIMEOUT) is DriverOutcome.COMPLETED
+
+    assert _value(rec, "das_requests_finished_total", {"status": "Completed", "tenant": "team-a"}) == 1
+    assert _value(rec, "das_requests_finished_total", {"status": "Completed", "tenant": "default"}) == 0
 
 
 async def test_span_chain_across_takeover_shares_gateway_trace(
