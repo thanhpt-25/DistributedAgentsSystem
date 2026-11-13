@@ -21,7 +21,7 @@ Intended semantic changes from earlier phases:
 - The repository may contain a Helm chart and Kubernetes manifests (Requirements 10 and 11). This replaces v2 Req 20.6.
 - v2 Req 20.7 is **unchanged**: one Redis instance, no replication, Sentinel or Cluster. Redis HA is a later phase.
 
-Assumptions pending product-owner confirmation (they follow the recommendations of the Phase 5 plan, `docs/superpowers/plans/2026-11-12-das-phase5-multi-tenant-deployable.md`, Decisions 1, 3 and 8): tenants and keys come from static configuration (no key-management API); Redis HA is out of scope; Kubernetes is verified by static checks on every push plus a `kind` end-to-end job on `main`. If any of these changes, Requirements 1, 12 and 11 respectively are the ones to revisit.
+Decisions confirmed by the product owner on 2026-11-13 (they follow the recommendations of the Phase 5 plan, `docs/superpowers/plans/2026-11-12-das-phase5-multi-tenant-deployable.md`, Decisions 1, 3 and 8): tenants and keys come from static configuration (no key-management API); Redis HA is out of scope; Kubernetes is verified by static checks on every push plus a `kind` end-to-end job on `main`. If any of these changes, Requirements 1, 12 and 11 respectively are the ones to revisit. The same day the product owner chose to keep the `scope` field of a 403 for Default_Tenant keys (Requirement 2.3), the one addition to a Phase 4 response besides `priority` that Requirement 9.5 does not list.
 
 Places where property-based testing applies are marked by criteria of the form "FOR ALL".
 
