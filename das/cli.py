@@ -127,6 +127,21 @@ def build_parser() -> argparse.ArgumentParser:
         description=f"Admin_API_Key is read from ${ADMIN_KEY_ENV}.",
     )
     _add_target_arguments(undrain)
+
+    from das.eval.command import min_pass_argument
+
+    evaluate = sub.add_parser(
+        "eval-plans",
+        help="run the Planner over a dataset of prompts and score its plans",
+        description="Prints a JSON report on stdout. Exit 0 when the valid ratio and the expectation ratio both "
+        "reach --min-pass, 1 when one falls short, 2 for a dataset or configuration that cannot be used.",
+    )
+    evaluate.add_argument("--config", required=True, help="path to the Agent_Config YAML file (its llm section)")
+    evaluate.add_argument("--dataset", required=True, help="path to the JSON Lines dataset")
+    evaluate.add_argument(
+        "--min-pass", type=min_pass_argument, default=0.0, help="ratio from 0 to 1 both ratios must reach (default 0)"
+    )
+    evaluate.add_argument("--log-level", default="info", choices=LOG_LEVELS, help="log level (logs go to stderr)")
     return parser
 
 
@@ -907,10 +922,12 @@ def main(
     *,
     clock: Clock | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
+    eval_llm: Any = None,
 ) -> int:
     """Run the CLI and return the process exit code.
 
-    ``clock`` and ``http_transport`` are test seams for ``das drain`` / ``das undrain``.
+    ``clock`` and ``http_transport`` are test seams for ``das drain`` / ``das undrain``; ``eval_llm`` is one for
+    ``das eval-plans``: an LLMProvider to use instead of building the configured one.
     """
     try:
         args = build_parser().parse_args(argv)
@@ -919,6 +936,10 @@ def main(
     environ = os.environ if env is None else env
     if args.command in ("drain", "undrain"):
         return admin_main(args, environ, clock=clock, transport=http_transport)
+    if args.command == "eval-plans":
+        from das.eval.command import eval_plans_main
+
+        return eval_plans_main(args, environ, fail=_fail, llm=eval_llm)
 
     # Before the config is loaded no credential is known; ConfigError messages
     # never carry values (Req 12.5, 12.6).

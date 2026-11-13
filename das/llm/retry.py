@@ -181,6 +181,12 @@ class LLMProvider:
     async def ping(self) -> bool:
         return await self._adapter.ping()
 
+    async def aclose(self) -> None:
+        """Close the adapter's client when it has one (for a short-lived caller such as ``das eval-plans``)."""
+        close = getattr(self._adapter, "aclose", None)
+        if close is not None:
+            await close()
+
     @property
     def observer(self) -> LLMCallObserver | None:
         return self._observer
