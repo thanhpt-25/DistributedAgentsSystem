@@ -308,3 +308,27 @@ async def test_the_message_of_a_refusal_is_short() -> None:
     with pytest.raises(ToolError) as info:
         await tool(Net()).fetch("https://" + "a" * 500 + ".com/")
     assert len(str(info.value)) < 200
+
+
+async def test_a_resolver_that_never_answers_times_out_as_a_tool_timeout() -> None:
+    import asyncio
+
+    from das.tools.types import ToolTimeout
+
+    async def hang(host: str) -> Sequence[str]:
+        await asyncio.Event().wait()
+        return [PUBLIC]
+
+    net = Net()
+    fetch = HttpFetch(("example.com",), timeout=0.05, resolver=hang, transport=httpx.MockTransport(net))
+    with pytest.raises(ToolTimeout, match="timed out"):
+        await fetch.fetch("https://example.com/")
+    assert net.requests == []
+
+
+async def test_a_request_timeout_is_a_tool_timeout() -> None:
+    from das.tools.types import ToolTimeout
+
+    net = Net(httpx.ReadTimeout("slow", request=httpx.Request("GET", "https://x")))
+    with pytest.raises(ToolTimeout):
+        await tool(net).fetch("https://example.com/")

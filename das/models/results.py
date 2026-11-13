@@ -19,6 +19,13 @@ class TokenUsage(DasModel):
     def zero(cls) -> TokenUsage:
         return cls()
 
+    def __add__(self, other: TokenUsage) -> TokenUsage:
+        return TokenUsage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            total_tokens=self.total_tokens + other.total_tokens,
+        )
+
 
 JobResultStatus = Literal["Succeeded", "Failed", "TimedOut", "Cancelled"]
 

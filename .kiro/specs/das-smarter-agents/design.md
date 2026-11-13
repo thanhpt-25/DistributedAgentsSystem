@@ -90,7 +90,12 @@ CaseScore` (pure), `summarize(scores) -> Report`, and `run(config, cases)` which
   `hasattr`; the Worker refuses to start (exit 2).
 - The registry maps a name to `Tool(spec, run)`; `run(arguments, ctx) -> str` may raise `ToolError`, which the loop turns
   into the result text. `ToolContext` carries the Clock and the per-tool settings.
-- `ToolLoop.run(job, tools, cancel)` implements Req 5.6.
+- `ToolLoop.run(system, turns, specs, model=)` implements Req 5.6 (`das/tools/loop.py`). A *round* is one completion that
+  asks for tools plus running them; a Job may use `max_rounds` rounds, the model is then asked once more, and a model that
+  still asks for tools fails the Job `tool_rounds_exceeded` with its last requests unrun (so at most `max_rounds + 1`
+  completions). The loop is run as a task by the executor, whose timeout and cancel race stop it between and during
+  rounds. A Structured_Job that also uses tools gets the single corrective completion of Req 1.5 inside the same
+  conversation; a corrective reply that asks for tools again is a violation, not a new round.
 - `calculator`: parse with `ast`, walk only `Expression, BinOp, UnaryOp, Constant, Call` over a whitelist; reject names,
   attributes, comprehensions; caps: 200 characters, exponent at most 1000, result below 10^1000.
 - `http_fetch`: a `Resolver` is injected; the host is checked against `allowed_hosts`, then every resolved address with

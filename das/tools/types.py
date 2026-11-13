@@ -19,6 +19,10 @@ class ToolError(Exception):
     says what was wrong in a few words and never repeats what the model sent."""
 
 
+class ToolTimeout(ToolError):
+    """A tool ran out of time. The model reads it like any :class:`ToolError`; the metrics count it as a timeout."""
+
+
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
     """A tool offered to the model: its name, what it does, and a JSON Schema object for its arguments."""
@@ -87,5 +91,6 @@ class ToolTurn:
 
 
 __all__ = [
-    "AssistantTurn", "ToolCall", "ToolError", "ToolResult", "ToolResults", "ToolSpec", "ToolTurn", "Turn",
+    "AssistantTurn", "ToolCall", "ToolError", "ToolResult", "ToolResults", "ToolSpec", "ToolTimeout", "ToolTurn",
+    "Turn",
 ]

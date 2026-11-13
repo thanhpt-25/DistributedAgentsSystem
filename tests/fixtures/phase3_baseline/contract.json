@@ -2627,6 +2627,30 @@
     {
       "allowed": {
         "outcome": [
+          "error",
+          "ok",
+          "timeout"
+        ],
+        "tool": [
+          "calculator",
+          "current_time",
+          "http_fetch",
+          "run_python",
+          "unknown"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Tool calls a Worker ran for the model, by tool and outcome.",
+      "labels": [
+        "tool",
+        "outcome"
+      ],
+      "name": "das_tool_calls_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "outcome": [
           "delivered",
           "failed",
           "retry"

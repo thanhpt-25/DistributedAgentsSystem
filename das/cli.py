@@ -429,12 +429,28 @@ async def _start_ops_server(server: Any, port: int) -> None:
     log.info("ops server listening", port=server.port)
 
 
-def _job_executor(llm: Any, agent_id: str, job_timeout: float, llm_config: Any) -> Any:
-    """The Worker's JobExecutor, with the Capability_Models of ``llm.capability_models`` (Phase 6 Req 2.2)."""
+def _job_executor(
+    llm: Any,
+    agent_id: str,
+    job_timeout: float,
+    llm_config: Any,
+    *,
+    tools: Any = None,
+    tools_config: Any = None,
+    tool_observer: Any = None,
+) -> Any:
+    """The Worker's JobExecutor: the Capability_Models of ``llm.capability_models`` (Phase 6 Req 2.2), and the enabled
+    tools with the ``tools`` section's limits and the metrics observer of their calls (Req 5.5, 5.12)."""
     from das.worker.executor import JobExecutor
 
     models = llm_config.capability_models if llm_config is not None else None
-    return JobExecutor(llm, agent_id, job_timeout=job_timeout, capability_models=models)
+    limits: dict[str, Any] = {}
+    if tools_config is not None:
+        limits = {"max_tool_rounds": tools_config.max_rounds, "max_tool_result_bytes": tools_config.max_result_bytes}
+    return JobExecutor(
+        llm, agent_id, job_timeout=job_timeout, capability_models=models, tools=tools, tool_observer=tool_observer,
+        **limits,
+    )
 
 
 def _worker_tools(tools_config: Any, llm: Any, clock: Clock) -> Any:
@@ -663,7 +679,10 @@ async def run_agent(
             )
             worker_metrics = WorkerMetrics(recorder)
             _attach_worker_llm_observability(llm, worker_metrics, tracer, price_table)
-            executor = _job_executor(llm, settings.agent_id, limits.job_timeout, config.llm)
+            executor = _job_executor(
+                llm, settings.agent_id, limits.job_timeout, config.llm,
+                tools=tool_registry, tools_config=config.tools, tool_observer=worker_metrics,
+            )
             agent = Worker(
                 settings,
                 queue=queue,

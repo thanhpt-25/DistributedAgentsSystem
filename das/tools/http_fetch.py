@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from das.tools.types import ToolError
+from das.tools.types import ToolError, ToolTimeout
 
 MAX_URL_LENGTH: Final = 2048
 USER_AGENT: Final = "das-http-fetch/1"
@@ -132,7 +132,10 @@ class HttpFetch:
 
     async def _addresses(self, host: str) -> Sequence[str]:
         try:
-            addresses = list(await self._resolver(host))
+            async with asyncio.timeout(self._timeout):  # a resolver that never answers is bounded like the request
+                addresses = list(await self._resolver(host))
+        except TimeoutError:
+            raise ToolTimeout("the request timed out") from None
         except (OSError, UnicodeError):
             raise ToolError("cannot resolve the host") from None
         if not addresses:
@@ -174,7 +177,7 @@ class HttpFetch:
                     status, location = response.status_code, response.headers.get("location")
                     encoding = response.charset_encoding or "utf-8"
         except httpx.TimeoutException:
-            raise ToolError("the request timed out") from None
+            raise ToolTimeout("the request timed out") from None
         except httpx.HTTPError:
             raise ToolError("the request failed") from None
         try:

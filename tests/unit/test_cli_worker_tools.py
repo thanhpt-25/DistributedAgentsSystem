@@ -4,6 +4,7 @@ cannot call tools is refused with exit code 2 naming it."""
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -52,6 +53,43 @@ def test_a_provider_that_cannot_call_tools_stops_the_worker_with_exit_code_2_nam
     with pytest.raises(ConfigError) as info:
         _worker_tools(tools("calculator"), llm, FakeClock())
     assert info.value.exit_code == 2 and llm.provider in str(info.value)
+
+
+async def test_the_executor_gets_the_registry_the_limits_and_the_metrics_observer() -> None:
+    from das.cli import _job_executor
+    from das.llm.base import Completion
+    from das.models.results import JobDispatchPayload, TokenUsage
+    from das.observability.metrics import MetricsRecorder, WorkerMetrics
+    from das.tools.types import ToolCall, ToolTurn
+
+    class Scripted(ToolAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.turns = [
+                ToolTurn("", (ToolCall("c1", "calculator", {"expression": "2+3"}),), TokenUsage.zero()),
+                ToolTurn("", (ToolCall("c2", "calculator", {"expression": "2+3"}),), TokenUsage.zero()),
+                ToolTurn("", (ToolCall("c3", "calculator", {"expression": "2+3"}),), TokenUsage.zero()),
+            ]
+
+        async def complete_with_tools_once(self, *args: Any, **kwargs: Any) -> Any:
+            return self.turns.pop(0)
+
+        async def complete_once(self, *args: Any, **kwargs: Any) -> Completion:
+            raise AssertionError
+
+    config = ToolsConfig.model_validate({"enabled": ["calculator"], "max_rounds": 2})
+    llm = LLMProvider(Scripted(), PARAMS)
+    recorder = MetricsRecorder(clock=FakeClock())
+    registry = _worker_tools(config, llm, FakeClock())
+    executor = _job_executor(
+        llm, "w1", 30, None, tools=registry, tools_config=config, tool_observer=WorkerMetrics(recorder)
+    )
+    job = JobDispatchPayload(
+        request_id="r", job_id="a", attempt=1, instruction="x", required_capabilities=["llm", "tool-calculator"]
+    )
+    result = await executor.execute(job, asyncio.Event())
+    assert (result.status, result.error) == ("Failed", "tool_rounds_exceeded")  # max_rounds=2 came from the config
+    assert recorder.registry.get_sample_value("das_tool_calls_total", {"tool": "calculator", "outcome": "ok"}) == 2
 
 
 def test_the_worker_may_not_advertise_more_than_fifty_capabilities_with_its_tools() -> None:

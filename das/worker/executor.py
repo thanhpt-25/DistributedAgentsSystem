@@ -6,6 +6,7 @@ import json
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import Any
 
 from das.clock import Clock, SystemClock
 from das.llm.base import ChatMessage, Completion
@@ -14,6 +15,9 @@ from das.llm.retry import LLMProvider
 from das.models.results import JobDispatchPayload, JobResultPayload, JobResultStatus, TokenUsage
 from das.structured.schema import check_schema
 from das.structured.validate import Valid, Violation, parse_and_validate
+from das.tools.loop import ToolLoop, ToolLoopAborted, ToolObserver, ToolRoundsExceeded
+from das.tools.registry import ToolRegistry
+from das.tools.types import ToolSpec, Turn
 
 #: Transport headers naming the LLM that produced a Job_Result (design D2, Req 9.2).
 #: They travel outside the codec bytes so a v1 Manager still decodes the payload.
@@ -47,14 +51,6 @@ def build_correction_message(violation: Violation) -> str:
     )
 
 
-def _add_usage(a: TokenUsage, b: TokenUsage) -> TokenUsage:
-    return TokenUsage(
-        input_tokens=a.input_tokens + b.input_tokens,
-        output_tokens=a.output_tokens + b.output_tokens,
-        total_tokens=a.total_tokens + b.total_tokens,
-    )
-
-
 def _llm_failure(provider: object, model: object, reason: object) -> str:
     return f"LLM call failed: provider={provider} model={model} reason={reason}"
 
@@ -83,12 +79,26 @@ class JobExecutor:
         job_timeout: float = 300,
         clock: Clock | None = None,
         capability_models: Mapping[str, str] | None = None,
+        tools: ToolRegistry | None = None,
+        max_tool_rounds: int = 4,
+        max_tool_result_bytes: int = 16_384,
+        tool_observer: ToolObserver | None = None,
     ) -> None:
         if not worker_id:
             raise ValueError("worker_id must be non-empty")
         if isinstance(job_timeout, bool) or not job_timeout > 0:
             raise ValueError("job_timeout must be a positive number of seconds")
         self._provider = provider
+        #: Phase 6 Req 5: the tools this Worker enabled, and the loop that runs a conversation with them.
+        self._tools = tools
+        self._tool_loop = (
+            ToolLoop(
+                provider, tools, max_rounds=max_tool_rounds, max_result_bytes=max_tool_result_bytes,
+                observer=tool_observer,
+            )
+            if tools
+            else None
+        )
         self._worker_id = worker_id
         self._job_timeout = float(job_timeout)
         self._clock: Clock = clock or SystemClock()
@@ -204,7 +214,13 @@ class JobExecutor:
         A reply that does not match gets exactly one corrective completion in the same attempt, on the model that
         answered the first (so a Fallback_Model that rescued it is not asked to fail again). The tokens of both are
         summed into the returned Completion, or into :class:`_AttemptFailed` when the Job fails.
+
+        A Job that requires ``tool-<name>`` Capabilities this Worker enabled runs the tool loop instead (Req 5.5); any
+        other Job is the single completion of Phase 5.
         """
+        specs = self._tools.specs_for(job.required_capabilities) if self._tools is not None else ()
+        if specs:
+            return await self._complete_with_tools(job, messages, specs, model)
         first = await self._provider.complete(SYSTEM_PROMPT, messages, operation="job", model=model)
         schema = job.output_schema
         if schema is None:
@@ -222,11 +238,60 @@ class JobExecutor:
         except LLMCallFailed as exc:
             failed_model = exc.model if exc.model != self._provider.params.model else None
             raise _AttemptFailed(_llm_failure(exc.provider, exc.model, exc.reason), first.usage, failed_model) from exc
-        usage = _add_usage(first.usage, second.usage)
+        usage = first.usage + second.usage
         final = parse_and_validate(second.content, schema)
         if isinstance(final, Violation):
             raise _AttemptFailed(f"output_schema_violation: {final.path}: {final.message}", usage, second.model)
         return replace(second, content=final.text, usage=usage)
+
+    async def _complete_with_tools(
+        self, job: JobDispatchPayload, messages: list[ChatMessage], specs: tuple[ToolSpec, ...], model: str | None
+    ) -> Completion:
+        """The tool loop (Req 5.6), then for a Structured_Job the same single corrective completion as without tools."""
+        assert self._tool_loop is not None  # specs are only non-empty when there is a registry
+        own_model = self._provider.params.model
+        try:
+            outcome = await self._tool_loop.run(SYSTEM_PROMPT, messages, specs, model=model)
+        except ToolRoundsExceeded as exc:
+            raise _AttemptFailed("tool_rounds_exceeded", exc.usage, exc.model) from exc
+        except ToolLoopAborted as exc:
+            cause = exc.cause
+            failed_model = cause.model if cause.model != own_model else None
+            error = _llm_failure(cause.provider, cause.model, cause.reason)
+            raise _AttemptFailed(error, exc.usage, failed_model) from exc
+        schema = job.output_schema
+        if schema is None:
+            return Completion(outcome.text, outcome.usage, model=outcome.model)
+        verdict = parse_and_validate(outcome.text, schema)
+        if isinstance(verdict, Valid):
+            return Completion(verdict.text, outcome.usage, model=outcome.model)
+        return await self._correct_with_tools(outcome.turns, specs, schema, verdict, outcome.usage, outcome.model)
+
+    async def _correct_with_tools(
+        self,
+        turns: tuple[Turn, ...],
+        specs: tuple[ToolSpec, ...],
+        schema: dict[str, Any],
+        verdict: Violation,
+        spent: TokenUsage,
+        model: str | None,
+    ) -> Completion:
+        """One corrective completion on the model that answered (Req 1.5). It is not a tool round: a reply that asks for
+        tools again is a violation."""
+        conversation: list[Turn] = [*turns, ChatMessage(role="user", content=build_correction_message(verdict))]
+        try:
+            reply = await self._provider.complete_with_tools(
+                SYSTEM_PROMPT, conversation, specs, operation="job", model=model
+            )
+        except LLMCallFailed as exc:
+            failed_model = exc.model if exc.model != self._provider.params.model else None
+            raise _AttemptFailed(_llm_failure(exc.provider, exc.model, exc.reason), spent, failed_model) from exc
+        usage = spent + reply.usage
+        answered_by = reply.model if reply.model is not None else model
+        final = parse_and_validate(reply.text, schema) if not reply.calls else verdict
+        if isinstance(final, Violation):
+            raise _AttemptFailed(f"output_schema_violation: {final.path}: {final.message}", usage, answered_by)
+        return Completion(final.text, usage, model=answered_by)
 
     def _result(
         self,

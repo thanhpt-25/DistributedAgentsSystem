@@ -104,6 +104,10 @@ RETENTION_KINDS: frozenset[str] = _values(RetentionKind)
 BUDGET_EXCEEDED_KINDS: frozenset[str] = _values(BudgetExceededKind)
 CLIENT_REJECTION_REASONS: frozenset[str] = _values(ClientRejectionReason)
 WEBHOOK_OUTCOMES: frozenset[str] = _values(WebhookOutcome)
+#: Phase 6 Req 5.12: the ``tool`` label is bounded by the tool names; ``unknown`` counts a call to a tool the Job
+#: was not offered. ``run_python`` is the code worker's tool (Req 6).
+TOOL_NAMES: frozenset[str] = frozenset({"calculator", "http_fetch", "current_time", "run_python", "unknown"})
+TOOL_OUTCOMES: frozenset[str] = frozenset({"ok", "error", "timeout"})
 REGISTRY_ROLES: frozenset[str] = _values(RegistryRole)
 REGISTRY_STATUSES: frozenset[str] = _values(RegistryStatus)
 HTTP_METHODS: frozenset[str] = _values(HttpMethod)
@@ -118,7 +122,7 @@ ALLOWED_LABEL_NAMES: frozenset[str] = frozenset(
     {
         "status", "state", "capability", "route", "method", "status_code", "queue", "kind",
         "reason", "role", "action", "outcome", "provider", "model", "operation", "direction",
-        "currency", "tenant",
+        "currency", "tenant", "tool",
     }
 )
 
@@ -257,6 +261,10 @@ CATALOG: tuple[MetricSpec, ...] = (
     _spec(
         "das_webhook_deliveries_total", "counter", "Webhook delivery attempts, by outcome.",
         ("outcome",), outcome=WEBHOOK_OUTCOMES,
+    ),
+    _spec(
+        "das_tool_calls_total", "counter", "Tool calls a Worker ran for the model, by tool and outcome.",
+        ("tool", "outcome"), tool=TOOL_NAMES, outcome=TOOL_OUTCOMES,
     ),
 )
 
@@ -743,6 +751,10 @@ class WorkerMetrics(_Facade):
     def concurrency_limit(self, limit: int) -> None:
         self._r.set("das_worker_concurrency_limit", None, int(limit))
 
+    def tool_call(self, tool: str, outcome: str) -> None:
+        """One tool call (Phase 6 Req 5.12); the loop's ``ToolObserver``."""
+        self._r.inc("das_tool_calls_total", {"tool": tool, "outcome": outcome})
+
 
 __all__ = [
     "ALLOWED_LABEL_NAMES",
@@ -758,6 +770,8 @@ __all__ = [
     "MetricsRecorder",
     "NoopRecorder",
     "RenderError",
+    "TOOL_NAMES",
+    "TOOL_OUTCOMES",
     "UNMATCHED_ROUTE",
     "WorkerMetrics",
     "build_recorder",
