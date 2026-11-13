@@ -453,12 +453,38 @@ def _job_executor(
     )
 
 
-def _worker_tools(tools_config: Any, llm: Any, clock: Clock) -> Any:
+def _worker_tools(tools_config: Any, llm: Any, clock: Clock, sandbox: Any = None) -> Any:
     """The Worker's tool registry; with a tool enabled, a provider that cannot call tools is refused (Req 5.1)."""
     from das.tools.registry import build_registry, refuse_unsupported_provider
 
-    registry = build_registry(tools_config, clock)
+    registry = build_registry(tools_config, clock, sandbox)
     refuse_unsupported_provider(registry, llm)
+    return registry
+
+
+async def _prepare_worker_tools(
+    config: AgentConfig, llm: Any, clock: Clock, *, observer: Any = None, spawn: Any = None
+) -> Any:
+    """The Worker's tools, with the Code_Worker's sandbox when ``sandbox.enabled`` (Phase 6 Req 6.1, 6.2).
+
+    A provider that cannot call tools is refused first (exit code 2); then the container runtime is asked once and a
+    runtime that does not answer is exit code 4 naming it, before the Worker registers or takes a Job. ``observer``
+    counts the runs (``sandbox_run``); ``spawn`` is the test seam for the container CLI."""
+    from das.sandbox.limits import Limits
+    from das.sandbox.runner import SandboxRunner
+
+    sandbox = None
+    if config.sandbox.enabled:
+        s = config.sandbox
+        sandbox = SandboxRunner(
+            s.container_cli, s.image,
+            Limits(timeout=s.timeout, memory_mb=s.memory_mb, cpus=s.cpus, pids=s.pids, output_bytes=s.output_bytes),
+            oci_runtime=s.oci_runtime, spawn=spawn, clock=clock,
+            observer=observer.sandbox_run if observer is not None else None,
+        )
+    registry = _worker_tools(config.tools, llm, clock, sandbox)
+    if sandbox is not None:
+        await sandbox.check()
     return registry
 
 
@@ -667,7 +693,8 @@ async def run_agent(
 
             assert config.worker is not None and config.grpc is not None
             assert llm is not None  # built above for every non-gateway role
-            tool_registry = _worker_tools(config.tools, llm, ops_clock)
+            worker_metrics = WorkerMetrics(recorder)
+            tool_registry = await _prepare_worker_tools(config, llm, ops_clock, observer=worker_metrics)
             settings = WorkerSettings(
                 agent_id=agent_id,
                 host=config.host,
@@ -677,7 +704,6 @@ async def run_agent(
                 shutdown_timeout=limits.shutdown_timeout,
                 grpc_endpoint=f"{config.grpc.advertise_host}:{config.grpc.advertise_port}",
             )
-            worker_metrics = WorkerMetrics(recorder)
             _attach_worker_llm_observability(llm, worker_metrics, tracer, price_table)
             executor = _job_executor(
                 llm, settings.agent_id, limits.job_timeout, config.llm,

@@ -98,3 +98,101 @@ def test_the_worker_may_not_advertise_more_than_fifty_capabilities_with_its_tool
     with pytest.raises(ConfigError, match="50"):
         _worker_capabilities(own, registry)
     assert len(_worker_capabilities(own[:48], registry)) == 50
+
+
+# ------------------------------------------------------------------------- the sandbox at startup (Req 6.1, 6.2)
+
+
+def sandbox_agent_config(**sandbox: Any) -> Any:
+    from das.config.schema import AgentConfig
+
+    return AgentConfig.model_validate({
+        "role": "worker", "host": "10.0.0.7",
+        "transports": {"jobs": "rabbitmq", "control": "grpc"},
+        "rabbitmq": {"url": "amqp://rabbit.internal:5672/"}, "redis": {"url": "redis://redis.internal:6379/0"},
+        "grpc": {"bind": "0.0.0.0:50051", "advertise_host": "10.0.0.7", "advertise_port": 50051},
+        "llm": {"provider": "ollama", "base_url": "http://ollama:11434", "model": "big"},
+        "worker": {"capabilities": ["research"]}, "sandbox": sandbox,
+    })
+
+
+async def test_a_worker_without_a_sandbox_starts_no_container_runtime_and_offers_no_code_tool() -> None:
+    from das.cli import _prepare_worker_tools
+    from tests.unit.test_sandbox_runner import Spawner
+
+    spawner = Spawner()
+    registry = await _prepare_worker_tools(sandbox_agent_config(), with_tools(), FakeClock(), spawn=spawner)
+    assert spawner.calls == [] and "run_python" not in registry.names
+    assert "code-execution" not in _worker_capabilities(["research"], registry)
+
+
+async def test_an_enabled_sandbox_checks_the_runtime_and_advertises_code_execution() -> None:
+    from das.cli import _prepare_worker_tools
+    from tests.unit.test_sandbox_runner import Spawner
+
+    spawner = Spawner()
+    registry = await _prepare_worker_tools(sandbox_agent_config(enabled=True), with_tools(), FakeClock(), spawn=spawner)
+    assert spawner.verbs() == ["info"]  # the runtime was asked once, before any run
+    assert "code-execution" in _worker_capabilities(["research"], registry)
+    assert [s.name for s in registry.specs_for(["code-execution"])] == ["run_python"]
+
+
+async def test_a_runtime_that_does_not_answer_stops_the_worker_with_exit_code_4() -> None:
+    from das.cli import _prepare_worker_tools
+    from das.errors import DependencyUnreachable
+    from tests.unit.test_sandbox_runner import Spawner
+
+    spawner = Spawner()
+    spawner.info_result = (1, b"Cannot connect to the Docker daemon")
+    with pytest.raises(DependencyUnreachable) as info:
+        await _prepare_worker_tools(
+            sandbox_agent_config(enabled=True, container_cli="podman"), with_tools(), FakeClock(), spawn=spawner
+        )
+    assert info.value.exit_code == 4 and "podman" in str(info.value)
+
+
+async def test_a_provider_that_cannot_call_tools_is_refused_before_the_runtime_is_asked() -> None:
+    from das.cli import _prepare_worker_tools
+    from tests.unit.test_sandbox_runner import Spawner
+
+    spawner = Spawner()
+    with pytest.raises(ConfigError) as info:
+        await _prepare_worker_tools(
+            sandbox_agent_config(enabled=True), LLMProvider(FakeAdapter(), PARAMS), FakeClock(), spawn=spawner
+        )
+    assert info.value.exit_code == 2 and spawner.calls == []
+
+
+async def test_the_configured_image_limits_cli_and_runtime_reach_the_container_command() -> None:
+    from das.cli import _prepare_worker_tools
+    from das.tools.types import ToolCall
+    from tests.unit.test_sandbox_runner import FakeProcess, Spawner
+
+    spawner = Spawner(FakeProcess(b"4\n", 0))
+    config = sandbox_agent_config(
+        enabled=True, container_cli="podman", image="python:3.11-slim", oci_runtime="runsc",
+        memory_mb=512, cpus=1.5, pids=100, timeout=30, output_bytes=2048,
+    )
+    registry = await _prepare_worker_tools(config, with_tools(), FakeClock(), spawn=spawner)
+    out = await registry.run(ToolCall("c1", "run_python", {"code": "print(2+2)"}))
+    assert out == "exit code 0\n4\n"
+    argv = spawner.argv_of("run")
+    assert argv[0] == "podman" and "python:3.11-slim" in argv and argv[argv.index("--runtime") + 1] == "runsc"
+    assert argv[argv.index("--memory") + 1] == "512m" and argv[argv.index("--cpus") + 1] == "1.5"
+    assert argv[argv.index("--pids-limit") + 1] == "100"
+
+
+async def test_every_sandboxed_run_is_counted_by_the_metrics_observer() -> None:
+    from das.cli import _prepare_worker_tools
+    from das.observability.metrics import MetricsRecorder, WorkerMetrics
+    from das.tools.types import ToolCall
+    from tests.unit.test_sandbox_runner import FakeProcess, Spawner
+
+    recorder = MetricsRecorder(clock=FakeClock())
+    spawner = Spawner(FakeProcess(b"", 1))
+    registry = await _prepare_worker_tools(
+        sandbox_agent_config(enabled=True), with_tools(), FakeClock(),
+        observer=WorkerMetrics(recorder), spawn=spawner,
+    )
+    await registry.run(ToolCall("c1", "run_python", {"code": "1/0"}))
+    assert recorder.registry.get_sample_value("das_sandbox_runs_total", {"outcome": "error"}) == 1

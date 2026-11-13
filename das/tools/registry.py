@@ -14,12 +14,14 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from das.clock import Clock
 from das.errors import ConfigError, FieldError
+from das.sandbox.tool import CODE_EXECUTION, RUN_PYTHON, run_python_tool
 from das.tools.calculator import calculate
 from das.tools.http_fetch import HttpFetch
 from das.tools.types import ToolCall, ToolError, ToolSpec
 
 if TYPE_CHECKING:
     from das.config.schema import ToolsConfig
+    from das.sandbox.runner import SandboxRunner
 
 CAPABILITY_PREFIX: Final = "tool-"
 
@@ -60,8 +62,12 @@ def capability_for(tool: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Tool:
+    """A tool and its function. ``capability`` is the Capability a Job requires to be offered it; by default it is
+    ``tool-<name>``, and ``run_python`` is offered to ``code-execution`` instead (Phase 6 Req 6.1)."""
+
     spec: ToolSpec
     run: Runner
+    capability: str | None = None
 
 
 def _argument(arguments: dict[str, Any], name: str) -> Any:
@@ -75,7 +81,7 @@ class ToolRegistry:
 
     def __init__(self, tools: Iterable[Tool] = ()) -> None:
         self._tools = {t.spec.name: t for t in tools}
-        self._by_capability = {capability_for(name): name for name in self._tools}
+        self._by_capability = {t.capability or capability_for(name): name for name, t in self._tools.items()}
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -102,8 +108,9 @@ class ToolRegistry:
         return await tool.run(call.arguments)
 
 
-def build_registry(config: ToolsConfig, clock: Clock) -> ToolRegistry:
-    """The registry for the ``tools`` section; ``clock`` is what ``current_time`` reads (Req 5.10)."""
+def build_registry(config: ToolsConfig, clock: Clock, sandbox: SandboxRunner | None = None) -> ToolRegistry:
+    """The registry for the ``tools`` section; ``clock`` is what ``current_time`` reads (Req 5.10). With a ``sandbox``
+    the Code_Worker's ``run_python`` is added, offered to Jobs that require ``code-execution`` (Req 6.1, 6.3)."""
     tools: list[Tool] = []
     for name in config.enabled:
         if name == "calculator":
@@ -132,6 +139,8 @@ def build_registry(config: ToolsConfig, clock: Clock) -> ToolRegistry:
                 return now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
             tools.append(Tool(_CURRENT_TIME, run_time))
+    if sandbox is not None:
+        tools.append(Tool(RUN_PYTHON, run_python_tool(sandbox), capability=CODE_EXECUTION))
     return ToolRegistry(tools)
 
 

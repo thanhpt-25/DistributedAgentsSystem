@@ -37,6 +37,8 @@ from das.errors import FieldError
 from das.ops.cost import MAX_PRICE_ENTRIES, PriceEntry, PriceTable
 from das.ops.iso4217 import ISO_4217_CODES
 from das.ops.keys import key_fingerprint
+from das.sandbox.limits import CEILINGS as SANDBOX_CEILINGS
+from das.sandbox.limits import FLOORS as SANDBOX_FLOORS
 
 Role = Literal["gateway", "manager", "worker"]
 ROLES: tuple[str, ...] = ("gateway", "manager", "worker")
@@ -218,6 +220,28 @@ class HttpFetchConfig(_Section):
     allow_http: bool = False
     timeout: float = Field(default=10, ge=1, le=60)
     max_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
+
+
+#: The `code-execution` Capability of the Code_Worker (Phase 6 Req 6.1).
+CODE_EXECUTION = "code-execution"
+
+
+class SandboxConfig(_Section):
+    """The Code_Worker's sandbox (Phase 6 Req 6.1, 6.4, 6.5): off by default.
+
+    Only the container CLI, an image, an optional OCI runtime by name and five bounded limits can be set. There is no
+    setting for the network, mounts, devices, privileges, the user or the runtime's socket: ``extra="forbid"`` makes
+    each of them a configuration error rather than something silently ignored."""
+
+    enabled: bool = False
+    container_cli: Literal["docker", "podman"] = "docker"
+    image: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._/:@-]{0,199}$")] = "python:3.12-slim"
+    oci_runtime: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_.-]{0,30}$")] | None = None
+    timeout: float = Field(default=10, ge=SANDBOX_FLOORS["timeout"], le=SANDBOX_CEILINGS["timeout"])
+    memory_mb: int = Field(default=256, ge=SANDBOX_FLOORS["memory_mb"], le=SANDBOX_CEILINGS["memory_mb"])
+    cpus: float = Field(default=1, ge=SANDBOX_FLOORS["cpus"], le=SANDBOX_CEILINGS["cpus"])
+    pids: int = Field(default=64, ge=SANDBOX_FLOORS["pids"], le=SANDBOX_CEILINGS["pids"])
+    output_bytes: int = Field(default=16_384, ge=SANDBOX_FLOORS["output_bytes"], le=SANDBOX_CEILINGS["output_bytes"])
 
 
 class ToolsConfig(_Section):
@@ -594,6 +618,8 @@ class AgentConfig(_Section):
     worker: WorkerConfig | None = None
     #: Phase 6 Req 5.3: the tools a Worker enables; the default enables none.
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    #: Phase 6 Req 6.1: the Code_Worker's sandbox; off by default.
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     tracing: TracingConfig = Field(default_factory=TracingConfig)
     #: ``None`` means no Price_Table (Req 10.7).
@@ -749,6 +775,17 @@ def cross_field_errors(data: Mapping[str, Any]) -> list[FieldError]:
                         "at least 1 host required to enable http_fetch (it fetches only from allowed hosts)",
                     )
                 )
+
+    # Sandbox (Phase 6 Req 6.1): `code-execution` needs the sandbox enabled, and only a Worker can have one.
+    sandbox_on = _valid(SandboxConfig, "enabled", _lookup(data, "sandbox.enabled"))
+    if sandbox_on is not _MISSING:
+        if sandbox_on and role is not _MISSING and role != "worker":
+            errors.append(FieldError("sandbox.enabled", "the sandbox can only be enabled for role worker"))
+        listed = _split_csv(_lookup(data, "worker.capabilities"))
+        if not sandbox_on and isinstance(listed, list) and CODE_EXECUTION in listed:
+            errors.append(
+                FieldError("sandbox.enabled", f"capability {CODE_EXECUTION} needs sandbox.enabled to be true")
+            )
 
     # base_backoff <= max_backoff (Req 6.8)
     base = _valid(LimitsConfig, "base_backoff", _lookup(data, "limits.base_backoff"))

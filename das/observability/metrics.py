@@ -108,6 +108,8 @@ WEBHOOK_OUTCOMES: frozenset[str] = _values(WebhookOutcome)
 #: was not offered. ``run_python`` is the code worker's tool (Req 6).
 TOOL_NAMES: frozenset[str] = frozenset({"calculator", "http_fetch", "current_time", "run_python", "unknown"})
 TOOL_OUTCOMES: frozenset[str] = frozenset({"ok", "error", "timeout"})
+#: Phase 6 Req 6.9: how a sandboxed run ended.
+SANDBOX_OUTCOMES: frozenset[str] = frozenset({"ok", "error", "timeout", "killed"})
 REGISTRY_ROLES: frozenset[str] = _values(RegistryRole)
 REGISTRY_STATUSES: frozenset[str] = _values(RegistryStatus)
 HTTP_METHODS: frozenset[str] = _values(HttpMethod)
@@ -265,6 +267,10 @@ CATALOG: tuple[MetricSpec, ...] = (
     _spec(
         "das_tool_calls_total", "counter", "Tool calls a Worker ran for the model, by tool and outcome.",
         ("tool", "outcome"), tool=TOOL_NAMES, outcome=TOOL_OUTCOMES,
+    ),
+    _spec(
+        "das_sandbox_runs_total", "counter", "Sandboxed code runs, by how they ended.",
+        ("outcome",), outcome=SANDBOX_OUTCOMES,
     ),
 )
 
@@ -755,6 +761,10 @@ class WorkerMetrics(_Facade):
         """One tool call (Phase 6 Req 5.12); the loop's ``ToolObserver``."""
         self._r.inc("das_tool_calls_total", {"tool": tool, "outcome": outcome})
 
+    def sandbox_run(self, outcome: str) -> None:
+        """One sandboxed run (Phase 6 Req 6.9); the SandboxRunner's observer."""
+        self._r.inc("das_sandbox_runs_total", {"outcome": outcome})
+
 
 __all__ = [
     "ALLOWED_LABEL_NAMES",
@@ -770,6 +780,7 @@ __all__ = [
     "MetricsRecorder",
     "NoopRecorder",
     "RenderError",
+    "SANDBOX_OUTCOMES",
     "TOOL_NAMES",
     "TOOL_OUTCOMES",
     "UNMATCHED_ROUTE",

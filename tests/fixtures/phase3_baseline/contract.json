@@ -909,6 +909,82 @@
         "title": "RetentionConfig",
         "type": "object"
       },
+      "SandboxConfig": {
+        "additionalProperties": false,
+        "description": "The Code_Worker's sandbox (Phase 6 Req 6.1, 6.4, 6.5): off by default.\n\nOnly the container CLI, an image, an optional OCI runtime by name and five bounded limits can be set. There is no\nsetting for the network, mounts, devices, privileges, the user or the runtime's socket: ``extra=\"forbid\"`` makes\neach of them a configuration error rather than something silently ignored.",
+        "properties": {
+          "container_cli": {
+            "default": "docker",
+            "enum": [
+              "docker",
+              "podman"
+            ],
+            "title": "Container Cli",
+            "type": "string"
+          },
+          "cpus": {
+            "default": 1,
+            "maximum": 2.0,
+            "minimum": 0.1,
+            "title": "Cpus",
+            "type": "number"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "image": {
+            "default": "python:3.12-slim",
+            "pattern": "^[a-z0-9][a-z0-9._/:@-]{0,199}$",
+            "title": "Image",
+            "type": "string"
+          },
+          "memory_mb": {
+            "default": 256,
+            "maximum": 1024,
+            "minimum": 64,
+            "title": "Memory Mb",
+            "type": "integer"
+          },
+          "oci_runtime": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z][a-z0-9_.-]{0,30}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Oci Runtime"
+          },
+          "output_bytes": {
+            "default": 16384,
+            "maximum": 65536,
+            "minimum": 256,
+            "title": "Output Bytes",
+            "type": "integer"
+          },
+          "pids": {
+            "default": 64,
+            "maximum": 256,
+            "minimum": 16,
+            "title": "Pids",
+            "type": "integer"
+          },
+          "timeout": {
+            "default": 10,
+            "maximum": 60.0,
+            "minimum": 1.0,
+            "title": "Timeout",
+            "type": "number"
+          }
+        },
+        "title": "SandboxConfig",
+        "type": "object"
+      },
       "TenantConfig": {
         "additionalProperties": false,
         "description": "One entry of the ``tenants`` list (Phase 5 Req 1, 4, 7).\n\n``max_active_requests`` here is the Tenant_Quota (0 = none), distinct from the per-key field of ``settings``.",
@@ -1455,6 +1531,9 @@
         "title": "Role",
         "type": "string"
       },
+      "sandbox": {
+        "$ref": "#/$defs/SandboxConfig"
+      },
       "secrets_file": {
         "anyOf": [
           {
@@ -1610,6 +1689,15 @@
     "DAS__RETENTION__SWEEP_INTERVAL",
     "DAS__RETENTION__TERMINAL_REQUEST_TTL",
     "DAS__ROLE",
+    "DAS__SANDBOX__CONTAINER_CLI",
+    "DAS__SANDBOX__CPUS",
+    "DAS__SANDBOX__ENABLED",
+    "DAS__SANDBOX__IMAGE",
+    "DAS__SANDBOX__MEMORY_MB",
+    "DAS__SANDBOX__OCI_RUNTIME",
+    "DAS__SANDBOX__OUTPUT_BYTES",
+    "DAS__SANDBOX__PIDS",
+    "DAS__SANDBOX__TIMEOUT",
     "DAS__SECRETS_FILE",
     "DAS__TENANTS",
     "DAS__TOOLS__ENABLED",
@@ -2614,6 +2702,23 @@
         "kind"
       ],
       "name": "das_retention_deleted_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "outcome": [
+          "error",
+          "killed",
+          "ok",
+          "timeout"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Sandboxed code runs, by how they ended.",
+      "labels": [
+        "outcome"
+      ],
+      "name": "das_sandbox_runs_total",
       "type": "counter"
     },
     {
