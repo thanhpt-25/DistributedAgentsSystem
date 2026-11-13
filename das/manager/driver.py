@@ -169,7 +169,7 @@ from das.state import (
     TransitionBatch,
     WriteResult,
 )
-from das.transport.base import Transport
+from das.transport.base import PRIORITY_HEADER, PRIORITY_HIGH, Transport
 
 log = get_logger(__name__)
 
@@ -286,6 +286,7 @@ class RequestDriver:
         self._now_source: TimeSource = deps.time_source or deps.store.server_time
         self._snap: RequestSnapshot | None = None
         self._tenant = "default"
+        self._priority = "normal"
         self._cursor = "0-0"
         self._agents: tuple[AgentRecord, ...] = ()
         self._finish: RunSummarizer | FinalizeFailed | None = None
@@ -412,6 +413,7 @@ class RequestDriver:
     def _adopt(self, stored: StoredRequest) -> None:
         self._snap = RequestSnapshot.from_stored(stored)
         self._tenant = stored.tenant  # for the per-tenant finished counter (Phase 5 Req 8.1), not for the reducer
+        self._priority = stored.priority  # re-read on every reload, so a Replay or takeover sees the stored value
         self._cursor = stored.inbox_cursor or "0-0"
 
     def _check_lease(self) -> None:
@@ -889,8 +891,11 @@ class RequestDriver:
                 correlation_id=self.rid,
                 trace_context=self._tracer.current_context(),
             )
+            # The one place a Job is dispatched, so first dispatches, retries, takeovers and Replays all carry the
+            # Priority_Header of a ``high`` Request and nothing else does (Phase 5 Req 7.4).
+            headers = {PRIORITY_HEADER: PRIORITY_HIGH} if self._priority == PRIORITY_HIGH else None
             try:
-                await self.deps.transport.publish(effect.destination, message)
+                await self.deps.transport.publish(effect.destination, message, headers)
             except Exception as exc:  # TransportUnavailable / PublishNotConfirmed / codec
                 log.warning("dispatch_publish_failed", attempt=effect.attempt,
                             destination=effect.destination, error=type(exc).__name__)

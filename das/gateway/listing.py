@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 
 from das.config.schema import TENANT_ID_PATTERN
 from das.gateway.cursor_key import CursorKeyProvider
+from das.gateway.openapi import LIST_PARAMETERS, LIST_RESPONSES
 from das.models import RequestStatus
 from das.observability.logging import format_timestamp
 from das.ops.cursor import InvalidCursor, PageCursor, decode_cursor, encode_cursor
@@ -246,7 +247,7 @@ def register_list_route(
 ) -> None:
     """Register ``GET /requests`` on the authenticated ``/v1`` ``router``."""
 
-    @router.get("/requests")
+    @router.get("/requests", responses=LIST_RESPONSES, openapi_extra={"parameters": LIST_PARAMETERS})
     async def list_requests(request: Request) -> Any:
         params = {k: request.query_params.getlist(k) for k in request.query_params}
         principal: Principal = request.state.principal

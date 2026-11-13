@@ -36,7 +36,7 @@ from typing import Any, Final, TypeVar
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 from redis.asyncio import Redis
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -130,7 +130,14 @@ class SubmitBody(BaseModel):
     budget: Any = None
     #: Raw ``priority`` value, ``normal`` or ``high``: parsed by ``parse_priority`` so a bad one is a 400 naming it
     #: (Phase 5 Req 7.1).
-    priority: Any = None
+    priority: Any = Field(
+        default=None,
+        description=(
+            "`normal` or `high`. When absent, the tenant's `default_priority` applies. A value above the tenant's "
+            "`max_priority` is refused. `high` Jobs are dispatched ahead of `normal` ones, as a weighting."
+        ),
+        json_schema_extra={"type": "string", "enum": ["normal", "high"]},
+    )
 
 
 async def _bounded(op: Awaitable[T], timeout: float = STORE_TIMEOUT) -> T:
@@ -370,7 +377,7 @@ def create_app(
         prefix="/v1",
         dependencies=[
             Depends(api_key_auth(api_keys, admin_api_keys, limits_config, tenants=tenants)),
-            Depends(authorize_route()),  # after authentication, before the rate limit (Phase 5 Req 2.3)
+            Depends(authorize_route(metrics=lambda: metrics)),  # after authentication, before the rate limit (Req 2.3)
             Depends(enforce_rate),
         ],
         responses=V1_RESPONSES,
@@ -397,6 +404,7 @@ def create_app(
                 span.fail("invalid_request")
                 return _error(status.HTTP_400_BAD_REQUEST, exc.to_body())
             except PriorityAboveLimit as exc:
+                metrics.client_rejected("priority_above_limit")
                 span.fail("priority_above_limit")
                 return _error(status.HTTP_400_BAD_REQUEST, exc.to_body())
             except BudgetError as exc:
@@ -427,7 +435,7 @@ def create_app(
                 )
             if result.outcome == "tenant_quota_exceeded":
                 # The per-key body above is unchanged from Phase 4; only this one names its scope (Phase 5 Req 3.7).
-                metrics.client_rejected("quota_exceeded")
+                metrics.client_rejected("tenant_quota_exceeded")  # its own reason (Phase 5 Req 8.2)
                 span.fail("quota_exceeded")
                 return _error(
                     status.HTTP_429_TOO_MANY_REQUESTS,
@@ -535,7 +543,8 @@ def create_app(
 
     # Admin_API (Req 11): router-level Admin_API_Key auth plus Audit_Entry middleware.
     admin = create_admin_router(
-        api_keys, admin_api_keys, client_limits=limits_config, rate_limit=enforce_rate, tenants=tenants
+        api_keys, admin_api_keys, client_limits=limits_config, rate_limit=enforce_rate, tenants=tenants,
+        metrics=lambda: metrics,
     )
     register_dlq_routes(
         admin,

@@ -1578,9 +1578,12 @@
       "allowed": {
         "reason": [
           "budget_above_limit",
+          "forbidden",
           "idempotency_key_reused",
+          "priority_above_limit",
           "quota_exceeded",
           "rate_limited",
+          "tenant_quota_exceeded",
           "too_many_streams"
         ]
       },

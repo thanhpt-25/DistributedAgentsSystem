@@ -101,13 +101,13 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 5.5 Add the usage endpoints
     - `das/gateway/usage.py`: `GET /v1/usage` (read) and `GET /v1/admin/usage` (Operator, `tenant` optional), reading rollup hashes and building the report with `das.tenancy.usage`
     - _Requirements: 6.3, 6.4, 6.5, 6.7_
-  - [ ] 5.6 Update the OpenAPI schema
+  - [x] 5.6 Update the OpenAPI schema
     - New routes, `tenant` and `priority` parameters, the new error bodies; the OpenAPI test lists every route
     - _Requirements: 2.2, 6.3, 7.1_
   - [x] 5.7 Write stateful property test for tenant isolation
     - **Property 1: Tenant isolation**
     - **Validates: Requirements 3.2, 3.3, 3.4, 3.6, 5.3**
-  - [ ] 5.8 Write unit tests for the error responses
+  - [x] 5.8 Write unit tests for the error responses
     - Every row of the design Error Handling table, including cursor reuse across tenants, the `admin_disabled` compatibility case and 503 when Redis is unreachable
     - _Requirements: 2.3, 3.2, 3.3, 3.4, 3.7, 5.3, 6.3, 7.1, 7.2_
 
@@ -115,7 +115,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 6.1 Validate and store priority
     - `priority` in the submit body (`invalid_request` naming `priority`), tenant `default_priority` and `max_priority` (`priority_above_limit`), stored only when `high`, `priority` in the Request view
     - _Requirements: 7.1, 7.2, 7.3_
-  - [ ] 6.2 Carry priority to dispatch
+  - [x] 6.2 Carry priority to dispatch
     - `RequestSnapshot.priority` read by `load_snapshot`; `das/manager/driver.py` dispatch publishes with `headers={PRIORITY_HEADER: "high"}` for a `high` Request and none otherwise (retries, takeovers and replays use the same call)
     - _Requirements: 7.4_
   - [ ] 6.3 Write property test for the Priority header
@@ -132,21 +132,21 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 7.1 Add the tenant label to two metrics
     - `DYNAMIC_LABELS` gains `tenant`, limited by `label_limits.tenant`; `das_requests_submitted_total` (Gateway, from the Principal) and `das_requests_finished_total` (Manager, from the snapshot)
     - _Requirements: 8.1_
-  - [ ] 7.2 Add rejection reasons
+  - [x] 7.2 Add rejection reasons
     - `das_client_rejections_total` reasons `forbidden`, `tenant_quota_exceeded`, `priority_above_limit`
     - _Requirements: 8.2_
   - [x] 7.3 Add the Span attribute
     - `das.tenant` in the Tracer allow-list, set on `gateway.submit` and `manager.request`; a test that no label, attribute or index carries a Key_Fingerprint or key value
     - _Requirements: 8.3, 8.4_
-  - [ ] 7.4 Add the Grafana panel
+  - [x] 7.4 Add the Grafana panel
     - Requests submitted and finished per tenant in the dashboard JSON; the existing dashboard static test is extended
     - _Requirements: 8.5_
 
 - [ ] 8. Compatibility and regression
-  - [ ] 8.1 Change the tests that pin superseded boundaries
+  - [x] 8.1 Change the tests that pin superseded boundaries
     - Find and update the tests that assert v2 Req 20.1 (listing not filtered by key) and v2 Req 20.3 (no tenant identity in labels, Spans, indexes), each with a comment citing this spec; list them in the task report
     - _Requirements: 9.6, 12.1_
-  - [ ] 8.2 Write the mixed-version test
+  - [x] 8.2 Write the mixed-version test
     - Data written by the Phase 4 scripts (no `tenant`, no twins), then the Phase 5 scripts: Default_Tenant listing correct before the flag, non-default 503 before it, correct after the backfill; a Phase 4 reader ignores the new keys
     - _Requirements: 9.1, 9.2, 9.3, 9.4_
   - [ ] 8.3 Write the Default_Tenant compatibility test

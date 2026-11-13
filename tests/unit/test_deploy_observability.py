@@ -222,10 +222,23 @@ def _base_metric(token: str) -> str:
     return token
 
 
-def test_dashboard_has_thirteen_panels(dashboard: dict) -> None:
+def test_dashboard_has_fourteen_panels(dashboard: dict) -> None:
+    """The thirteen of Phase 2 Req 18.5 plus the per-tenant one of Phase 5 Req 8.5."""
     panels = [p for p in dashboard["panels"] if p.get("type") != "row"]
-    assert len(panels) == 13
+    assert len(panels) == 14
     assert all(p.get("targets") for p in panels)
+    assert len({p["id"] for p in panels}) == 14  # ids are unique
+    assert len({(p["gridPos"]["x"], p["gridPos"]["y"]) for p in panels}) == 14  # no two share a place on the grid
+
+
+def test_dashboard_has_a_per_tenant_panel_of_submitted_and_finished_requests(dashboard: dict) -> None:
+    """Phase 5 Req 8.5: Requests submitted and finished per tenant. Tokens and cost per tenant are not here: the
+    Usage_Report serves them, not Prometheus."""
+    [panel] = [p for p in dashboard["panels"] if "tenant" in p.get("title", "").lower()]
+    exprs = [t["expr"] for t in panel["targets"]]
+    assert any(re.search(r"by \([^)]*tenant[^)]*\) \(rate\(das_requests_submitted_total\[5m\]\)\)", e) for e in exprs)
+    assert any(re.search(r"by \([^)]*tenant[^)]*\) \(rate\(das_requests_finished_total\[5m\]\)\)", e) for e in exprs)
+    assert not any("token" in e or "cost" in e for e in exprs)
 
 
 def test_dashboard_panels_cover_requirement_18_5(dashboard: dict) -> None:

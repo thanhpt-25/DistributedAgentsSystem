@@ -78,7 +78,8 @@ class Rec:
     status: str  # a Request_Status, or "Purged"
     lease: Lease | None = None
     last_lease: Lease | None = None
-    dlid: str | None = None
+    dlid: str | None = None  # the latest record of this Request
+    dlids: list[str] = field(default_factory=list)  # every record ever filed for it: a replayed Request can fail again
     dl_status: str | None = None
     applied: set[tuple[str, int]] = field(default_factory=set)
 
@@ -209,6 +210,7 @@ class World:
         self._finish(rec, "Failed")
         rec.dlid = f"{next(self._ids):032x}"
         assert (await self.store.create_dead_letter(fields(rec.dlid, rid=rec.rid))).created
+        rec.dlids.append(rec.dlid)
         rec.dl_status = "Pending"
         return rec
 

@@ -88,16 +88,20 @@ class Harness:
         index = target % (len(recs) + 1)
         return (recs[index].rid, recs[index]) if index < len(recs) else (uuid.uuid4().hex, None)
 
+    def dead_letters(self) -> list[tuple[str, Rec]]:
+        """Every record ever filed with the Request it belongs to (a replayed Request that fails again has two)."""
+        return [(dlid, rec) for rec in self.world.recs for dlid in rec.dlids]
+
     def dead_letter_for(self, target: int) -> tuple[str, Rec | None]:
-        owned = [r for r in self.world.recs if r.dlid]
+        owned = self.dead_letters()
         index = target % (len(owned) + 1)
-        return (owned[index].dlid or "", owned[index]) if index < len(owned) else (UNKNOWN_DLID, None)
+        return owned[index] if index < len(owned) else (UNKNOWN_DLID, None)
 
     def foreign_ids(self, who: Who) -> set[str]:
         out: set[str] = set()
         for rec in self.world.recs:
             if not who.sees(rec.tenant):
-                out.update({rec.rid, *([rec.dlid] if rec.dlid else [])})
+                out.update({rec.rid, *rec.dlids})
         return out
 
     def leak_check(self, who: Who, reply: httpx.Response) -> None:
@@ -180,7 +184,7 @@ class Harness:
             assert (reply.status_code, reply.json()) == (403, {"error": "forbidden", "scope": "admin"})
             return
         seen = await self.pages(who, "/v1/admin/dlq", "dead_letter_id")
-        expected = {r.dlid for r in self.world.recs if r.dlid and who.sees(r.tenant)}  # a record outlives its Request
+        expected = {dlid for dlid, rec in self.dead_letters() if who.sees(rec.tenant)}  # a record outlives its Request
         assert len(seen) == len(set(seen)) and set(seen) == expected  # exactly its own records, never a foreign one
 
     async def dlq_item(self, who: Who, target: int, action: str) -> None:

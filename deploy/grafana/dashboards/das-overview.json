@@ -624,6 +624,60 @@
           "range": true
         }
       ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Requests submitted and finished per tenant",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "das-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (tenant) (rate(das_requests_submitted_total[5m]))",
+          "legendFormat": "submitted {{tenant}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "das-prometheus"
+          },
+          "expr": "sum by (tenant, status) (rate(das_requests_finished_total[5m]))",
+          "legendFormat": "finished {{tenant}} {{status}}",
+          "range": true
+        }
+      ]
     }
   ]
 }

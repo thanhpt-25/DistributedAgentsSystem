@@ -6,6 +6,11 @@ thể chứa prompt, instruction, API_Key hoặc Admin_API_Key đã cấu hình)
 ``InMemorySpanExporter``) chỉ có key thuộc ``ALLOWED_ATTRIBUTES``. Không attribute
 value hay event attribute nào chứa secret đã cấu hình.
 
+Superseded boundary (das-multi-tenant task 8.1; Phase 5 Req 8.3, 8.4): v2 Req 20.3 forbade any Span attribute carrying
+a tenant identity. The allow-list now has exactly one more name, ``das.tenant`` (a tenant id), set on ``gateway.submit``
+and ``manager.request``; the rest of 20.3 stands: no API_Key, Admin_API_Key or Key_Fingerprint in any attribute, which
+this property still checks with the configured secrets and ``tests/unit/test_tracing_tenant.py`` checks end to end.
+
 **Validates: Requirements 6.9**
 """
 from __future__ import annotations

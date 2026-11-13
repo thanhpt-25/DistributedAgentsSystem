@@ -2,6 +2,12 @@
 
 Requirements 14.11, 15.1, 15.2, 15.3, 15.4, 15.7, 15.8, 15.9, 15.10, 15.12, 15.13,
 19.8, 19.9, 20.1.
+
+Superseded boundary (das-multi-tenant task 8.1; Phase 5 Req 3.3, 9.6): v2 Req 20.1, that a listing is not filtered by
+the calling key, no longer holds as a rule. A key of a configured tenant lists only its tenant's Requests
+(``tests/unit/test_gateway_isolation.py``, ``tests/property/test_tenant_isolation.py``). It still holds for what these
+tests use: there are no ``tenants`` here, so every API key is a Default_Tenant key, and a Default_Tenant listing before
+the Tenant_Backfill reads the global index (Req 9.3). The Operator, here the Admin_API_Key, lists every tenant.
 """
 
 from __future__ import annotations
@@ -214,6 +220,8 @@ async def test_list_pages_filters_and_item_shape(fake_redis_time, store: StateSt
 
 
 async def test_admin_key_lists_too_and_bad_key_is_401(fake_redis_time, store) -> None:
+    # v2 Req 20.1 (no filtering by key) is superseded by das-multi-tenant Req 3.3: this holds because the Admin_API_Key
+    # is an Operator, who lists every tenant, and the client key is a Default_Tenant key with no tenants configured.
     order = await _populate(fake_redis_time, store)
     async with _client(build(store)) as c:
         r = await c.get("/v1/requests", headers={"X-API-Key": ADMIN_KEY})

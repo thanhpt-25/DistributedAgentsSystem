@@ -34,6 +34,8 @@ def test_catalog_entries_match_requirement_10_1():
     assert (rejections.kind, rejections.labels) == ("counter", ("reason",))
     assert rejections.allowed["reason"] == frozenset(
         {"rate_limited", "quota_exceeded", "too_many_streams", "budget_above_limit", "idempotency_key_reused"}
+        # Phase 5 Req 8.2: the three reasons of tenants, Scopes and priority.
+        | {"forbidden", "tenant_quota_exceeded", "priority_above_limit"}
     )
     replays = CATALOG_BY_NAME["das_idempotent_replays_total"]
     assert (replays.kind, replays.labels) == ("counter", ())

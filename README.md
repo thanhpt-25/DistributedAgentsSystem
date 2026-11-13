@@ -150,7 +150,7 @@ Every `/v1` call, including opening an event stream and reading the OpenAPI docu
 - A key may have at most `max_active_requests` Requests that are not yet finished. One more answers `429 {"error": "quota_exceeded", "limit": 100}` (the number is the key's limit). A Request leaves the count when it becomes `Completed`, `Failed`, or `Cancelled`.
 - A key may hold at most `max_streams` event streams open. One more answers `429 {"error": "too_many_streams"}`.
 - Set `rate`, `max_active_requests`, or `max_streams` to `0` to turn that limit off. Different keys can have different settings: see [Client API settings](#client-api-settings).
-- Every rejection is counted in `das_client_rejections_total{reason}`, with `reason` one of `rate_limited`, `quota_exceeded`, `too_many_streams`, `budget_above_limit`, or `idempotency_key_reused`.
+- Every rejection is counted in `das_client_rejections_total{reason}`, with `reason` one of `rate_limited`, `quota_exceeded`, `too_many_streams`, `budget_above_limit`, `idempotency_key_reused`, `forbidden` (a key without the Scope or role its route needs), `tenant_quota_exceeded` (the tenant's own limit on unfinished Requests, answered `429` with `"limit_scope": "tenant"`), or `priority_above_limit` (a `priority` above the tenant's `max_priority`, answered `400` with the limit).
 
 ### Event streams
 
@@ -300,7 +300,7 @@ Client API metrics (on the Gateway, except the last):
 
 | Metric | Type | Labels and meaning |
 |---|---|---|
-| `das_client_rejections_total` | counter | `reason`: `rate_limited`, `quota_exceeded`, `too_many_streams`, `budget_above_limit`, `idempotency_key_reused` |
+| `das_client_rejections_total` | counter | `reason`: `rate_limited`, `quota_exceeded`, `too_many_streams`, `budget_above_limit`, `idempotency_key_reused`, `forbidden`, `tenant_quota_exceeded`, `priority_above_limit` |
 | `das_idempotent_replays_total` | counter | Submits answered from an idempotency record (not counted as new Requests) |
 | `das_sse_streams` | gauge | Event streams open on this Gateway replica |
 | `das_webhook_deliveries_total` | counter | `outcome`: `delivered`, `retry`, `failed` |

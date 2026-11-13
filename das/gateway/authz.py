@@ -14,6 +14,7 @@ from fastapi import HTTPException, Request, status
 
 from das.gateway.auth import ADMIN_DISABLED_BODY, FORBIDDEN_BODY, UNAUTHORIZED_BODY
 from das.observability import get_logger
+from das.observability.metrics import GatewayMetrics
 from das.tenancy.scopes import OPERATOR, ROUTE_SCOPES, Principal, Requirement, Scope, authorize
 
 log = get_logger(__name__)
@@ -23,13 +24,21 @@ def authorize_route(
     table: Mapping[tuple[str, str], Requirement] = ROUTE_SCOPES,
     *,
     admin_disabled: bool = False,
+    metrics: Callable[[], GatewayMetrics] | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Dependency refusing a Principal that lacks what its route requires: 403 ``forbidden`` with a ``scope`` field
     naming the Scope, or ``operator``. A route without a table entry is refused without one.
 
     With ``admin_disabled`` (nothing in the configuration can administer, see
     :func:`das.gateway.auth.can_administer`) a refused ``admin`` or ``operator`` route answers 403 ``admin_disabled``
-    instead, as in Phase 4."""
+    instead, as in Phase 4. Each 403 ``forbidden`` is counted as the rejection reason ``forbidden`` (Phase 5 Req 8.2);
+    ``admin_disabled`` is a different answer and is not. ``metrics`` is called per refusal because the Gateway builds
+    its recorder after its routers."""
+
+    def refuse(body: dict[str, str]) -> HTTPException:
+        if metrics is not None:
+            metrics().client_rejected("forbidden")
+        return HTTPException(status.HTTP_403_FORBIDDEN, body)
 
     async def require_scope(request: Request) -> None:
         principal = getattr(request.state, "principal", None)
@@ -41,11 +50,11 @@ def authorize_route(
         requirement = table.get((request.method, template)) if isinstance(template, str) else None
         if requirement is None:
             log.warning("route without a scope entry", method=request.method, route=template)
-            raise HTTPException(status.HTTP_403_FORBIDDEN, dict(FORBIDDEN_BODY))
+            raise refuse(dict(FORBIDDEN_BODY))
         if not authorize(principal, requirement):
             if admin_disabled and requirement in (Scope.ADMIN, OPERATOR):
                 raise HTTPException(status.HTTP_403_FORBIDDEN, dict(ADMIN_DISABLED_BODY))
-            raise HTTPException(status.HTTP_403_FORBIDDEN, {**FORBIDDEN_BODY, "scope": str(requirement)})
+            raise refuse({**FORBIDDEN_BODY, "scope": str(requirement)})
 
     return require_scope
 

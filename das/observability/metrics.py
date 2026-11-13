@@ -73,8 +73,11 @@ RetentionKind = Literal["request", "inbox", "dlq_record"]
 #: Same values as ``das.client.budget.ExceededKind`` (Phase 4 Req 10.2).
 BudgetExceededKind = Literal["tokens", "cost", "unenforceable"]
 #: Gateway rejections of client calls (Phase 4 Req 10.1); never a fingerprint, Request_ID or URL (10.3).
+#: Phase 5 Req 8.2 adds ``forbidden`` (a 403 for a missing Scope or role), ``tenant_quota_exceeded`` and
+#: ``priority_above_limit``; still never a key, fingerprint or tenant.
 ClientRejectionReason = Literal[
-    "rate_limited", "quota_exceeded", "too_many_streams", "budget_above_limit", "idempotency_key_reused"
+    "rate_limited", "quota_exceeded", "too_many_streams", "budget_above_limit", "idempotency_key_reused",
+    "forbidden", "tenant_quota_exceeded", "priority_above_limit",
 ]
 WebhookOutcome = Literal["delivered", "retry", "failed"]
 RegistryRole = Literal["manager", "worker"]

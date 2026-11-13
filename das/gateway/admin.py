@@ -102,6 +102,7 @@ def create_admin_router(
     client_limits: ClientLimitsConfig | None = None,
     rate_limit: Callable[..., Awaitable[None]] | None = None,
     tenants: Sequence[TenantConfig] = (),
+    metrics: Callable[[], GatewayMetrics] | None = None,
 ) -> APIRouter:
     """``/v1/admin`` router guarded by :func:`admin_key_auth`, then by ``rate_limit`` (Phase 4 Req 2.5).
 
@@ -113,7 +114,7 @@ def create_admin_router(
     admin_keys = list(admin_api_keys)
     dependencies = [
         Depends(admin_key_auth(api_keys, admin_keys, client_limits, tenants=tenants)),
-        Depends(authorize_route(admin_disabled=not can_administer(admin_keys, tenants))),
+        Depends(authorize_route(admin_disabled=not can_administer(admin_keys, tenants), metrics=metrics)),
     ]
     if rate_limit is not None:
         dependencies.append(Depends(rate_limit))

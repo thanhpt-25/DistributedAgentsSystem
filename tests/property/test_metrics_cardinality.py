@@ -14,6 +14,11 @@ any label limit from 1 to 500:
   exactly one HELP and one TYPE line, and only catalog label names;
 - the output contains no configured secret as a substring.
 
+Superseded boundary (das-multi-tenant task 8.1; Phase 5 Req 8.1, 8.4): v2 Req 20.3 forbade any Metric_Label carrying a
+tenant identity. ``tenant`` is now a dynamic label of exactly two metrics, bounded by ``label_limits.tenant`` like the
+other dynamic labels (this property reads ``DYNAMIC_LABELS`` and the limits, so it covers it). A key value or
+Key_Fingerprint is still never a label.
+
 **Validates: Requirements 1.4, 1.5, 2.10, 5.1, 5.2, 5.3, 5.4, 5.5, 5.7**
 """
 

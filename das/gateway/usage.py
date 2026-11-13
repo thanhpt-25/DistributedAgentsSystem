@@ -16,6 +16,7 @@ from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 
 from das.config.schema import TENANT_ID_PATTERN
+from das.gateway.openapi import USAGE_PARAMETERS, USAGE_RESPONSES
 from das.ops.cost import PriceTable
 from das.state.store import StateStore
 from das.tenancy.scopes import DEFAULT_TENANT, Principal
@@ -80,7 +81,7 @@ def register_usage_route(
 ) -> None:
     """Register ``GET /usage`` on the ``/v1`` router: the report of the caller's own tenant (Scope ``read``)."""
 
-    @router.get("/usage")
+    @router.get("/usage", responses=USAGE_RESPONSES, openapi_extra={"parameters": USAGE_PARAMETERS})
     async def usage_report(request: Request) -> Any:
         principal: Principal = request.state.principal
         params = {k: request.query_params.getlist(k) for k in request.query_params}

@@ -134,6 +134,71 @@ async def test_error_bodies_share_one_documented_shape(schema):
     assert body == {"$ref": "#/components/schemas/ErrorResponse"}
 
 
+# --------------------------------------------------------------------------- Phase 5 (das-multi-tenant task 5.6)
+
+PUBLISHED = CLIENT_PATHS | {"/v1/usage"}
+
+
+async def test_the_document_lists_exactly_the_routes_the_gateway_serves(state_store, fake_redis, schema):
+    """Every route and method of the application, but not the admin API or the schema route itself, and nothing else:
+    a route added without a place in the document fails here (Phase 5 Req 2.2, 6.3)."""
+    from tests.fixtures.routes import method_templates
+
+    served = {
+        (method.lower(), path)
+        for method, path in method_templates(make_app(state_store, fake_redis))
+        if not path.startswith("/v1/admin") and path != "/v1/openapi.json"
+    }
+    # The public health route has always been in the document too; the property is about the authenticated API.
+    documented = {(method, path) for path, item in schema["paths"].items() for method in item if path.startswith("/v1")}
+    assert documented == served
+    assert {p for p in schema["paths"] if p.startswith("/v1")} == PUBLISHED
+
+
+async def test_the_usage_route_is_documented(schema):
+    operation = schema["paths"]["/v1/usage"]["get"]
+    assert {"200", "400", "401", "403", "429", "503"} <= set(operation["responses"])
+    assert {"from", "to"} == {p["name"] for p in operation["parameters"]}
+    assert "invalid_query" in operation["responses"]["400"]["description"]
+    assert "parameter" in operation["responses"]["400"]["description"]
+
+
+async def test_the_list_route_documents_its_parameters_including_tenant(schema):
+    operation = schema["paths"]["/v1/requests"]["get"]
+    parameters = {p["name"]: p for p in operation["parameters"]}
+    assert set(parameters) == {"status", "created_after", "created_before", "limit", "cursor", "tenant"}
+    assert all(p["in"] == "query" and p["required"] is False for p in parameters.values())
+    assert "Operator" in parameters["tenant"]["description"]
+    assert {"200", "400", "401", "403", "429", "503"} <= set(operation["responses"])
+    assert "invalid_query" in operation["responses"]["400"]["description"]
+    assert "index_not_ready" in operation["responses"]["503"]["description"]
+
+
+async def test_the_submit_body_documents_priority(schema):
+    body = schema["components"]["schemas"]["SubmitBody"]["properties"]
+    assert body["priority"]["enum"] == ["normal", "high"]
+    assert "default_priority" in body["priority"]["description"]
+    responses = schema["paths"]["/v1/requests"]["post"]["responses"]
+    assert "priority" in responses["400"]["description"]
+    assert "priority_above_limit" in responses["400"]["description"]
+    assert "limit_scope" in responses["429"]["description"]
+
+
+async def test_every_published_route_documents_the_403_of_a_missing_scope(schema):
+    for path in PUBLISHED:
+        for operation in schema["paths"][path].values():
+            description = operation["responses"]["403"]["description"]
+            assert "forbidden" in description and "scope" in description, path
+            ref = operation["responses"]["403"]["content"]["application/json"]["schema"]
+            assert ref == {"$ref": "#/components/schemas/ErrorResponse"}
+
+
+async def test_the_error_body_documents_the_fields_phase_5_adds(schema):
+    error = schema["components"]["schemas"]["ErrorResponse"]
+    assert {"scope", "limit_scope"} <= set(error["properties"])
+    assert error["required"] == ["error"]  # still the only required field
+
+
 async def test_the_document_is_stable_across_calls(state_store, fake_redis):
     app = make_app(state_store, fake_redis)
     first = (await get(app, "/v1/openapi.json", **AUTH)).json()
