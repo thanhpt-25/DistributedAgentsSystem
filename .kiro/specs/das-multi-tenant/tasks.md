@@ -118,7 +118,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 6.2 Carry priority to dispatch
     - `RequestSnapshot.priority` read by `load_snapshot`; `das/manager/driver.py` dispatch publishes with `headers={PRIORITY_HEADER: "high"}` for a `high` Request and none otherwise (retries, takeovers and replays use the same call)
     - _Requirements: 7.4_
-  - [ ] 6.3 Write property test for the Priority header
+  - [x] 6.3 Write property test for the Priority header
     - **Property 8: Priority header**
     - **Validates: Requirements 7.3, 7.4, 7.5**
   - [x] 6.4 Translate the header in the RabbitMQ adapter
@@ -149,7 +149,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
   - [x] 8.2 Write the mixed-version test
     - Data written by the Phase 4 scripts (no `tenant`, no twins), then the Phase 5 scripts: Default_Tenant listing correct before the flag, non-default 503 before it, correct after the backfill; a Phase 4 reader ignores the new keys
     - _Requirements: 9.1, 9.2, 9.3, 9.4_
-  - [ ] 8.3 Write the Default_Tenant compatibility test
+  - [x] 8.3 Write the Default_Tenant compatibility test
     - With no `tenants` configured, the Phase 4 contract tests and Gateway tests pass unchanged and responses match Phase 4 apart from the added fields; the wire-format baselines stay byte-identical
     - _Requirements: 9.5, 9.6_
 

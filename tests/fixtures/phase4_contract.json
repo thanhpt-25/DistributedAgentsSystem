@@ -1,0 +1,2432 @@
+{
+  "config_schema": {
+    "$defs": {
+      "BucketsConfig": {
+        "additionalProperties": false,
+        "description": "Histogram bucket boundaries (Req 2.11). Shape is checked in :func:`cross_field_errors`.",
+        "properties": {
+          "attempts": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Attempts",
+            "type": "array"
+          },
+          "duration": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Duration",
+            "type": "array"
+          },
+          "http": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Http",
+            "type": "array"
+          }
+        },
+        "title": "BucketsConfig",
+        "type": "object"
+      },
+      "BudgetConfig": {
+        "additionalProperties": false,
+        "description": "A key's ``default_budget`` (Phase 4 Req 5.2). ``max_cost`` is in the Price_Table currency.",
+        "properties": {
+          "max_cost": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Cost"
+          },
+          "max_total_tokens": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Total Tokens"
+          }
+        },
+        "title": "BudgetConfig",
+        "type": "object"
+      },
+      "ClientLimitsConfig": {
+        "additionalProperties": false,
+        "description": "``client_limits`` (Phase 4 Req 1.1). Overrides are matched by Key_Fingerprint.",
+        "properties": {
+          "allow_insecure_webhooks": {
+            "default": false,
+            "title": "Allow Insecure Webhooks",
+            "type": "boolean"
+          },
+          "default": {
+            "$ref": "#/$defs/ClientSettingsConfig"
+          },
+          "idempotency_ttl": {
+            "default": 86400,
+            "maximum": 604800,
+            "minimum": 60,
+            "title": "Idempotency Ttl",
+            "type": "integer"
+          },
+          "overrides": {
+            "items": {
+              "$ref": "#/$defs/ClientOverride"
+            },
+            "maxItems": 1000,
+            "title": "Overrides",
+            "type": "array"
+          }
+        },
+        "title": "ClientLimitsConfig",
+        "type": "object"
+      },
+      "ClientOverride": {
+        "additionalProperties": false,
+        "description": "Settings for one Key_Fingerprint. A field left unset (``None``) inherits the default.",
+        "properties": {
+          "burst": {
+            "anyOf": [
+              {
+                "maximum": 1000000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Burst"
+          },
+          "default_budget": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BudgetConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "fingerprint": {
+            "pattern": "^[0-9a-f]{8}$",
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "max_active_requests": {
+            "anyOf": [
+              {
+                "maximum": 1000000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Active Requests"
+          },
+          "max_streams": {
+            "anyOf": [
+              {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Streams"
+          },
+          "rate": {
+            "anyOf": [
+              {
+                "maximum": 100000,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rate"
+          },
+          "webhook_secret_name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Webhook Secret Name"
+          },
+          "webhook_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Webhook Url"
+          }
+        },
+        "required": [
+          "fingerprint"
+        ],
+        "title": "ClientOverride",
+        "type": "object"
+      },
+      "ClientSettingsConfig": {
+        "additionalProperties": false,
+        "description": "Client_Settings fields (Phase 4 Req 1.2). 0 disables ``rate``, ``max_active_requests`` or ``max_streams``.",
+        "properties": {
+          "burst": {
+            "default": 120,
+            "maximum": 1000000,
+            "minimum": 1,
+            "title": "Burst",
+            "type": "integer"
+          },
+          "default_budget": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BudgetConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "max_active_requests": {
+            "default": 100,
+            "maximum": 1000000,
+            "minimum": 0,
+            "title": "Max Active Requests",
+            "type": "integer"
+          },
+          "max_streams": {
+            "default": 10,
+            "maximum": 10000,
+            "minimum": 0,
+            "title": "Max Streams",
+            "type": "integer"
+          },
+          "rate": {
+            "default": 60.0,
+            "maximum": 100000,
+            "minimum": 0,
+            "title": "Rate",
+            "type": "number"
+          },
+          "webhook_secret_name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Webhook Secret Name"
+          },
+          "webhook_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Webhook Url"
+          }
+        },
+        "title": "ClientSettingsConfig",
+        "type": "object"
+      },
+      "EventsConfig": {
+        "additionalProperties": false,
+        "description": "Event_Stream and SSE_Endpoint limits (Phase 4 Req 6.5, 7.5, 7.7).",
+        "properties": {
+          "keepalive": {
+            "default": 15.0,
+            "exclusiveMinimum": 0,
+            "maximum": 300,
+            "title": "Keepalive",
+            "type": "number"
+          },
+          "max_connections": {
+            "default": 500,
+            "maximum": 10000,
+            "minimum": 1,
+            "title": "Max Connections",
+            "type": "integer"
+          },
+          "max_len": {
+            "default": 1000,
+            "maximum": 100000,
+            "minimum": 100,
+            "title": "Max Len",
+            "type": "integer"
+          }
+        },
+        "title": "EventsConfig",
+        "type": "object"
+      },
+      "GatewayConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_secret": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cursor Secret"
+          }
+        },
+        "title": "GatewayConfig",
+        "type": "object"
+      },
+      "GrpcConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "advertise_host": {
+            "minLength": 1,
+            "title": "Advertise Host",
+            "type": "string"
+          },
+          "advertise_port": {
+            "maximum": 65535,
+            "minimum": 1,
+            "title": "Advertise Port",
+            "type": "integer"
+          },
+          "bind": {
+            "title": "Bind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bind",
+          "advertise_host",
+          "advertise_port"
+        ],
+        "title": "GrpcConfig",
+        "type": "object"
+      },
+      "LLMConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Api Key"
+          },
+          "aws_access_key_id": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Aws Access Key Id"
+          },
+          "aws_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Aws Region"
+          },
+          "aws_secret_access_key": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Aws Secret Access Key"
+          },
+          "aws_session_token": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Aws Session Token"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Base Url"
+          },
+          "max_output_tokens": {
+            "default": 4096,
+            "minimum": 1,
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "model": {
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "openai",
+              "anthropic",
+              "bedrock",
+              "ollama"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "retry_count": {
+            "default": 3,
+            "maximum": 10,
+            "minimum": 0,
+            "title": "Retry Count",
+            "type": "integer"
+          },
+          "temperature": {
+            "default": 0.2,
+            "maximum": 2.0,
+            "minimum": 0.0,
+            "title": "Temperature",
+            "type": "number"
+          },
+          "timeout": {
+            "default": 60,
+            "maximum": 600,
+            "minimum": 1,
+            "title": "Timeout",
+            "type": "number"
+          }
+        },
+        "required": [
+          "provider",
+          "model"
+        ],
+        "title": "LLMConfig",
+        "type": "object"
+      },
+      "LabelLimitsConfig": {
+        "additionalProperties": false,
+        "description": "Distinct-value limit per unbounded Metric_Label (Req 5.3, 5.8).",
+        "properties": {
+          "capability": {
+            "default": 50,
+            "maximum": 500,
+            "minimum": 1,
+            "title": "Capability",
+            "type": "integer"
+          },
+          "model": {
+            "default": 50,
+            "maximum": 500,
+            "minimum": 1,
+            "title": "Model",
+            "type": "integer"
+          },
+          "provider": {
+            "default": 50,
+            "maximum": 500,
+            "minimum": 1,
+            "title": "Provider",
+            "type": "integer"
+          },
+          "queue": {
+            "default": 50,
+            "maximum": 500,
+            "minimum": 1,
+            "title": "Queue",
+            "type": "integer"
+          }
+        },
+        "title": "LabelLimitsConfig",
+        "type": "object"
+      },
+      "LimitsConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "base_backoff": {
+            "default": 2,
+            "maximum": 60,
+            "minimum": 0.1,
+            "title": "Base Backoff",
+            "type": "number"
+          },
+          "capability_wait": {
+            "default": 60,
+            "maximum": 3600,
+            "minimum": 1,
+            "title": "Capability Wait",
+            "type": "number"
+          },
+          "heartbeat_interval": {
+            "default": 5,
+            "maximum": 60,
+            "minimum": 1,
+            "title": "Heartbeat Interval",
+            "type": "number"
+          },
+          "job_timeout": {
+            "default": 300,
+            "maximum": 3600,
+            "minimum": 1,
+            "title": "Job Timeout",
+            "type": "integer"
+          },
+          "lease_duration": {
+            "default": 30,
+            "maximum": 300,
+            "minimum": 5,
+            "title": "Lease Duration",
+            "type": "number"
+          },
+          "max_attempts": {
+            "default": 3,
+            "maximum": 10,
+            "minimum": 1,
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "max_backoff": {
+            "default": 60,
+            "maximum": 600,
+            "minimum": 1,
+            "title": "Max Backoff",
+            "type": "number"
+          },
+          "max_jobs": {
+            "default": 10,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Max Jobs",
+            "type": "integer"
+          },
+          "max_message_bytes": {
+            "default": 1048576,
+            "maximum": 134217728,
+            "minimum": 1024,
+            "title": "Max Message Bytes",
+            "type": "integer"
+          },
+          "max_prompt_length": {
+            "default": 32000,
+            "maximum": 1000000,
+            "minimum": 1,
+            "title": "Max Prompt Length",
+            "type": "integer"
+          },
+          "max_reconnect_interval": {
+            "default": 30,
+            "maximum": 300,
+            "minimum": 1,
+            "title": "Max Reconnect Interval",
+            "type": "number"
+          },
+          "planning_retries": {
+            "default": 2,
+            "maximum": 5,
+            "minimum": 0,
+            "title": "Planning Retries",
+            "type": "integer"
+          },
+          "request_reply_timeout": {
+            "default": 30,
+            "maximum": 300,
+            "minimum": 1,
+            "title": "Request Reply Timeout",
+            "type": "number"
+          },
+          "shutdown_timeout": {
+            "default": 30,
+            "maximum": 300,
+            "minimum": 1,
+            "title": "Shutdown Timeout",
+            "type": "number"
+          },
+          "startup_retry_interval": {
+            "default": 2,
+            "maximum": 60,
+            "minimum": 0.1,
+            "title": "Startup Retry Interval",
+            "type": "number"
+          },
+          "startup_timeout": {
+            "default": 60,
+            "maximum": 3600,
+            "minimum": 1,
+            "title": "Startup Timeout",
+            "type": "number"
+          }
+        },
+        "title": "LimitsConfig",
+        "type": "object"
+      },
+      "MetricsConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "buckets": {
+            "$ref": "#/$defs/BucketsConfig"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "label_limits": {
+            "$ref": "#/$defs/LabelLimitsConfig"
+          },
+          "queue_sample_interval": {
+            "default": 15,
+            "maximum": 300,
+            "minimum": 5,
+            "title": "Queue Sample Interval",
+            "type": "number"
+          }
+        },
+        "title": "MetricsConfig",
+        "type": "object"
+      },
+      "PricingConfig": {
+        "additionalProperties": false,
+        "description": "Optional Price_Table (Req 10.1). Duplicate pairs are checked in :func:`cross_field_errors`.",
+        "properties": {
+          "currency": {
+            "default": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/$defs/PricingEntryConfig"
+            },
+            "maxItems": 200,
+            "minItems": 0,
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "title": "PricingConfig",
+        "type": "object"
+      },
+      "PricingEntryConfig": {
+        "additionalProperties": false,
+        "description": "One Price_Table entry as read from Agent_Config (Req 10.1).",
+        "properties": {
+          "input_per_million": {
+            "anyOf": [
+              {
+                "maximum": 1000000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Input Per Million"
+          },
+          "model": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "output_per_million": {
+            "anyOf": [
+              {
+                "maximum": 1000000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Output Per Million"
+          },
+          "provider": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "model",
+          "input_per_million",
+          "output_per_million"
+        ],
+        "title": "PricingEntryConfig",
+        "type": "object"
+      },
+      "RabbitMQConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "management_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Management Url"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "RabbitMQConfig",
+        "type": "object"
+      },
+      "RedisConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "RedisConfig",
+        "type": "object"
+      },
+      "RetentionConfig": {
+        "additionalProperties": false,
+        "description": "Retention_Policy (Req 14.1). TTLs are in seconds.",
+        "properties": {
+          "batch_size": {
+            "default": 500,
+            "maximum": 10000,
+            "minimum": 1,
+            "title": "Batch Size",
+            "type": "integer"
+          },
+          "dlq_record_ttl": {
+            "default": 2592000,
+            "maximum": 31536000,
+            "minimum": 3600,
+            "title": "Dlq Record Ttl",
+            "type": "integer"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "inbox_ttl": {
+            "default": 3600,
+            "maximum": 604800,
+            "minimum": 60,
+            "title": "Inbox Ttl",
+            "type": "integer"
+          },
+          "sweep_interval": {
+            "default": 60,
+            "maximum": 3600,
+            "minimum": 10,
+            "title": "Sweep Interval",
+            "type": "number"
+          },
+          "terminal_request_ttl": {
+            "default": 604800,
+            "maximum": 31536000,
+            "minimum": 3600,
+            "title": "Terminal Request Ttl",
+            "type": "integer"
+          }
+        },
+        "title": "RetentionConfig",
+        "type": "object"
+      },
+      "TracingConfig": {
+        "additionalProperties": false,
+        "description": "OpenTelemetry tracing (Req 8.1). ``otlp_endpoint`` is checked in :func:`cross_field_errors`.",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "max_queue_size": {
+            "default": 2048,
+            "maximum": 100000,
+            "minimum": 1,
+            "title": "Max Queue Size",
+            "type": "integer"
+          },
+          "otlp_endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Otlp Endpoint"
+          },
+          "otlp_headers": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Otlp Headers"
+          },
+          "otlp_protocol": {
+            "default": "grpc",
+            "enum": [
+              "grpc",
+              "http/protobuf"
+            ],
+            "title": "Otlp Protocol",
+            "type": "string"
+          },
+          "sample_ratio": {
+            "default": 1.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Sample Ratio",
+            "type": "number"
+          },
+          "service_name": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Service Name"
+          }
+        },
+        "title": "TracingConfig",
+        "type": "object"
+      },
+      "TransportsConfig": {
+        "additionalProperties": false,
+        "description": "Transport implementation names, resolved by the transport loader (Req 8.4).",
+        "properties": {
+          "control": {
+            "minLength": 1,
+            "title": "Control",
+            "type": "string"
+          },
+          "jobs": {
+            "minLength": 1,
+            "title": "Jobs",
+            "type": "string"
+          }
+        },
+        "required": [
+          "jobs",
+          "control"
+        ],
+        "title": "TransportsConfig",
+        "type": "object"
+      },
+      "WebhookConfig": {
+        "additionalProperties": false,
+        "description": "Webhook_Sender settings (Phase 4 Req 8.6). ``workers`` 0 disables the sender on this replica.",
+        "properties": {
+          "base_backoff": {
+            "default": 30.0,
+            "exclusiveMinimum": 0,
+            "maximum": 3600,
+            "title": "Base Backoff",
+            "type": "number"
+          },
+          "max_attempts": {
+            "default": 8,
+            "maximum": 20,
+            "minimum": 1,
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "max_backoff": {
+            "default": 3600.0,
+            "exclusiveMinimum": 0,
+            "maximum": 86400,
+            "title": "Max Backoff",
+            "type": "number"
+          },
+          "timeout": {
+            "default": 10.0,
+            "exclusiveMinimum": 0,
+            "maximum": 60,
+            "title": "Timeout",
+            "type": "number"
+          },
+          "workers": {
+            "default": 2,
+            "maximum": 32,
+            "minimum": 0,
+            "title": "Workers",
+            "type": "integer"
+          }
+        },
+        "title": "WebhookConfig",
+        "type": "object"
+      },
+      "WorkerConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "items": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "concurrency_limit": {
+            "default": 4,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Concurrency Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "title": "WorkerConfig",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "description": "Fully validated Agent_Config for one agent process.",
+    "properties": {
+      "admin_api_keys": {
+        "items": {
+          "format": "password",
+          "type": "string",
+          "writeOnly": true
+        },
+        "title": "Admin Api Keys",
+        "type": "array"
+      },
+      "agent_id": {
+        "anyOf": [
+          {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Agent Id"
+      },
+      "api_keys": {
+        "items": {
+          "format": "password",
+          "type": "string",
+          "writeOnly": true
+        },
+        "title": "Api Keys",
+        "type": "array"
+      },
+      "client_limits": {
+        "$ref": "#/$defs/ClientLimitsConfig"
+      },
+      "events": {
+        "$ref": "#/$defs/EventsConfig"
+      },
+      "gateway": {
+        "$ref": "#/$defs/GatewayConfig"
+      },
+      "grpc": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/GrpcConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "health_port": {
+        "default": 8081,
+        "maximum": 65535,
+        "minimum": 1,
+        "title": "Health Port",
+        "type": "integer"
+      },
+      "host": {
+        "minLength": 1,
+        "title": "Host",
+        "type": "string"
+      },
+      "http_port": {
+        "default": 8080,
+        "maximum": 65535,
+        "minimum": 1,
+        "title": "Http Port",
+        "type": "integer"
+      },
+      "limits": {
+        "$ref": "#/$defs/LimitsConfig"
+      },
+      "llm": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/LLMConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "metrics": {
+        "$ref": "#/$defs/MetricsConfig"
+      },
+      "pricing": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PricingConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "rabbitmq": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RabbitMQConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "redis": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RedisConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "retention": {
+        "$ref": "#/$defs/RetentionConfig"
+      },
+      "role": {
+        "enum": [
+          "gateway",
+          "manager",
+          "worker"
+        ],
+        "title": "Role",
+        "type": "string"
+      },
+      "secrets_file": {
+        "anyOf": [
+          {
+            "format": "path",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Secrets File"
+      },
+      "tracing": {
+        "$ref": "#/$defs/TracingConfig"
+      },
+      "transports": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TransportsConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "webhook": {
+        "$ref": "#/$defs/WebhookConfig"
+      },
+      "webhook_secrets": {
+        "patternProperties": {
+          "^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$": {
+            "format": "password",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "propertyNames": {
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "title": "Webhook Secrets",
+        "type": "object"
+      },
+      "worker": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WorkerConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "role"
+    ],
+    "title": "AgentConfig",
+    "type": "object"
+  },
+  "env_vars": [
+    "DAS__ADMIN_API_KEYS",
+    "DAS__AGENT_ID",
+    "DAS__API_KEYS",
+    "DAS__CLIENT_LIMITS__ALLOW_INSECURE_WEBHOOKS",
+    "DAS__CLIENT_LIMITS__DEFAULT__BURST",
+    "DAS__CLIENT_LIMITS__DEFAULT__DEFAULT_BUDGET__MAX_COST",
+    "DAS__CLIENT_LIMITS__DEFAULT__DEFAULT_BUDGET__MAX_TOTAL_TOKENS",
+    "DAS__CLIENT_LIMITS__DEFAULT__MAX_ACTIVE_REQUESTS",
+    "DAS__CLIENT_LIMITS__DEFAULT__MAX_STREAMS",
+    "DAS__CLIENT_LIMITS__DEFAULT__RATE",
+    "DAS__CLIENT_LIMITS__DEFAULT__WEBHOOK_SECRET_NAME",
+    "DAS__CLIENT_LIMITS__DEFAULT__WEBHOOK_URL",
+    "DAS__CLIENT_LIMITS__IDEMPOTENCY_TTL",
+    "DAS__CLIENT_LIMITS__OVERRIDES",
+    "DAS__EVENTS__KEEPALIVE",
+    "DAS__EVENTS__MAX_CONNECTIONS",
+    "DAS__EVENTS__MAX_LEN",
+    "DAS__GATEWAY__CURSOR_SECRET",
+    "DAS__GRPC__ADVERTISE_HOST",
+    "DAS__GRPC__ADVERTISE_PORT",
+    "DAS__GRPC__BIND",
+    "DAS__HEALTH_PORT",
+    "DAS__HOST",
+    "DAS__HTTP_PORT",
+    "DAS__LIMITS__BASE_BACKOFF",
+    "DAS__LIMITS__CAPABILITY_WAIT",
+    "DAS__LIMITS__HEARTBEAT_INTERVAL",
+    "DAS__LIMITS__JOB_TIMEOUT",
+    "DAS__LIMITS__LEASE_DURATION",
+    "DAS__LIMITS__MAX_ATTEMPTS",
+    "DAS__LIMITS__MAX_BACKOFF",
+    "DAS__LIMITS__MAX_JOBS",
+    "DAS__LIMITS__MAX_MESSAGE_BYTES",
+    "DAS__LIMITS__MAX_PROMPT_LENGTH",
+    "DAS__LIMITS__MAX_RECONNECT_INTERVAL",
+    "DAS__LIMITS__PLANNING_RETRIES",
+    "DAS__LIMITS__REQUEST_REPLY_TIMEOUT",
+    "DAS__LIMITS__SHUTDOWN_TIMEOUT",
+    "DAS__LIMITS__STARTUP_RETRY_INTERVAL",
+    "DAS__LIMITS__STARTUP_TIMEOUT",
+    "DAS__LLM__API_KEY",
+    "DAS__LLM__AWS_ACCESS_KEY_ID",
+    "DAS__LLM__AWS_REGION",
+    "DAS__LLM__AWS_SECRET_ACCESS_KEY",
+    "DAS__LLM__AWS_SESSION_TOKEN",
+    "DAS__LLM__BASE_URL",
+    "DAS__LLM__MAX_OUTPUT_TOKENS",
+    "DAS__LLM__MODEL",
+    "DAS__LLM__PROVIDER",
+    "DAS__LLM__RETRY_COUNT",
+    "DAS__LLM__TEMPERATURE",
+    "DAS__LLM__TIMEOUT",
+    "DAS__METRICS__BUCKETS__ATTEMPTS",
+    "DAS__METRICS__BUCKETS__DURATION",
+    "DAS__METRICS__BUCKETS__HTTP",
+    "DAS__METRICS__ENABLED",
+    "DAS__METRICS__LABEL_LIMITS__CAPABILITY",
+    "DAS__METRICS__LABEL_LIMITS__MODEL",
+    "DAS__METRICS__LABEL_LIMITS__PROVIDER",
+    "DAS__METRICS__LABEL_LIMITS__QUEUE",
+    "DAS__METRICS__QUEUE_SAMPLE_INTERVAL",
+    "DAS__PRICING__CURRENCY",
+    "DAS__PRICING__MODELS",
+    "DAS__RABBITMQ__MANAGEMENT_URL",
+    "DAS__RABBITMQ__URL",
+    "DAS__REDIS__URL",
+    "DAS__RETENTION__BATCH_SIZE",
+    "DAS__RETENTION__DLQ_RECORD_TTL",
+    "DAS__RETENTION__ENABLED",
+    "DAS__RETENTION__INBOX_TTL",
+    "DAS__RETENTION__SWEEP_INTERVAL",
+    "DAS__RETENTION__TERMINAL_REQUEST_TTL",
+    "DAS__ROLE",
+    "DAS__SECRETS_FILE",
+    "DAS__TRACING__ENABLED",
+    "DAS__TRACING__MAX_QUEUE_SIZE",
+    "DAS__TRACING__OTLP_ENDPOINT",
+    "DAS__TRACING__OTLP_HEADERS",
+    "DAS__TRACING__OTLP_PROTOCOL",
+    "DAS__TRACING__SAMPLE_RATIO",
+    "DAS__TRACING__SERVICE_NAME",
+    "DAS__TRANSPORTS__CONTROL",
+    "DAS__TRANSPORTS__JOBS",
+    "DAS__WEBHOOK_SECRETS",
+    "DAS__WEBHOOK__BASE_BACKOFF",
+    "DAS__WEBHOOK__MAX_ATTEMPTS",
+    "DAS__WEBHOOK__MAX_BACKOFF",
+    "DAS__WEBHOOK__TIMEOUT",
+    "DAS__WEBHOOK__WORKERS",
+    "DAS__WORKER__CAPABILITIES",
+    "DAS__WORKER__CONCURRENCY_LIMIT"
+  ],
+  "exit_codes": {
+    "cli": {
+      "EXIT_CONFIG_ERROR": 2,
+      "EXIT_GENERIC_FAILURE": 1,
+      "EXIT_INTERRUPTED": 130,
+      "EXIT_OK": 0
+    },
+    "constants": {
+      "EXIT_CONFIG_ERROR": 2,
+      "EXIT_DEPENDENCY_UNREACHABLE": 4,
+      "EXIT_GENERIC_FAILURE": 1,
+      "EXIT_OK": 0,
+      "EXIT_REGISTRATION_FAILED": 5,
+      "EXIT_TRANSPORT_ERROR": 3
+    },
+    "exceptions": {
+      "ConfigError": 2,
+      "DASError": 1,
+      "DependencyUnreachable": 4,
+      "OpsPortUnavailable": 2,
+      "RegistrationFailed": 5,
+      "TransportIncomplete": 3,
+      "TransportLoadError": 3,
+      "TransportNotInstalled": 3
+    }
+  },
+  "metrics": [
+    {
+      "allowed": {
+        "kind": [
+          "cost",
+          "tokens",
+          "unenforceable"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Requests failed by a budget stop, by exceeded kind.",
+      "labels": [
+        "kind"
+      ],
+      "name": "das_budget_exceeded_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Available Worker_Agents advertising a Capability.",
+      "labels": [
+        "capability"
+      ],
+      "name": "das_capability_workers",
+      "type": "gauge"
+    },
+    {
+      "allowed": {
+        "reason": [
+          "budget_above_limit",
+          "idempotency_key_reused",
+          "quota_exceeded",
+          "rate_limited",
+          "too_many_streams"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Client calls the Gateway_API rejected, by reason.",
+      "labels": [
+        "reason"
+      ],
+      "name": "das_client_rejections_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "action": [
+          "discard",
+          "replay"
+        ],
+        "outcome": [
+          "accepted",
+          "budget_exceeded",
+          "job_state",
+          "lease_held",
+          "not_found",
+          "not_replayable",
+          "record_not_pending",
+          "request_gone",
+          "request_state",
+          "service_unavailable",
+          "stale_attempt"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Admin_API Replay and Discard responses.",
+      "labels": [
+        "action",
+        "outcome"
+      ],
+      "name": "das_dlq_admin_actions_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "reason": [
+          "delivery_limit",
+          "malformed",
+          "retries_exhausted"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Dead_Letter_Records created.",
+      "labels": [
+        "reason"
+      ],
+      "name": "das_dlq_records_created_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "method": [
+          "DELETE",
+          "GET",
+          "HEAD",
+          "OPTIONS",
+          "PATCH",
+          "POST",
+          "PUT",
+          "_other"
+        ]
+      },
+      "buckets_key": "http",
+      "help": "Seconds from receiving an HTTP call to sending its response.",
+      "labels": [
+        "route",
+        "method"
+      ],
+      "name": "das_http_request_duration_seconds",
+      "type": "histogram"
+    },
+    {
+      "allowed": {
+        "method": [
+          "DELETE",
+          "GET",
+          "HEAD",
+          "OPTIONS",
+          "PATCH",
+          "POST",
+          "PUT",
+          "_other"
+        ],
+        "status_code": [
+          "100",
+          "101",
+          "102",
+          "103",
+          "104",
+          "105",
+          "106",
+          "107",
+          "108",
+          "109",
+          "110",
+          "111",
+          "112",
+          "113",
+          "114",
+          "115",
+          "116",
+          "117",
+          "118",
+          "119",
+          "120",
+          "121",
+          "122",
+          "123",
+          "124",
+          "125",
+          "126",
+          "127",
+          "128",
+          "129",
+          "130",
+          "131",
+          "132",
+          "133",
+          "134",
+          "135",
+          "136",
+          "137",
+          "138",
+          "139",
+          "140",
+          "141",
+          "142",
+          "143",
+          "144",
+          "145",
+          "146",
+          "147",
+          "148",
+          "149",
+          "150",
+          "151",
+          "152",
+          "153",
+          "154",
+          "155",
+          "156",
+          "157",
+          "158",
+          "159",
+          "160",
+          "161",
+          "162",
+          "163",
+          "164",
+          "165",
+          "166",
+          "167",
+          "168",
+          "169",
+          "170",
+          "171",
+          "172",
+          "173",
+          "174",
+          "175",
+          "176",
+          "177",
+          "178",
+          "179",
+          "180",
+          "181",
+          "182",
+          "183",
+          "184",
+          "185",
+          "186",
+          "187",
+          "188",
+          "189",
+          "190",
+          "191",
+          "192",
+          "193",
+          "194",
+          "195",
+          "196",
+          "197",
+          "198",
+          "199",
+          "200",
+          "201",
+          "202",
+          "203",
+          "204",
+          "205",
+          "206",
+          "207",
+          "208",
+          "209",
+          "210",
+          "211",
+          "212",
+          "213",
+          "214",
+          "215",
+          "216",
+          "217",
+          "218",
+          "219",
+          "220",
+          "221",
+          "222",
+          "223",
+          "224",
+          "225",
+          "226",
+          "227",
+          "228",
+          "229",
+          "230",
+          "231",
+          "232",
+          "233",
+          "234",
+          "235",
+          "236",
+          "237",
+          "238",
+          "239",
+          "240",
+          "241",
+          "242",
+          "243",
+          "244",
+          "245",
+          "246",
+          "247",
+          "248",
+          "249",
+          "250",
+          "251",
+          "252",
+          "253",
+          "254",
+          "255",
+          "256",
+          "257",
+          "258",
+          "259",
+          "260",
+          "261",
+          "262",
+          "263",
+          "264",
+          "265",
+          "266",
+          "267",
+          "268",
+          "269",
+          "270",
+          "271",
+          "272",
+          "273",
+          "274",
+          "275",
+          "276",
+          "277",
+          "278",
+          "279",
+          "280",
+          "281",
+          "282",
+          "283",
+          "284",
+          "285",
+          "286",
+          "287",
+          "288",
+          "289",
+          "290",
+          "291",
+          "292",
+          "293",
+          "294",
+          "295",
+          "296",
+          "297",
+          "298",
+          "299",
+          "300",
+          "301",
+          "302",
+          "303",
+          "304",
+          "305",
+          "306",
+          "307",
+          "308",
+          "309",
+          "310",
+          "311",
+          "312",
+          "313",
+          "314",
+          "315",
+          "316",
+          "317",
+          "318",
+          "319",
+          "320",
+          "321",
+          "322",
+          "323",
+          "324",
+          "325",
+          "326",
+          "327",
+          "328",
+          "329",
+          "330",
+          "331",
+          "332",
+          "333",
+          "334",
+          "335",
+          "336",
+          "337",
+          "338",
+          "339",
+          "340",
+          "341",
+          "342",
+          "343",
+          "344",
+          "345",
+          "346",
+          "347",
+          "348",
+          "349",
+          "350",
+          "351",
+          "352",
+          "353",
+          "354",
+          "355",
+          "356",
+          "357",
+          "358",
+          "359",
+          "360",
+          "361",
+          "362",
+          "363",
+          "364",
+          "365",
+          "366",
+          "367",
+          "368",
+          "369",
+          "370",
+          "371",
+          "372",
+          "373",
+          "374",
+          "375",
+          "376",
+          "377",
+          "378",
+          "379",
+          "380",
+          "381",
+          "382",
+          "383",
+          "384",
+          "385",
+          "386",
+          "387",
+          "388",
+          "389",
+          "390",
+          "391",
+          "392",
+          "393",
+          "394",
+          "395",
+          "396",
+          "397",
+          "398",
+          "399",
+          "400",
+          "401",
+          "402",
+          "403",
+          "404",
+          "405",
+          "406",
+          "407",
+          "408",
+          "409",
+          "410",
+          "411",
+          "412",
+          "413",
+          "414",
+          "415",
+          "416",
+          "417",
+          "418",
+          "419",
+          "420",
+          "421",
+          "422",
+          "423",
+          "424",
+          "425",
+          "426",
+          "427",
+          "428",
+          "429",
+          "430",
+          "431",
+          "432",
+          "433",
+          "434",
+          "435",
+          "436",
+          "437",
+          "438",
+          "439",
+          "440",
+          "441",
+          "442",
+          "443",
+          "444",
+          "445",
+          "446",
+          "447",
+          "448",
+          "449",
+          "450",
+          "451",
+          "452",
+          "453",
+          "454",
+          "455",
+          "456",
+          "457",
+          "458",
+          "459",
+          "460",
+          "461",
+          "462",
+          "463",
+          "464",
+          "465",
+          "466",
+          "467",
+          "468",
+          "469",
+          "470",
+          "471",
+          "472",
+          "473",
+          "474",
+          "475",
+          "476",
+          "477",
+          "478",
+          "479",
+          "480",
+          "481",
+          "482",
+          "483",
+          "484",
+          "485",
+          "486",
+          "487",
+          "488",
+          "489",
+          "490",
+          "491",
+          "492",
+          "493",
+          "494",
+          "495",
+          "496",
+          "497",
+          "498",
+          "499",
+          "500",
+          "501",
+          "502",
+          "503",
+          "504",
+          "505",
+          "506",
+          "507",
+          "508",
+          "509",
+          "510",
+          "511",
+          "512",
+          "513",
+          "514",
+          "515",
+          "516",
+          "517",
+          "518",
+          "519",
+          "520",
+          "521",
+          "522",
+          "523",
+          "524",
+          "525",
+          "526",
+          "527",
+          "528",
+          "529",
+          "530",
+          "531",
+          "532",
+          "533",
+          "534",
+          "535",
+          "536",
+          "537",
+          "538",
+          "539",
+          "540",
+          "541",
+          "542",
+          "543",
+          "544",
+          "545",
+          "546",
+          "547",
+          "548",
+          "549",
+          "550",
+          "551",
+          "552",
+          "553",
+          "554",
+          "555",
+          "556",
+          "557",
+          "558",
+          "559",
+          "560",
+          "561",
+          "562",
+          "563",
+          "564",
+          "565",
+          "566",
+          "567",
+          "568",
+          "569",
+          "570",
+          "571",
+          "572",
+          "573",
+          "574",
+          "575",
+          "576",
+          "577",
+          "578",
+          "579",
+          "580",
+          "581",
+          "582",
+          "583",
+          "584",
+          "585",
+          "586",
+          "587",
+          "588",
+          "589",
+          "590",
+          "591",
+          "592",
+          "593",
+          "594",
+          "595",
+          "596",
+          "597",
+          "598",
+          "599"
+        ]
+      },
+      "buckets_key": null,
+      "help": "HTTP calls completed on the Gateway_API http_port.",
+      "labels": [
+        "route",
+        "method",
+        "status_code"
+      ],
+      "name": "das_http_requests_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Submits answered from an idempotency record.",
+      "labels": [],
+      "name": "das_idempotent_replays_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": "attempts",
+      "help": "Attempt count of Jobs reaching a terminal state.",
+      "labels": [
+        "capability"
+      ],
+      "name": "das_job_attempts",
+      "type": "histogram"
+    },
+    {
+      "allowed": {
+        "status": [
+          "Cancelled",
+          "Failed",
+          "Succeeded",
+          "TimedOut"
+        ]
+      },
+      "buckets_key": "duration",
+      "help": "Seconds a Worker_Agent spent executing a Job attempt.",
+      "labels": [
+        "capability",
+        "status"
+      ],
+      "name": "das_job_execution_seconds",
+      "type": "histogram"
+    },
+    {
+      "allowed": {
+        "state": [
+          "Cancelled",
+          "Dispatched",
+          "Failed",
+          "Ready",
+          "Skipped",
+          "Succeeded",
+          "TimedOut",
+          "Waiting"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Committed Job state transitions.",
+      "labels": [
+        "capability",
+        "state"
+      ],
+      "name": "das_job_transitions_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "kind": [
+          "initial",
+          "takeover"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Leases acquired by this Manager_Agent.",
+      "labels": [
+        "kind"
+      ],
+      "name": "das_lease_acquisitions_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "reason": [
+          "held_by_other",
+          "store_unreachable"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Leases this Manager_Agent considered lost.",
+      "labels": [
+        "reason"
+      ],
+      "name": "das_lease_losses_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Unexpired Leases held by this Manager_Agent.",
+      "labels": [],
+      "name": "das_leases_held",
+      "type": "gauge"
+    },
+    {
+      "allowed": {
+        "operation": [
+          "job",
+          "plan",
+          "summarize"
+        ]
+      },
+      "buckets_key": "duration",
+      "help": "Seconds per LLM completion call including retries and backoff.",
+      "labels": [
+        "provider",
+        "model",
+        "operation"
+      ],
+      "name": "das_llm_call_duration_seconds",
+      "type": "histogram"
+    },
+    {
+      "allowed": {
+        "operation": [
+          "job",
+          "plan",
+          "summarize"
+        ],
+        "outcome": [
+          "non_transient_error",
+          "rate_limited",
+          "success",
+          "timeout",
+          "transient_error"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Finished LLM completion calls.",
+      "labels": [
+        "provider",
+        "model",
+        "operation",
+        "outcome"
+      ],
+      "name": "das_llm_calls_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Estimated LLM cost per the Price_Table.",
+      "labels": [
+        "provider",
+        "model",
+        "currency"
+      ],
+      "name": "das_llm_estimated_cost_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "operation": [
+          "job",
+          "plan",
+          "summarize"
+        ]
+      },
+      "buckets_key": null,
+      "help": "LLM attempt retries scheduled.",
+      "labels": [
+        "provider",
+        "model",
+        "operation"
+      ],
+      "name": "das_llm_retries_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "direction": [
+          "input",
+          "output"
+        ],
+        "operation": [
+          "job",
+          "plan",
+          "summarize"
+        ]
+      },
+      "buckets_key": null,
+      "help": "LLM tokens reported by successful calls.",
+      "labels": [
+        "provider",
+        "model",
+        "operation",
+        "direction"
+      ],
+      "name": "das_llm_tokens_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Ready messages in a queue at the last sample.",
+      "labels": [
+        "queue"
+      ],
+      "name": "das_queue_depth",
+      "type": "gauge"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Failed or timed-out queue depth samples.",
+      "labels": [
+        "queue"
+      ],
+      "name": "das_queue_depth_sample_errors_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "role": [
+          "manager",
+          "worker"
+        ],
+        "status": [
+          "Available",
+          "Draining",
+          "Unavailable"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Agents in the Agent_Registry by role and status.",
+      "labels": [
+        "role",
+        "status"
+      ],
+      "name": "das_registry_agents",
+      "type": "gauge"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Failed Agent_Registry reads.",
+      "labels": [],
+      "name": "das_registry_sample_errors_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "status": [
+          "Cancelled",
+          "Completed",
+          "Failed"
+        ]
+      },
+      "buckets_key": "duration",
+      "help": "Seconds from Request creation to its terminal status.",
+      "labels": [
+        "status"
+      ],
+      "name": "das_request_duration_seconds",
+      "type": "histogram"
+    },
+    {
+      "allowed": {
+        "status": [
+          "Cancelled",
+          "Completed",
+          "Failed"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Requests that reached a terminal status.",
+      "labels": [
+        "status"
+      ],
+      "name": "das_requests_finished_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Requests created by the Gateway_API.",
+      "labels": [],
+      "name": "das_requests_submitted_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "kind": [
+          "dlq_record",
+          "inbox",
+          "request"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Items deleted by the Retention_Sweeper.",
+      "labels": [
+        "kind"
+      ],
+      "name": "das_retention_deleted_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Event streams open on this Gateway_API replica.",
+      "labels": [],
+      "name": "das_sse_streams",
+      "type": "gauge"
+    },
+    {
+      "allowed": {
+        "outcome": [
+          "delivered",
+          "failed",
+          "retry"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Webhook delivery attempts, by outcome.",
+      "labels": [
+        "outcome"
+      ],
+      "name": "das_webhook_deliveries_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Configured concurrency limit of this Worker_Agent.",
+      "labels": [],
+      "name": "das_worker_concurrency_limit",
+      "type": "gauge"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Jobs currently executing on this Worker_Agent.",
+      "labels": [],
+      "name": "das_worker_jobs_in_flight",
+      "type": "gauge"
+    }
+  ],
+  "routes": {
+    "gateway": [
+      [
+        "GET",
+        "/healthz"
+      ],
+      [
+        "POST",
+        "/v1/admin/agents/{agent_id}/drain"
+      ],
+      [
+        "POST",
+        "/v1/admin/agents/{agent_id}/undrain"
+      ],
+      [
+        "GET",
+        "/v1/admin/dlq"
+      ],
+      [
+        "GET",
+        "/v1/admin/dlq/{dead_letter_id}"
+      ],
+      [
+        "POST",
+        "/v1/admin/dlq/{dead_letter_id}/discard"
+      ],
+      [
+        "POST",
+        "/v1/admin/dlq/{dead_letter_id}/replay"
+      ],
+      [
+        "GET",
+        "/v1/agents"
+      ],
+      [
+        "GET",
+        "/v1/openapi.json"
+      ],
+      [
+        "GET",
+        "/v1/requests"
+      ],
+      [
+        "POST",
+        "/v1/requests"
+      ],
+      [
+        "GET",
+        "/v1/requests/{request_id}"
+      ],
+      [
+        "POST",
+        "/v1/requests/{request_id}/cancel"
+      ],
+      [
+        "GET",
+        "/v1/requests/{request_id}/events"
+      ]
+    ],
+    "health": [
+      [
+        "GET",
+        "/healthz"
+      ],
+      [
+        "HEAD",
+        "/healthz"
+      ]
+    ],
+    "ops_agent": [
+      [
+        "GET",
+        "/healthz"
+      ],
+      [
+        "HEAD",
+        "/healthz"
+      ],
+      [
+        "GET",
+        "/livez"
+      ],
+      [
+        "HEAD",
+        "/livez"
+      ],
+      [
+        "GET",
+        "/metrics"
+      ],
+      [
+        "HEAD",
+        "/metrics"
+      ],
+      [
+        "GET",
+        "/readyz"
+      ],
+      [
+        "HEAD",
+        "/readyz"
+      ]
+    ],
+    "ops_gateway": [
+      [
+        "GET",
+        "/livez"
+      ],
+      [
+        "HEAD",
+        "/livez"
+      ],
+      [
+        "GET",
+        "/metrics"
+      ],
+      [
+        "HEAD",
+        "/metrics"
+      ],
+      [
+        "GET",
+        "/readyz"
+      ],
+      [
+        "HEAD",
+        "/readyz"
+      ]
+    ]
+  }
+}
