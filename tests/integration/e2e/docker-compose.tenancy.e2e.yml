@@ -1,0 +1,39 @@
+# Test-only override for the tenancy end-to-end tests (das-multi-tenant task 12.1). Used as:
+#
+#   docker compose --project-directory deploy -p das-e2e-tenant \
+#     -f deploy/docker-compose.yml \
+#     -f tests/integration/e2e/docker-compose.e2e.yml \
+#     -f tests/integration/e2e/docker-compose.tenancy.e2e.yml ...
+#
+# Relative paths, `extends.file` included, resolve against the project directory (deploy/). It is layered on
+# docker-compose.e2e.yml, which already supplies the fake LLM and the shorter Manager lease; nothing from that file is
+# repeated here. It adds:
+#
+#   gateway-b  a second Gateway replica on its own host port, so every answer is checked on both and the tenant
+#              indexes are shown to live in Redis, not in a replica. It extends `gateway`, so it has the same image,
+#              healthcheck and environment, and reuses the image that `gateway` builds.
+#
+# Both Gateways read the e2e Gateway config (gateway.tenancy.yaml, two tenants) instead of deploy/config/gateway.yaml,
+# and get the Admin_API_Key (the Operator). The key below is a placeholder for a throw-away stack.
+#
+# Compose appends list entries when files are merged. `volumes` and `ports` are therefore replaced with `!override`
+# (Compose 2.24 or later): appended, the production config would stay mounted and the base host port would be
+# published a second time.
+services:
+  gateway:
+    environment:
+      DAS__ADMIN_API_KEYS: e2e-root-admin-0123456789
+    volumes: !override
+      - ../tests/integration/e2e/gateway.tenancy.yaml:/etc/das/config.yaml:ro
+
+  gateway-b:
+    extends:
+      file: docker-compose.yml
+      service: gateway
+    build: !reset null
+    ports: !override
+      - "${DAS_GATEWAY_B_PORT}:8080"
+    environment:
+      DAS__ADMIN_API_KEYS: e2e-root-admin-0123456789
+    volumes: !override
+      - ../tests/integration/e2e/gateway.tenancy.yaml:/etc/das/config.yaml:ro

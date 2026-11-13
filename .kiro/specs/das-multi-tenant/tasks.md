@@ -185,7 +185,7 @@ Assumptions pending product-owner confirmation (requirements Introduction): stat
     - _Requirements: 10.8, 11.4_
 
 - [ ] 12. Compose end-to-end tests
-  - [ ] 12.1 Write the tenancy e2e
+  - [x] 12.1 Write the tenancy e2e
     - `tests/integration/e2e/test_tenancy_e2e.py`, own project `das-e2e-tenant` with its override and Gateway config: two tenants and an Operator on two Gateways; isolation across every route, scopes, the tenant quota, usage report totals equal to the stub LLM's token counts, a `high` Request overtaking a `normal` backlog, backfill after data written without tenant fields; each test run against a deliberately broken variant and a control
     - _Requirements: 3.2, 3.3, 3.7, 5.3, 6.2, 6.3, 7.4, 7.6, 9.2, 9.3_
   - [ ] 12.2 Run the full regression

@@ -1,0 +1,62 @@
+# Gateway_API Agent_Config for the tenancy end-to-end stack (das-multi-tenant task 12.1).
+#
+# Mounted over /etc/das/config.yaml by docker-compose.tenancy.e2e.yml. It is deploy/config/gateway.yaml with two tenants
+# filled in; a unit test keeps every other setting equal to the production sample. Supplied by the environment:
+# DAS__REDIS__URL, DAS__GRPC__ADVERTISE_HOST, DAS__API_KEYS (every key of tenancy_constants.API_KEYS) and
+# DAS__ADMIN_API_KEYS (the Operator key, set in the override).
+role: gateway
+http_port: 8080
+health_port: 8081
+
+transports:
+  jobs: rabbitmq
+  control: grpc
+
+grpc:
+  bind: "0.0.0.0:50051"
+  advertise_port: 50051
+
+limits:
+  max_prompt_length: 32000
+  heartbeat_interval: 5
+  shutdown_timeout: 30
+  startup_timeout: 60
+  startup_retry_interval: 2
+
+client_limits:
+  default:
+    # Nothing here throttles a test: the limits under test are the tenants' own.
+    rate: 1000.0
+    burst: 2000
+    max_active_requests: 1000
+    max_streams: 100
+
+tenants:
+  - id: team-a
+    keys:
+      - fingerprint: "7dee5a42"   # e2e-team-a-admin-...
+        scopes: [submit, read, admin]
+      - fingerprint: "4c6a9aa2"   # e2e-team-a-reader-...
+        scopes: [read]
+      - fingerprint: "7604eafb"   # e2e-team-a-writer-...
+        scopes: [submit]
+    max_active_requests: 2        # the Tenant_Quota
+    default_priority: normal
+    max_priority: high
+  - id: team-b
+    keys:
+      - fingerprint: "db62a72f"   # e2e-team-b-admin-...
+        scopes: [submit, read, admin]
+    # no quota, and normal is the most it may ask for
+
+events:
+  max_len: 1000
+  max_connections: 500
+  keepalive: 15.0
+
+webhook:
+  workers: 2
+  timeout: 10.0
+  base_backoff: 30.0
+  max_backoff: 3600.0
+  max_attempts: 8
