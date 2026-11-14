@@ -79,6 +79,8 @@ Risks: tool use and code execution need a new security spec (egress, secrets, re
 
 ## Phase 7: Scale and resilience (Later, when load demands it)
 
+**Status: implemented** as `das-scale-resilience`. Redis HA took the Sentinel route: the key layout did not change, so there is nothing to migrate, and Redis Cluster is refused with the reason (the State_Store scripts update keys in different slots at once). The HTTP and Kafka transports and the load test suite are in, and `docs/capacity/` holds one reference run (a measurement on one machine, not a guarantee). The table below is the original plan.
+
 | Item | Why | Size |
 |---|---|---|
 | Redis HA (Sentinel or Cluster): hash-tag keys by Request ID, migrate existing data | Removes the single point of failure (OD 4.1) | L |

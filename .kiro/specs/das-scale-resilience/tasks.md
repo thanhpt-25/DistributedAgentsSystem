@@ -30,7 +30,7 @@ fault-injection pass. One commit per wave. Groups are numbered from 8 so they co
   - [x] 12.2 `runner.py` with an open-loop schedule, tested against the in-process Gateway (Req 4.1, 4.3)
   - [x] 12.3 The stub LLM's latency and failure rate (Req 4.5)
   - [x] 12.4 A reference run on the Compose stack; the report in `docs/capacity/` (Req 4.4, 4.8)
-- [ ] 13. Documentation, compatibility and final checkpoint (Wave 13)
+- [x] 13. Documentation, compatibility and final checkpoint (Wave 13)
   - [x] 13.1 Contract baseline regenerated (additive only, corpus byte-identical); a compatibility test with no new configuration (Req 5.1, 5.2)
   - [x] 13.2 Import-linter contract extended; README sections and drift tests; schema test for defaults and ranges (Req 5.3 to 5.5)
-  - [ ] 13.3 Final checkpoint: the whole suite, ruff, mypy, lint-imports, CI on a branch
+  - [x] 13.3 Final checkpoint: the whole suite, ruff, mypy, lint-imports, CI on a branch
