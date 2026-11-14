@@ -230,7 +230,7 @@ jobs:
           DAS_E2E_LOG_DIR: ${{ runner.temp }}/e2e-logs
         run: |
           mkdir -p "$DAS_E2E_LOG_DIR"
-          for project in das-e2e das-e2e-obs das-e2e-client das-e2e-tenant; do
+          for project in das-e2e das-e2e-obs das-e2e-client das-e2e-tenant das-e2e-sentinel das-e2e-http; do
             for id in $(docker ps -aq --filter "label=com.docker.compose.project=${project}"); do
               name="$(docker inspect --format '{{.Name}}' "$id" | tr -d '/')"
               docker logs --timestamps "$id" > "${DAS_E2E_LOG_DIR}/container-${project}-${name}.log" 2>&1 || true
@@ -247,7 +247,7 @@ jobs:
       - name: Tear down Compose stacks
         if: ${{ always() }}
         run: |
-          for project in das-e2e das-e2e-obs das-e2e-client das-e2e-tenant; do
+          for project in das-e2e das-e2e-obs das-e2e-client das-e2e-tenant das-e2e-sentinel das-e2e-http; do
             docker compose -p "$project" down -v --remove-orphans || true
             docker ps -aq --filter "label=com.docker.compose.project=${project}" | xargs -r docker rm -f || true
             docker volume ls -q --filter "label=com.docker.compose.project=${project}" | xargs -r docker volume rm || true

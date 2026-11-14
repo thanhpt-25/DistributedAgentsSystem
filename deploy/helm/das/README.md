@@ -25,8 +25,9 @@ reaches an agent at that address for drain and cancel, and a pod name is not rea
 ## Prerequisites
 
 - **Helm 3** and a current Kubernetes cluster. The chart is tested on Kubernetes 1.37 (kind).
-- **Redis**, as one instance. Replication, Sentinel and Cluster are not supported yet: all DAS state is in Redis, and the
-  state scripts assume a single primary.
+- **Redis**, as one instance, or as the master that Redis Sentinel names (see Redis Sentinel below). Redis Cluster is not
+  supported: all DAS state is in Redis, and the state scripts update keys in different slots at once, which a cluster
+  cannot run.
 - **RabbitMQ 4.1 with the management plugin.** The Manager applies the delivery-limit policy through the management
   API, and the transport declares every queue itself, so no definitions import is needed.
 - **The three images**, `das-gateway`, `das-manager` and `das-worker`, built from `deploy/docker/` and pushed where the
@@ -94,7 +95,7 @@ config:
 | `imagePullSecrets` | Pull secrets for the images |
 | `existingSecret` | **Required.** The Secret every secret value is read from |
 | `secretEnv` | Environment variable to Secret key, per role |
-| `redis` | `url`, credential-free |
+| `redis` | `url`, credential-free, for one instance; or `mode: sentinel` with `sentinels`, `masterName` and `db` |
 | `rabbitmq` | `url` (credential-free) and `managementUrl`, which only the Manager receives |
 | `config` | The agent configuration, `common` for every role and `gateway`, `manager`, `worker` for one; see below |
 | `gateway` | `replicas`, `resources`, `service.type`, `service.port` |
@@ -107,6 +108,27 @@ config:
 
 `config` is rendered into one ConfigMap per role. Each file is built from defaults, then `config.common`, then
 `config.<role>`, then the role itself, each layer overriding the one before; a change to it rolls the pods.
+
+## Redis Sentinel
+
+The chart runs no Redis, Sentinel included; it points the agents at yours. For a Sentinel-managed Redis set the mode and
+name the sentinels, and leave `redis.url` empty:
+
+```yaml
+redis:
+  mode: sentinel
+  sentinels: [sentinel-0.redis.infra:26379, sentinel-1.redis.infra:26379, sentinel-2.redis.infra:26379]
+  masterName: mymaster
+secretEnv:
+  manager: {DAS__REDIS__PASSWORD: REDIS_PASSWORD}   # and the same under gateway and worker
+```
+
+`sentinels` takes 1 to 10 `host:port`, `masterName` is the name the Sentinels monitor, and `db` (0 to 15) picks the
+database. In this mode the chart leaves the `REDIS_URL` entry of `secretEnv` out, so that key need not be in your Secret.
+The Redis and Sentinel passwords are secrets: `DAS__REDIS__PASSWORD` and `DAS__REDIS__SENTINEL_PASSWORD`, taken from the
+Secret like every other. The chart refuses `mode: cluster`, a `url` beside `sentinels`, `sentinels` or `masterName`
+without `mode: sentinel`, and a sentinel address that carries credentials. The key layout did not change, so there is
+nothing to migrate when you switch a running installation to Sentinel.
 
 ## Tenants
 

@@ -1,0 +1,97 @@
+# Redis Sentinel for the local stack (das-scale-resilience Phase 7 Req 1.9): one master (the `redis` service of
+# docker-compose.yml), one replica and three Sentinels, with every agent pointed at the Sentinels.
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.sentinel.yml --profile sentinel up -d --build
+#
+# Pass both files and the profile: the file switches the agents to Sentinel mode, the profile starts the replica and the
+# Sentinels they now depend on (without the profile Compose refuses to start, rather than starting agents that cannot
+# find Redis).
+#
+# What a Failover costs: the Sentinels declare the master down after 3 s without an answer (down-after-milliseconds),
+# two of the three must agree (quorum 2), and the replica is promoted; the agents retry what failed with a short backoff
+# (0.2, 0.5 and 1 s) and finish. Stop the master to see it:  docker compose ... stop redis
+#
+# The key layout did not change, so a stack running on the plain `redis` service can switch to this and back with its
+# data (the volume belongs to the master).
+
+x-sentinel-env: &sentinel-env
+  DAS__REDIS__URL: !reset null
+  DAS__REDIS__MODE: sentinel
+  DAS__REDIS__SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+  DAS__REDIS__MASTER_NAME: das
+
+x-sentinels-up: &sentinels-up
+  sentinel-1:
+    condition: service_healthy
+  sentinel-2:
+    condition: service_healthy
+  sentinel-3:
+    condition: service_healthy
+
+x-sentinel: &sentinel
+  image: redis:7.4
+  profiles: [sentinel]
+  restart: unless-stopped
+  # Sentinel rewrites its own file as it learns the topology, so it is written at start into a writable place.
+  # resolve-hostnames lets it monitor the master by service name.
+  command:
+    - sh
+    - -c
+    - |
+      cat > /tmp/sentinel.conf <<'EOF'
+      port 26379
+      sentinel resolve-hostnames yes
+      sentinel announce-hostnames yes
+      sentinel monitor das redis 6379 2
+      sentinel down-after-milliseconds das 3000
+      sentinel failover-timeout das 10000
+      sentinel parallel-syncs das 1
+      EOF
+      exec redis-sentinel /tmp/sentinel.conf
+  healthcheck:
+    test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+    interval: 3s
+    timeout: 3s
+    retries: 10
+  depends_on:
+    redis:
+      condition: service_healthy
+    redis-replica:
+      condition: service_healthy
+  networks: [das]
+
+services:
+  redis-replica:
+    image: redis:7.4
+    profiles: [sentinel]
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--replicaof", "redis", "6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [das]
+
+  sentinel-1:
+    <<: *sentinel
+  sentinel-2:
+    <<: *sentinel
+  sentinel-3:
+    <<: *sentinel
+
+  gateway:
+    environment: *sentinel-env
+    depends_on: *sentinels-up
+  manager:
+    environment: *sentinel-env
+    depends_on: *sentinels-up
+  worker-research:
+    environment: *sentinel-env
+    depends_on: *sentinels-up
+  worker-review:
+    environment: *sentinel-env
+    depends_on: *sentinels-up

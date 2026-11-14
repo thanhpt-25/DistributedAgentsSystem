@@ -34,6 +34,12 @@ secretEnv:
 # Credential-free connection values. Leave a URL empty when it carries credentials and comes from secretEnv.
 redis:
   url: ""
+  # standalone (url) or sentinel (sentinels + masterName; no url). Passwords: DAS__REDIS__PASSWORD and
+  # DAS__REDIS__SENTINEL_PASSWORD under secretEnv. Redis Cluster is not supported.
+  mode: standalone
+  sentinels: []      # host:port, 1 to 10, with mode sentinel
+  masterName: ""     # with mode sentinel
+  db: 0              # 0 to 15, with mode sentinel (a standalone url carries its own database)
 rabbitmq:
   url: ""
   managementUrl: "http://rabbitmq:15672"

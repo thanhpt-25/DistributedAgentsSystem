@@ -77,7 +77,13 @@ secretEnv entry of the same name. Only the connection secrets are required; the 
 {{- define "das.env" -}}
 {{- $root := .root -}}
 {{- $plain := dict -}}
-{{- if $root.Values.redis.url -}}{{- $_ := set $plain "DAS__REDIS__URL" $root.Values.redis.url -}}{{- end -}}
+{{- $sentinel := eq (default "standalone" $root.Values.redis.mode) "sentinel" -}}
+{{- if $sentinel -}}
+{{- $_ := set $plain "DAS__REDIS__MODE" "sentinel" -}}
+{{- $_ := set $plain "DAS__REDIS__SENTINELS" (join "," $root.Values.redis.sentinels) -}}
+{{- $_ := set $plain "DAS__REDIS__MASTER_NAME" $root.Values.redis.masterName -}}
+{{- $_ := set $plain "DAS__REDIS__DB" (toString (int $root.Values.redis.db)) -}}
+{{- else if $root.Values.redis.url -}}{{- $_ := set $plain "DAS__REDIS__URL" $root.Values.redis.url -}}{{- end -}}
 {{- if and $root.Values.rabbitmq.url (ne .role "gateway") -}}{{- $_ := set $plain "DAS__RABBITMQ__URL" $root.Values.rabbitmq.url -}}{{- end -}}
 {{- if and $root.Values.rabbitmq.managementUrl (eq .role "manager") -}}{{- $_ := set $plain "DAS__RABBITMQ__MANAGEMENT_URL" $root.Values.rabbitmq.managementUrl -}}{{- end -}}
 - name: DAS__GRPC__ADVERTISE_HOST
@@ -93,7 +99,8 @@ secretEnv entry of the same name. Only the connection secrets are required; the 
   value: {{ $value | quote }}
 {{- end }}
 {{- range $name, $key := (default (dict) (index $root.Values.secretEnv .role)) }}
-{{- if not (hasKey $plain $name) }}
+{{- /* A Sentinel setup has no Redis URL: the default REDIS_URL entry is left out, not required. */ -}}
+{{- if not (or (hasKey $plain $name) (and $sentinel (eq $name "DAS__REDIS__URL"))) }}
 - name: {{ $name }}
   valueFrom:
     secretKeyRef:
@@ -248,12 +255,45 @@ never repeats the value (a schema pattern was tried for the URL values and rejec
 {{- end -}}
 
 {{/*
+The Redis values (das-scale-resilience Req 1.1, 1.2, 1.3, 1.9): `standalone` takes `redis.url` and nothing of Sentinel;
+`sentinel` takes 1 to 10 `host:port` in `redis.sentinels` and a `redis.masterName`, and no `redis.url`. `cluster` is
+refused with the reason: the State_Store scripts update keys in different slots at once. A sentinel address never carries
+credentials: the passwords come from the Secret (DAS__REDIS__PASSWORD, DAS__REDIS__SENTINEL_PASSWORD under secretEnv).
+*/}}
+{{- define "das.refuseRedis" -}}
+{{- $redis := .Values.redis -}}
+{{- $mode := default "standalone" $redis.mode -}}
+{{- if eq $mode "cluster" -}}
+{{- fail "redis.mode cluster is not supported: the State_Store scripts update keys in different slots at once, so Redis Cluster cannot run them; use standalone or sentinel" -}}
+{{- end -}}
+{{- if not (has $mode (list "standalone" "sentinel")) -}}
+{{- fail (printf "redis.mode must be standalone or sentinel, not %s" $mode) -}}
+{{- end -}}
+{{- if eq $mode "sentinel" -}}
+{{- if $redis.url -}}{{- fail "redis.url must not be set with redis.mode sentinel: name the sentinels in redis.sentinels instead" -}}{{- end -}}
+{{- if not $redis.masterName -}}{{- fail "redis.masterName is required with redis.mode sentinel" -}}{{- end -}}
+{{- if or (lt (len $redis.sentinels) 1) (gt (len $redis.sentinels) 10) -}}{{- fail "redis.sentinels needs 1 to 10 host:port entries with redis.mode sentinel" -}}{{- end -}}
+{{- range $address := $redis.sentinels -}}
+{{- if not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?:[1-9][0-9]{0,4}$" (toString $address)) -}}
+{{- fail "each entry of redis.sentinels must be host:port, without credentials" -}}
+{{- end -}}
+{{- if gt (int (last (splitList ":" (toString $address)))) 65535 -}}
+{{- fail "each entry of redis.sentinels must be host:port with a port from 1 to 65535" -}}
+{{- end -}}
+{{- end -}}
+{{- else -}}
+{{- if or $redis.sentinels $redis.masterName -}}{{- fail "redis.sentinels and redis.masterName are only allowed with redis.mode sentinel" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Refuse to render a grace period shorter than the graceful shutdown (das-multi-tenant Req 10.4).
 A pod gets SIGTERM, then SIGKILL after terminationGracePeriodSeconds; the agents need limits.shutdown_timeout to
 finish what they run, and 10 seconds of margin for the rest of the shutdown.
 */}}
 {{- define "das.validate" -}}
 {{- include "das.refuseSecrets" . -}}
+{{- include "das.refuseRedis" . -}}
 {{- $shutdown := int (dig "common" "limits" "shutdown_timeout" 30 (.Values.config | default dict)) -}}
 {{- $minimum := add $shutdown 10 | int -}}
 {{- $grace := int .Values.terminationGracePeriodSeconds -}}

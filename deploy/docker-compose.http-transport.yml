@@ -1,0 +1,41 @@
+# The local stack on the HTTP transport (das-scale-resilience Phase 7 Req 2.11): the Gateway serves the HTTP_Broker on its
+# Ops_Port, the Manager and the Workers exchange Jobs and Job_Results through it over plain HTTP, and control messages
+# still travel over gRPC. RabbitMQ is not needed and is not started (it moves to the `amqp` profile).
+#
+#   cp deploy/.env.example deploy/.env      # and set DAS_HTTP_BROKER_TOKEN (16 or more characters)
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.http-transport.yml up -d --build
+#
+# The broker keeps its queues in the Redis the stack already has. One shared token (DAS_HTTP_BROKER_TOKEN) protects it:
+# the Gateway checks it, the agents send it. Use TLS in front of the Ops_Port when it crosses a network you do not trust.
+
+x-http-env: &http-env
+  DAS__TRANSPORTS__JOBS: http
+  DAS__HTTP__URL: http://gateway:8081
+  DAS__HTTP__TOKEN: ${DAS_HTTP_BROKER_TOKEN:?set DAS_HTTP_BROKER_TOKEN in deploy/.env}
+  DAS__RABBITMQ__URL: !reset null
+  DAS__RABBITMQ__MANAGEMENT_URL: !reset null
+
+x-http-deps: &http-deps
+  gateway:
+    condition: service_healthy
+  rabbitmq:
+    condition: service_healthy
+    required: false # only with --profile amqp
+
+services:
+  rabbitmq:
+    profiles: [amqp]
+
+  gateway:
+    environment:
+      DAS__HTTP_BROKER__ENABLED: "true"
+      DAS__HTTP_BROKER__TOKEN: ${DAS_HTTP_BROKER_TOKEN:?set DAS_HTTP_BROKER_TOKEN in deploy/.env}
+  manager:
+    environment: *http-env
+    depends_on: *http-deps
+  worker-research:
+    environment: *http-env
+    depends_on: *http-deps
+  worker-review:
+    environment: *http-env
+    depends_on: *http-deps

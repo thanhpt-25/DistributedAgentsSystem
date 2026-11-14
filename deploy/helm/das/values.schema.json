@@ -48,7 +48,13 @@
     "redis": {
       "type": "object",
       "additionalProperties": false,
-      "properties": { "url": { "type": "string" } }
+      "properties": {
+        "url": { "type": "string" },
+        "mode": { "type": "string" },
+        "sentinels": { "type": "array", "items": { "type": "string" }, "maxItems": 10 },
+        "masterName": { "type": "string" },
+        "db": { "type": "integer", "minimum": 0, "maximum": 15 }
+      }
     },
     "rabbitmq": {
       "type": "object",
