@@ -63,6 +63,8 @@ SECRET_FIELDS: tuple[str, ...] = (
     "webhook_secrets",
     "redis.password",
     "redis.sentinel_password",
+    "http.token",
+    "http_broker.token",
 )
 
 #: Credential fields that hold a map of named secrets. Each entry comes from
@@ -175,6 +177,34 @@ class RedisConfig(_Section):
             if _SENTINEL_ADDRESS.fullmatch(address) is None or int(address.rsplit(":", 1)[1]) > 65535:
                 raise ValueError("each sentinel must be host:port with a port from 1 to 65535")
         return v
+
+
+BrokerToken = Annotated[SecretStr, Field(min_length=16, max_length=256)]
+
+
+class HttpConfig(_Section):
+    """The HTTP transport's client side (Phase 7 Req 2.1): the HTTP_Broker's URL (the Gateway's Ops_Port) and the shared
+    token, which is a secret (``DAS__HTTP__TOKEN``). Needed when a transport is ``http``."""
+
+    url: str
+    token: BrokerToken | None = None
+    #: Seconds one long-poll waits at the broker for a Message before it asks again.
+    poll_wait: float = Field(default=20, ge=1, le=30)
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, v: str) -> str:
+        return _check_scheme(v, ("http", "https"))
+
+
+class HttpBrokerConfig(_Section):
+    """The HTTP_Broker the Gateway serves on its Ops_Port (Phase 7 Req 2.2). Off by default; ``token`` is a secret
+    (``DAS__HTTP_BROKER__TOKEN``); ``visibility_timeout`` is how long an unacknowledged Message waits before it is
+    delivered again."""
+
+    enabled: bool = False
+    token: BrokerToken | None = None
+    visibility_timeout: float = Field(default=30, ge=5, le=600)
 
 
 class GrpcConfig(_Section):
@@ -657,6 +687,9 @@ class AgentConfig(_Section):
     llm: LLMConfig | None = None
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     worker: WorkerConfig | None = None
+    #: Phase 7 Req 2: the HTTP transport's broker address and token, and the broker the Gateway serves (off by default).
+    http: HttpConfig | None = None
+    http_broker: HttpBrokerConfig = Field(default_factory=HttpBrokerConfig)
     #: Phase 6 Req 5.3: the tools a Worker enables; the default enables none.
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     #: Phase 6 Req 6.1: the Code_Worker's sandbox; off by default.
@@ -719,6 +752,9 @@ class AgentConfig(_Section):
             values.extend(
                 s.get_secret_value() for s in (self.redis.password, self.redis.sentinel_password) if s is not None
             )
+        for broker_token in (self.http.token if self.http is not None else None, self.http_broker.token):
+            if broker_token is not None:
+                values.append(broker_token.get_secret_value())
         if self.llm is not None:
             for s in (
                 self.llm.api_key,
@@ -774,6 +810,36 @@ def _section_present(data: Mapping[str, Any], name: str) -> bool:
     return value is not _MISSING and value is not None
 
 
+def _uses_transport(data: Mapping[str, Any], name: str) -> bool:
+    """Whether ``transports.jobs`` or ``transports.control`` is ``name``; true when they are not given (they are
+    required, and reported on their own), so nothing is excused by a configuration that is already incomplete."""
+    named = [_lookup(data, "transports.jobs"), _lookup(data, "transports.control")]
+    if any(v is _MISSING for v in named):
+        return True
+    return name in named
+
+
+def _http_errors(data: Mapping[str, Any], role: Any) -> list[FieldError]:
+    """The HTTP rules (Phase 7 Req 2.1, 2.2): an agent that uses the transport names the broker and its token; only a
+    Gateway serves the broker, and only with a token."""
+    errors: list[FieldError] = []
+    absent = (_MISSING, None, "")
+    if _uses_transport(data, "http") and _lookup(data, "transports.jobs") is not _MISSING:
+        if not _section_present(data, "http"):
+            errors.append(FieldError("http", "field required when a transport is http (the broker's url and token)"))
+        elif _lookup(data, "http.token") in absent:
+            errors.append(FieldError("http.token", "required when a transport is http (set DAS__HTTP__TOKEN)"))
+    enabled = _valid(HttpBrokerConfig, "enabled", _lookup(data, "http_broker.enabled"))
+    if enabled is not _MISSING and enabled:
+        if role is not _MISSING and role != "gateway":
+            errors.append(FieldError("http_broker.enabled", "only the Gateway serves the HTTP broker"))
+        if _lookup(data, "http_broker.token") in absent:
+            errors.append(
+                FieldError("http_broker.token", "required to serve the broker (set DAS__HTTP_BROKER__TOKEN)")
+            )
+    return errors
+
+
 def _redis_mode_errors(data: Mapping[str, Any]) -> list[FieldError]:
     """The Redis rules that depend on ``mode`` (Phase 7 Req 1.1, 1.2), each naming the field it is about.
 
@@ -813,6 +879,8 @@ def cross_field_errors(data: Mapping[str, Any]) -> list[FieldError]:
 
     if role is not _MISSING:
         for section in _REQUIRED_SECTIONS[role]:
+            if section == "rabbitmq" and not _uses_transport(data, "rabbitmq"):
+                continue  # an agent whose transports are http or grpc needs no RabbitMQ (Phase 7 Req 2.1)
             if not _section_present(data, section):
                 errors.append(FieldError(section, f"field required for role {role}"))
         if role == "manager" and _section_present(data, "rabbitmq"):
@@ -835,6 +903,7 @@ def cross_field_errors(data: Mapping[str, Any]) -> list[FieldError]:
                 )
 
     errors.extend(_redis_mode_errors(data))
+    errors.extend(_http_errors(data, role))
 
     # Tools (Phase 6 Req 5.3, 5.9): only a Worker enables them, and http_fetch needs an allow-list.
     enabled = _valid(ToolsConfig, "enabled", _lookup(data, "tools.enabled"))

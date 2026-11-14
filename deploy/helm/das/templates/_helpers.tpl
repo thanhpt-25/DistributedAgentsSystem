@@ -211,6 +211,8 @@ gateway.cursor_secret
 webhook_secrets
 redis.password
 redis.sentinel_password
+http.token
+http_broker.token
 {{- end -}}
 
 {{/*

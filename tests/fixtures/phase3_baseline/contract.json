@@ -361,6 +361,80 @@
         "title": "GrpcConfig",
         "type": "object"
       },
+      "HttpBrokerConfig": {
+        "additionalProperties": false,
+        "description": "The HTTP_Broker the Gateway serves on its Ops_Port (Phase 7 Req 2.2). Off by default; ``token`` is a secret\n(``DAS__HTTP_BROKER__TOKEN``); ``visibility_timeout`` is how long an unacknowledged Message waits before it is\ndelivered again.",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "format": "password",
+                "maxLength": 256,
+                "minLength": 16,
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Token"
+          },
+          "visibility_timeout": {
+            "default": 30,
+            "maximum": 600,
+            "minimum": 5,
+            "title": "Visibility Timeout",
+            "type": "number"
+          }
+        },
+        "title": "HttpBrokerConfig",
+        "type": "object"
+      },
+      "HttpConfig": {
+        "additionalProperties": false,
+        "description": "The HTTP transport's client side (Phase 7 Req 2.1): the HTTP_Broker's URL (the Gateway's Ops_Port) and the shared\ntoken, which is a secret (``DAS__HTTP__TOKEN``). Needed when a transport is ``http``.",
+        "properties": {
+          "poll_wait": {
+            "default": 20,
+            "maximum": 30,
+            "minimum": 1,
+            "title": "Poll Wait",
+            "type": "number"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "format": "password",
+                "maxLength": 256,
+                "minLength": 16,
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Token"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "HttpConfig",
+        "type": "object"
+      },
       "HttpFetchConfig": {
         "additionalProperties": false,
         "description": "``http_fetch``: GET only, https only, the allowed hosts only (Phase 6 Req 5.9).",
@@ -1543,6 +1617,20 @@
         "title": "Host",
         "type": "string"
       },
+      "http": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HttpConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "http_broker": {
+        "$ref": "#/$defs/HttpBrokerConfig"
+      },
       "http_port": {
         "default": 8080,
         "maximum": 65535,
@@ -1716,7 +1804,13 @@
     "DAS__GRPC__BIND",
     "DAS__HEALTH_PORT",
     "DAS__HOST",
+    "DAS__HTTP_BROKER__ENABLED",
+    "DAS__HTTP_BROKER__TOKEN",
+    "DAS__HTTP_BROKER__VISIBILITY_TIMEOUT",
     "DAS__HTTP_PORT",
+    "DAS__HTTP__POLL_WAIT",
+    "DAS__HTTP__TOKEN",
+    "DAS__HTTP__URL",
     "DAS__LIMITS__BASE_BACKOFF",
     "DAS__LIMITS__CAPABILITY_WAIT",
     "DAS__LIMITS__HEARTBEAT_INTERVAL",

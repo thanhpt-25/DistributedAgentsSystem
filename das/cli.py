@@ -364,6 +364,8 @@ async def _close_quietly(what: str, close: Callable[[], Awaitable[object]]) -> N
 
 #: Counts the Redis client's retries and master switches; ``run_agent`` binds it to the metrics once they exist.
 REDIS_EVENTS: Final = RedisEvents()
+#: Redis connections the HTTP_Broker may hold: one per long poll in flight (Phase 7 Req 2.2).
+BROKER_MAX_CONNECTIONS: Final = 256
 
 
 def _bind_redis_metrics(recorder: Any, events: RedisEvents = REDIS_EVENTS) -> None:
@@ -605,6 +607,32 @@ async def run_agent(
             max_connections=config.events.max_connections,
             observer=REDIS_EVENTS,
         )
+    # Phase 7 Req 2.2: the HTTP_Broker's long polls block for up to MAX_WAIT seconds, so like the SSE reads
+    # they get a pool of their own, with a socket timeout above that wait.
+    broker_redis: Any = None
+    broker_routes_list: list[Any] = []
+    if role == "gateway" and config.http_broker.enabled:
+        from das.gateway.app import REDIS_SOCKET_TIMEOUT
+        from das.transport.http import MAX_POLL_WAIT
+        from das.transport.httpbroker import BrokerSettings, broker_routes
+        from das.transport.rabbitmq import delivery_limit_for
+
+        assert config.redis is not None and config.http_broker.token is not None
+        broker_redis = build_redis_client(
+            config.redis,
+            socket_timeout=MAX_POLL_WAIT + 10,
+            connect_timeout=REDIS_SOCKET_TIMEOUT,
+            max_connections=BROKER_MAX_CONNECTIONS,
+            observer=REDIS_EVENTS,
+        )
+        broker_routes_list = broker_routes(
+            broker_redis,
+            BrokerSettings(
+                token=config.http_broker.token.get_secret_value(),
+                visibility_timeout=config.http_broker.visibility_timeout,
+                delivery_limit=delivery_limit_for(limits.max_attempts),
+            ),
+        )
     registry = AgentRegistry(redis)
     store = StateStore(redis)
     resolver = registry_endpoint_resolver(registry)
@@ -668,6 +696,7 @@ async def run_agent(
                 ),
                 healthz=None,  # v1 /healthz stays on http_port (Req 16.8)
                 clock=ops_clock,
+                extra_routes=broker_routes_list,
             ),
             config.health_port,
         )
@@ -775,6 +804,8 @@ async def run_agent(
             stack.push_async_callback(_close_quietly, REDIS_DEPENDENCY, redis.aclose)
             if events_redis is not None:
                 stack.push_async_callback(_close_quietly, "events redis", events_redis.aclose)
+            if broker_redis is not None:
+                stack.push_async_callback(_close_quietly, "broker redis", broker_redis.aclose)
             await connect_with_retry(
                 REDIS_DEPENDENCY,
                 redis.ping,

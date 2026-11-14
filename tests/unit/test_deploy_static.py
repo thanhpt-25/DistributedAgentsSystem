@@ -258,25 +258,25 @@ def test_host_pattern_detects_service_addresses() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Requirement 15.3: v1 ships no http or kafka Transport adapter
+# Requirement 15.3: v1 shipped no http or kafka adapter; Phase 7 adds http (wave 9) and kafka (wave 10)
 # ---------------------------------------------------------------------------
 
 
 def test_pyproject_transport_entry_points(pyproject: dict) -> None:
     eps = pyproject["project"]["entry-points"]["das.transports"]
-    assert set(eps) == {"rabbitmq", "grpc"}
+    assert set(eps) == {"rabbitmq", "grpc", "http"}
 
 
-def test_installed_transport_entry_points_exclude_http_and_kafka() -> None:
+def test_installed_transport_entry_points_exclude_kafka_until_wave_10() -> None:
     from importlib.metadata import entry_points
 
     names = {ep.name for ep in entry_points(group="das.transports")}
-    assert {"rabbitmq", "grpc"} <= names
-    assert not names & {"http", "kafka"}
+    assert {"rabbitmq", "grpc", "http"} <= names
+    assert "kafka" not in names
 
 
-def test_no_http_or_kafka_adapter_modules() -> None:
-    for name in ("http", "kafka"):
+def test_no_kafka_adapter_module_yet() -> None:  # the HTTP adapter arrived in Phase 7 wave 9
+    for name in ("kafka",):
         assert not (DAS / "transport" / f"{name}.py").exists()
         assert not (DAS / "transport" / name).exists()
 

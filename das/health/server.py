@@ -27,7 +27,7 @@ import asyncio
 import contextlib
 import logging
 import socket
-from collections.abc import Awaitable, Callable, Generator, Mapping
+from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -301,8 +301,12 @@ def create_ops_app(
     log: Any = None,
     check_timeout: float = DEFAULT_CHECK_TIMEOUT,
     overall_timeout: float = DEFAULT_OVERALL_TIMEOUT,
+    extra_routes: Sequence[Route] = (),
 ) -> Starlette:
     """Build the Ops_Port app serving ``/metrics``, ``/livez``, ``/readyz`` (and ``/healthz``).
+
+    ``extra_routes`` are served as they are: the Gateway passes the HTTP_Broker's routes here when it is enabled
+    (Phase 7 Req 2.2), and they do their own bearer-token check.
 
     ``metrics`` is ``None`` or a :class:`NoopRecorder` when ``metrics.enabled`` is
     false, in which case ``/metrics`` answers 404 (Req 1.7). No endpoint checks
@@ -349,7 +353,7 @@ def create_ops_app(
             return JSONResponse(report, status_code=200 if report["status"] == HEALTHY else 503)
 
         routes.append(Route("/healthz", healthz_endpoint, methods=["GET"]))
-    return Starlette(routes=routes)
+    return Starlette(routes=[*routes, *extra_routes])
 
 
 class _NoSignalServer(uvicorn.Server):

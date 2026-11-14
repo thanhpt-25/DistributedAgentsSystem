@@ -148,8 +148,8 @@ def test_load_transports_by_name_and_errors(make_config) -> None:
     assert loaded == {"rabbitmq": CompleteAdapter, "grpc": CompleteAdapter}
 
     with pytest.raises(TransportNotInstalled) as info:
-        cli.load_transports(_config(transports={"jobs": "http", "control": "grpc"}), source)
-    assert info.value.name == "http"
+        cli.load_transports(_config(transports={"jobs": "carrier", "control": "grpc"}), source)
+    assert info.value.name == "carrier"
 
     with pytest.raises(TransportIncomplete) as inc:
         cli.load_transports(_config(transports={"jobs": "partial", "control": "grpc"}), source)

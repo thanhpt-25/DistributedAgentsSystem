@@ -217,3 +217,23 @@ async def test_tracing_disabled_builds_noop_tracer_without_exporter_or_socket(
         assert tracer.current_context() is None
     assert await tracer.shutdown(5.0) == 0
     assert opened == []
+
+
+# --- extra routes: the HTTP_Broker on the Gateway's Ops_Port (Phase 7 Req 2.2) ----------------
+
+
+async def test_extra_routes_are_served_beside_the_ops_endpoints_and_absent_by_default() -> None:
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    async def hello(_request: Any) -> JSONResponse:
+        return JSONResponse({"hello": "broker"})
+
+    readiness = {"state_store": _const(True)}
+    plain = _ops_app(readiness)
+    assert (await _get(plain, "/broker/v1/hello")).status_code == 404
+
+    with_extra = _ops_app(readiness, extra_routes=[Route("/broker/v1/hello", hello, methods=["GET"])])
+    assert (await _get(with_extra, "/broker/v1/hello")).json() == {"hello": "broker"}
+    assert (await _get(with_extra, "/livez")).status_code == 200
+    assert (await _get(with_extra, "/metrics")).status_code == 404  # metrics are off here; the ops routes still answer

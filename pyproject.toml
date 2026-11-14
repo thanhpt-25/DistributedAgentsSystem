@@ -33,6 +33,7 @@ das = "das.cli:entry_point"
 [project.entry-points."das.transports"]
 rabbitmq = "das.transport.rabbitmq:RabbitMQTransport"
 grpc = "das.transport.grpc_rpc:GrpcTransport"
+http = "das.transport.http:HttpTransport"
 
 [dependency-groups]
 dev = [

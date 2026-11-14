@@ -69,12 +69,13 @@ def test_incomplete_adapter_names_missing_operations() -> None:
     assert exit_code_for(info.value) == EXIT_TRANSPORT_ERROR
 
 
-def test_pyproject_registers_only_rabbitmq_and_grpc() -> None:
-    # v1 ships no http or kafka adapter (15.3).
+def test_pyproject_registers_the_shipped_transports() -> None:
+    # v1 shipped rabbitmq and grpc (15.3); Phase 7 adds http (wave 9) and kafka (wave 10).
     pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text())
     eps = data["project"]["entry-points"][ENTRY_POINT_GROUP]
     assert eps == {
         "rabbitmq": "das.transport.rabbitmq:RabbitMQTransport",
         "grpc": "das.transport.grpc_rpc:GrpcTransport",
+        "http": "das.transport.http:HttpTransport",
     }
