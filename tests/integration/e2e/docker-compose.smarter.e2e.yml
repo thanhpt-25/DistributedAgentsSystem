@@ -1,0 +1,28 @@
+# Phase 6 end-to-end override (das-smarter-agents task 7.3). Used as the third file after the base stack and the
+# Phase 3 e2e override, under its own project (das-e2e-smart):
+#
+#   docker compose --project-directory deploy -p das-e2e-smart \
+#     -f deploy/docker-compose.yml -f tests/integration/e2e/docker-compose.e2e.yml \
+#     -f tests/integration/e2e/docker-compose.smarter.e2e.yml ...
+#
+# It swaps the fake LLM for llm_stub_smart.py (the Phase 3 stub plus scripted structured replies, tool calls and a
+# permanent failure) and turns the Phase 6 features on:
+#
+# - every Manager may replan once, and a Job gets one attempt, so a scripted failure ends the Job at once;
+# - the research Worker runs its Jobs on a model the stub does not know (a 404, a permanent error that is not an
+#   authentication error) with fake-llm as the fallback model, so every research Job goes through the fallback;
+# - the research Worker enables the calculator tool, so it advertises tool-calculator.
+services:
+  llm-stub:
+    command: ["python", "-u", "/stub/llm_stub_smart.py"]
+    volumes:
+      - ../tests/integration/e2e/llm_stub_smart.py:/stub/llm_stub_smart.py:ro
+  manager:
+    environment:
+      DAS__LIMITS__MAX_REPLANS: "1"
+      DAS__LIMITS__MAX_ATTEMPTS: "1"
+  worker-research:
+    environment:
+      DAS__LLM__CAPABILITY_MODELS__RESEARCH: missing-model
+      DAS__LLM__FALLBACK_MODEL: fake-llm
+      DAS__TOOLS__ENABLED: calculator
