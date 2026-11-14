@@ -1,0 +1,134 @@
+{
+  "das_version": "0.1.0",
+  "limits": {
+    "max_error_rate": 0.01,
+    "max_p99_ms": 10000.0
+  },
+  "machine": {
+    "arch": "arm64",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184,
+    "os": "macOS-27.2.1-arm64-arm-64bit",
+    "python": "3.12.12"
+  },
+  "profile": {
+    "name": "ramp",
+    "prompts": 3,
+    "steps": [
+      {
+        "rate": 2,
+        "seconds": 30
+      },
+      {
+        "rate": 5,
+        "seconds": 30
+      },
+      {
+        "rate": 10,
+        "seconds": 30
+      },
+      {
+        "rate": 20,
+        "seconds": 30
+      },
+      {
+        "rate": 40,
+        "seconds": 30
+      }
+    ]
+  },
+  "results": {
+    "completed": 1523,
+    "elapsed_s": 188.018,
+    "error_rate": 0.3406926406926407,
+    "errors": 787,
+    "errors_by_kind": {
+      "submit_failed": 787
+    },
+    "max_late_ms": 3639.8491669911837,
+    "offered_rps": 15.4,
+    "requests": 2310,
+    "submit_ms": {
+      "count": 2310,
+      "max": 52985.30495801242,
+      "mean": 13522.978871749452,
+      "min": 2.0130839984631166,
+      "p50": 54.92329099797644,
+      "p90": 34269.87887499854,
+      "p99": 52802.899709000485
+    },
+    "throughput_rps": 8.100288699287512,
+    "total_ms": {
+      "count": 1523,
+      "max": 73212.94437500183,
+      "mean": 23172.51272516463,
+      "min": 1010.4312080075033,
+      "p50": 9160.505249994458,
+      "p90": 61666.42129099637,
+      "p99": 70277.91212500597
+    }
+  },
+  "saturation_rps": 10,
+  "schema": 1,
+  "settings": {
+    "managers": "2",
+    "stack": "docker compose on one machine",
+    "stub_latency_ms": "50",
+    "worker_concurrency": "4",
+    "workers": "2"
+  },
+  "started_at": "2026-11-14T07:04:26+00:00",
+  "steps": [
+    {
+      "completed": 60,
+      "error_rate": 0.0,
+      "errors": 0,
+      "offered": 60,
+      "p99_ms": 2038.3733339986065,
+      "rate": 2,
+      "seconds": 30,
+      "step": 0
+    },
+    {
+      "completed": 150,
+      "error_rate": 0.0,
+      "errors": 0,
+      "offered": 150,
+      "p99_ms": 2037.6465000008466,
+      "rate": 5,
+      "seconds": 30,
+      "step": 1
+    },
+    {
+      "completed": 300,
+      "error_rate": 0.0,
+      "errors": 0,
+      "offered": 300,
+      "p99_ms": 2529.240417003166,
+      "rate": 10,
+      "seconds": 30,
+      "step": 2
+    },
+    {
+      "completed": 600,
+      "error_rate": 0.0,
+      "errors": 0,
+      "offered": 600,
+      "p99_ms": 70936.55887499335,
+      "rate": 20,
+      "seconds": 30,
+      "step": 3
+    },
+    {
+      "completed": 413,
+      "error_rate": 0.6558333333333334,
+      "errors": 787,
+      "offered": 1200,
+      "p99_ms": 65206.10808300262,
+      "rate": 40,
+      "seconds": 30,
+      "step": 4
+    }
+  ],
+  "transport": "http"
+}

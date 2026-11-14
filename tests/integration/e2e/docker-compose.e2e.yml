@@ -20,6 +20,10 @@ services:
   llm-stub:
     image: python:3.12-slim
     command: ["python", "-u", "/stub/llm_stub.py"]
+    # Load tests (Phase 7 Req 4.5): how long every chat answer takes, and how many are an HTTP 500. Both default to none.
+    environment:
+      STUB_LATENCY_MS: ${STUB_LATENCY_MS:-0}
+      STUB_FAILURE_RATE: ${STUB_FAILURE_RATE:-0}
     volumes:
       - ../tests/integration/e2e/llm_stub.py:/stub/llm_stub.py:ro
     healthcheck:

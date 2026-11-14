@@ -1,0 +1,132 @@
+{
+  "das_version": "0.1.0",
+  "limits": {
+    "max_error_rate": 0.01,
+    "max_p99_ms": 10000.0
+  },
+  "machine": {
+    "arch": "arm64",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184,
+    "os": "macOS-27.2.1-arm64-arm-64bit",
+    "python": "3.12.12"
+  },
+  "profile": {
+    "name": "ramp",
+    "prompts": 3,
+    "steps": [
+      {
+        "rate": 2,
+        "seconds": 30
+      },
+      {
+        "rate": 5,
+        "seconds": 30
+      },
+      {
+        "rate": 10,
+        "seconds": 30
+      },
+      {
+        "rate": 20,
+        "seconds": 30
+      },
+      {
+        "rate": 40,
+        "seconds": 30
+      }
+    ]
+  },
+  "results": {
+    "completed": 2310,
+    "elapsed_s": 180.513,
+    "error_rate": 0.0,
+    "errors": 0,
+    "errors_by_kind": {},
+    "max_late_ms": 1071.3718749990164,
+    "offered_rps": 15.4,
+    "requests": 2310,
+    "submit_ms": {
+      "count": 2310,
+      "max": 16040.505334000045,
+      "mean": 1933.6145818271666,
+      "min": 1.92304200027138,
+      "p50": 4.692999995313585,
+      "p90": 14635.41066700418,
+      "p99": 15681.783541993354
+    },
+    "throughput_rps": 12.796857018029202,
+    "total_ms": {
+      "count": 2310,
+      "max": 31234.571957997105,
+      "mean": 10667.621219964836,
+      "min": 515.2374999961467,
+      "p50": 3033.3252499985974,
+      "p90": 27255.486124995514,
+      "p99": 29938.832334002655
+    }
+  },
+  "saturation_rps": 20,
+  "schema": 1,
+  "settings": {
+    "managers": "2",
+    "stack": "docker compose on one machine",
+    "stub_latency_ms": "50",
+    "worker_concurrency": "4",
+    "workers": "2"
+  },
+  "started_at": "2026-11-14T07:00:39+00:00",
+  "steps": [
+    {
+      "completed": 60,
+      "error_rate": 0.0,
+      "errors": 0,
+      "offered": 60,
+      "p99_ms": 2103.4046249988023,
+      "rate": 2,
+      "seconds": 30,
+      "step": 0
+    },
+    {
+      "completed": 150,
+      "error_rate": 0.0,
+      "errors": 0,
+      "offered": 150,
+      "p99_ms": 2532.8116659948137,
+      "rate": 5,
+      "seconds": 30,
+      "step": 1
+    },
+    {
+      "completed": 300,
+      "error_rate": 0.0,
+      "errors": 0,
+      "offered": 300,
+      "p99_ms": 2525.1240830039023,
+      "rate": 10,
+      "seconds": 30,
+      "step": 2
+    },
+    {
+      "completed": 600,
+      "error_rate": 0.0,
+      "errors": 0,
+      "offered": 600,
+      "p99_ms": 2528.874083000119,
+      "rate": 20,
+      "seconds": 30,
+      "step": 3
+    },
+    {
+      "completed": 1200,
+      "error_rate": 0.0,
+      "errors": 0,
+      "offered": 1200,
+      "p99_ms": 30380.699666995497,
+      "rate": 40,
+      "seconds": 30,
+      "step": 4
+    }
+  ],
+  "transport": "rabbitmq"
+}

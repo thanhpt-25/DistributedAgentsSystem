@@ -147,6 +147,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-pass", type=min_pass_argument, default=0.0, help="ratio from 0 to 1 both ratios must reach (default 0)"
     )
     evaluate.add_argument("--log-level", default="info", choices=LOG_LEVELS, help="log level (logs go to stderr)")
+
+    from das.loadtest.command import add_parsers as add_loadtest_parsers
+
+    add_loadtest_parsers(sub)  # loadtest and loadtest-compare (Phase 7 Req 4)
     return parser
 
 
@@ -1060,6 +1064,14 @@ def main(
         from das.eval.command import eval_plans_main
 
         return eval_plans_main(args, environ, fail=_fail, llm=eval_llm)
+    if args.command == "loadtest":
+        from das.loadtest.command import loadtest_main
+
+        return loadtest_main(args, environ, transport=http_transport)
+    if args.command == "loadtest-compare":
+        from das.loadtest.command import compare_main
+
+        return compare_main(args)
 
     # Before the config is loaded no credential is known; ConfigError messages
     # never carry values (Req 12.5, 12.6).

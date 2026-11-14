@@ -18,6 +18,10 @@ Replies depend on the system prompt the agent sends:
   takeover tests.
 - Anything else (the Summarizer): plain text naming the request.
 
+Load tests: ``STUB_LATENCY_MS`` makes every chat answer take that long and ``STUB_FAILURE_RATE`` (0 to 1) turns that
+fraction of them into an HTTP 500 (see ``Chaos``), so a load run measures DAS and not a provider. Both default to none,
+and the health check is never affected.
+
 No production code knows about this server: the agents just run the real
 ``ollama`` adapter against ``DAS__LLM__BASE_URL=http://llm-stub:11434``.
 """
@@ -25,14 +29,50 @@ No production code knows about this server: the agents just run the real
 from __future__ import annotations
 
 import json
+import os
+import random
 import re
 import time
+from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+LATENCY_ENV = "STUB_LATENCY_MS"
+FAILURE_ENV = "STUB_FAILURE_RATE"
+MAX_LATENCY_MS = 600_000.0
 
 PLANNER_MARK = "You are the planner"
 WORKER_MARK = "You are a worker agent"
 DELAY_RE = re.compile(r"\[\[delay=(\d+(?:\.\d+)?)\]\]")
 MAX_DELAY = 120.0
+
+
+class Chaos:
+    """What makes the stub behave like a provider under load (Phase 7 Req 4.5): every chat answer takes
+    ``latency_ms`` first, and a fraction ``failure_rate`` of them is an HTTP 500 instead of an answer, which the ollama
+    adapter treats as transient and retries. Both default to none. The health check (``/api/tags``) is never touched."""
+
+    def __init__(self, latency_ms: float = 0.0, failure_rate: float = 0.0, rng: random.Random | None = None) -> None:
+        if not 0 <= latency_ms <= MAX_LATENCY_MS:
+            raise ValueError(f"{LATENCY_ENV} must be from 0 to {MAX_LATENCY_MS:g} milliseconds")
+        if not 0 <= failure_rate <= 1:
+            raise ValueError(f"{FAILURE_ENV} must be from 0 to 1")
+        self.latency_s = latency_ms / 1000.0
+        self.failure_rate = failure_rate
+        self._rng = rng or random.Random()
+
+    @classmethod
+    def from_environment(cls, environ: Mapping[str, str]) -> Chaos:
+        def number(name: str) -> float:
+            raw = environ.get(name, "").strip()
+            try:
+                return float(raw) if raw else 0.0
+            except ValueError:
+                raise ValueError(f"{name} must be a number, not {raw!r}") from None
+
+        return cls(number(LATENCY_ENV), number(FAILURE_ENV))
+
+    def fails(self) -> bool:
+        return self.failure_rate > 0 and self._rng.random() < self.failure_rate
 
 
 def advertised_capabilities(text: str) -> list[str]:
@@ -85,6 +125,7 @@ def reply_for(messages: list[dict]) -> str:
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    chaos = Chaos()  # replaced from the environment when the server starts
 
     def _send(self, code: int, body: dict) -> None:
         data = json.dumps(body).encode()
@@ -111,6 +152,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "invalid json"})
             return
         messages = body.get("messages") or []
+        if self.chaos.latency_s:
+            time.sleep(self.chaos.latency_s)
+        if self.chaos.fails():  # a failing provider takes its time first, like a real one
+            self._send(500, {"error": "stub failure (STUB_FAILURE_RATE)"})
+            return
         content = reply_for(messages)
         prompt_chars = sum(len(m.get("content", "")) for m in messages)
         self._send(
@@ -129,5 +175,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    Handler.chaos = Chaos.from_environment(os.environ)  # a bad value stops the stub, naming the variable
     ThreadingHTTPServer.daemon_threads = True
     ThreadingHTTPServer(("0.0.0.0", 11434), Handler).serve_forever()

@@ -1,0 +1,30 @@
+# Gateway_API Agent_Config for the load test stack (das-scale-resilience task 12.4; Phase 7 Req 4).
+#
+# Mounted over /etc/das/config.yaml by docker-compose.loadtest.yml. It is deploy/config/gateway.yaml without the
+# per-key rate limit and the active-Request quota: a load generator is one API key, and the default limits (60 requests a
+# second, 100 active Requests) would measure the Gateway's own throttle instead of the platform. Everything else is the
+# production sample. Supplied by the environment: DAS__REDIS__URL, DAS__GRPC__ADVERTISE_HOST, DAS__API_KEYS.
+role: gateway
+http_port: 8080
+health_port: 8081
+
+transports:
+  jobs: rabbitmq
+  control: grpc
+
+grpc:
+  bind: "0.0.0.0:50051"
+  advertise_port: 50051
+
+limits:
+  max_prompt_length: 32000
+  heartbeat_interval: 5
+  shutdown_timeout: 30
+  startup_timeout: 60
+  startup_retry_interval: 2
+
+client_limits:
+  default:
+    rate: 0.0                 # no rate limit
+    max_active_requests: 0    # no quota
+    max_streams: 0            # no cap on event streams (a load test polls)

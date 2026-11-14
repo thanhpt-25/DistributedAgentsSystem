@@ -1,0 +1,15 @@
+# Test-only override for the load test stack (das-scale-resilience task 12.4). Used, with the stub LLM override that
+# stackkit always adds, as:
+#
+#   docker compose --project-directory deploy -p das-e2e-load \
+#     -f deploy/docker-compose.yml -f tests/integration/e2e/docker-compose.loadtest.yml \
+#     -f tests/integration/e2e/docker-compose.e2e.yml ...
+#
+# The Gateway reads gateway.loadtest.yaml, which has no per-key rate limit and no active-Request quota, so a load run
+# measures the platform and not the Gateway's own throttle. `volumes` is replaced, not appended (Compose 2.24 or later):
+# appended, the production config would stay mounted. The stub LLM's speed and reliability come from STUB_LATENCY_MS
+# and STUB_FAILURE_RATE in the environment (docker-compose.e2e.yml).
+services:
+  gateway:
+    volumes: !override
+      - ../tests/integration/e2e/gateway.loadtest.yaml:/etc/das/config.yaml:ro
