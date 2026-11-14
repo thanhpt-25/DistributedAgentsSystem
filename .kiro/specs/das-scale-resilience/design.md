@@ -128,9 +128,10 @@ A commit that fails on a lost connection is kept and retried when the connection
 (Req 1.2). `standalone` still requires it, in `cross_field_errors`, with the same error naming `redis.url`. Req 5.2 is read
 as "no configuration valid in Phase 6 becomes invalid", which holds; the compatibility tests name the two baseline paths
 that changed and fail on any other non-addition. Entry points `http` and `kafka` are added beside `rabbitmq` and `grpc`; the
-loader and its refusal of unknown names are unchanged. `aiokafka` is imported lazily inside `das/transport/kafka.py`; the
-import-linter contract restricts only `das.manager` and `das.worker`, and gains `aiokafka` and
-`redis.asyncio.sentinel` in its forbidden list.
+loader and its refusal of unknown names are unchanged. `aiokafka` is imported at the top of `das/transport/kafka.py`, which the loader imports only when `kafka` is chosen; the
+import-linter contract restricts only `das.manager` and `das.worker`, and gains `aiokafka` in its forbidden list. The Sentinel
+client is in `redis`, already forbidden: import-linter refuses a subpackage of an external package as a name
+(`redis.asyncio.sentinel` is "not valid"), and `tests/unit/test_import_contract_phase7.py` proves the root entry forbids it.
 
 ## Test strategy
 

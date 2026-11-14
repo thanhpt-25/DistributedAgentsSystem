@@ -616,6 +616,139 @@ sandbox:
 
 With none of the new configuration set, nothing changes: every response, message and metric of Phase 5 is the same, apart from one additive field, `replans` (0), in the Request view, and the additions to the OpenAPI document and the metrics catalog. A message without `output_schema` is encoded byte for byte as before, and the contract baseline changed only by additions. Upgrade Gateways, Managers and Workers in any order; turn features on one at a time. A Worker that lists `code-execution` without `sandbox.enabled` does not start.
 
+## Scale and resilience (Phase 7)
+
+Phase 7 lets Redis survive the loss of its master, adds two more Transports (HTTP and Kafka), and adds a load test so you can see what a stack takes. Every feature is **off unless you configure it**; see [Upgrading to Phase 7](#upgrading-to-phase-7), the [settings table](#phase-7-settings) and what is [not in Phase 7](#not-in-phase-7).
+
+### Redis Sentinel
+
+All durable state is in Redis, so Redis was the one thing whose loss stopped everything. With Redis Sentinel (one master, replicas, and at least three Sentinels) a Failover costs a few seconds instead of the platform. Point every role at the Sentinels instead of a URL:
+
+```yaml
+redis:
+  mode: sentinel
+  sentinels: [sentinel-1:26379, sentinel-2:26379, sentinel-3:26379]
+  master_name: mymaster
+  db: 0
+```
+
+- `mode` is `standalone` (the default: only `url`, behaviour as before) or `sentinel`. In `sentinel` mode `sentinels` (1 to 10 `host:port`) and `master_name` are required, `url` is refused, and a field that belongs to the other mode is refused, each with an error that names it. `mode: cluster` is refused, with the reason: the State_Store scripts update keys in different slots at once, so Redis Cluster cannot run them.
+- The passwords are secrets, accepted only from the environment or the secrets file, never YAML: `DAS__REDIS__PASSWORD` and `DAS__REDIS__SENTINEL_PASSWORD`. `sentinel_tls: true` talks TLS to the Sentinels.
+- Every role (Gateway, Manager, Worker) builds its Redis client through one function in `das/state/redisclient.py`; nothing else creates one.
+- When the master changes, a command that failed with a connection error or a `READONLY` error is retried up to 3 times after 0.2, 0.5 and 1 second. A retried script is safe: every script is keyed by the Lease epoch, so a repeat answers `LEASE_LOST`, `REQUEST_TERMINAL` or the same result. A Lease that expired during the Failover is lost, a live one is kept, and no Job_Result is applied twice (a property test with a fake Redis that fails at a chosen call checks this).
+- The health check reports Redis unhealthy while no master is reachable and healthy again once Sentinel names one. The metrics `das_redis_failovers_total` (the client switched master) and `das_redis_retries_total{reason}` (`connection` or `readonly`) count what happened.
+- **The key layout did not change**, so there is nothing to migrate: tenant, index and Request keys stay in one Redis, and a stack can move between `standalone` and `sentinel` with its data.
+
+To try it, `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.sentinel.yml --profile sentinel up -d` starts one master, one replica and three Sentinels and points every agent at them; stop `redis` and the replica is promoted in a few seconds. The Helm chart takes `redis.mode: sentinel` with `redis.sentinels` and `redis.masterName` (see `deploy/helm/das/README.md`).
+
+### HTTP transport
+
+Where AMQP is not allowed, agents can exchange Jobs and results over plain HTTPS. The Gateway serves an HTTP broker on its Ops_Port, keeping its queues in the Redis the stack already has (streams with a consumer group); Managers and Workers use the `http` Transport against it. Control messages still use gRPC.
+
+```yaml
+transports:
+  jobs: http
+  control: grpc
+http:
+  url: http://gateway.internal:8081
+  poll_wait: 20
+```
+
+On the Gateway:
+
+```yaml
+http_broker:
+  enabled: true
+  visibility_timeout: 30
+```
+
+- One shared token protects the broker, a secret like the others: `DAS__HTTP_BROKER__TOKEN` on the Gateway and `DAS__HTTP__TOKEN` on the agents, 16 to 256 characters, never in YAML. The broker is off unless `http_broker.enabled` is true and then requires the token; only a Gateway can serve it. Put TLS in front of the Ops_Port when it crosses a network you do not trust.
+- `publish` returns only after Redis has the Message; a subscriber long-polls (`http.poll_wait` seconds) and takes at most as many Messages as it has free slots; a Message not acknowledged within `visibility_timeout` seconds is delivered again, and past `max_attempts - 1` returns a Job goes to the dead-letter destinations with the same headers the other Transports write. A Message is at most 1 MiB and a batch at most 100.
+- A Manager or Worker whose transports are `http` and `grpc` needs no `rabbitmq` section. `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.http-transport.yml up -d` runs the stack that way, with RabbitMQ not started; it needs `DAS_HTTP_BROKER_TOKEN` in `deploy/.env`.
+
+### Kafka transport
+
+The `kafka` Transport (`aiokafka`) carries the same codec bytes and headers as the others. Each destination is a topic named as the RabbitMQ queue with characters Kafka does not allow replaced (`das.jobs.<capability>`, `das.results`, `das.dlq`), created on first use when `kafka.auto_create_topics` is true.
+
+```yaml
+transports:
+  jobs: kafka
+  control: grpc
+kafka:
+  bootstrap_servers: [kafka-1:9092, kafka-2:9092]
+  security_protocol: SASL_SSL
+  sasl_mechanism: SCRAM-SHA-512
+  sasl_username: das
+  ssl_cafile: /etc/das/kafka-ca.pem
+  partitions: 6
+  replication_factor: 3
+```
+
+- Credentials are secrets, from the environment or the secrets file only: `DAS__KAFKA__SASL_PASSWORD` and `DAS__KAFKA__SSL_KEY_PASSWORD`. A SASL protocol requires its username and password; credentials or TLS files beside a protocol that would not use them are refused rather than ignored, and a certificate needs its key.
+- `publish` uses an idempotent producer with `acks=all` and returns when the broker has the record. A consumer group per destination commits an offset only after `acknowledge`, and only up to the lowest Message still in flight, so an acknowledgement out of order never carries an unfinished Message past the commit point; a rebalance commits what was acknowledged and never what was not.
+- Kafka has no requeue or dead letter, so the adapter makes them: a requeue goes to `<topic>.retry` with a delay stamp (`kafka.retry_delay` seconds) and the original is committed; a reject, or a Job past its delivery limit, goes to `das.dlq` with the standard headers. High priority goes to `<topic>.high`, which is read first. `request_reply` uses a per-process reply topic.
+- Authentication is plain SASL (PLAIN or SCRAM) and TLS; the shared transport tests run against an in-memory cluster and, in the integration suite, against a real single-node Kafka (KRaft) under Docker.
+
+### Load testing
+
+`das loadtest` drives a running stack through its client API and writes a Capacity_Report; `das loadtest-compare` says whether a change made it slower.
+
+```bash
+das loadtest --gateway http://localhost:8080 --key "$KEY" --profile ramp --transport rabbitmq --out report.json --setting managers=2 --setting workers=2
+das loadtest-compare base.json report.json --max-regression 0.1
+```
+
+- A Load_Profile is a list of steps (Requests per second for some seconds) and a prompt mix. Built in: `smoke` (2 per second for 10 seconds), `steady` (10 for 60) and `ramp` (2, 5, 10, 20 and 40 per second, 30 seconds each); `--profile` also takes the path of a YAML file with `steps`, or `rate` and `duration`, and optional `prompts`.
+- The run is open loop: arrival times are fixed in advance, so a slow stack is offered the same load as a fast one, and each send records how late it was. Each Request is polled to a terminal state (`--poll-interval` 0.5 seconds, `--request-timeout` 120).
+- The report holds throughput, the error rate, the percentiles 50, 90 and 99 of the submit time and of the total time of the Requests that completed, and the **saturation point**: the highest rate at which every step up to it kept the error rate at most `--max-error-rate` (0.01) and the p99 of the total time at most `--max-p99-ms` (10000). It also holds the machine, the DAS version, the transport and the settings you gave with `--setting KEY=VALUE` (managers, workers, the stub's latency), so a number never travels without its context; `--transport` is required.
+- The API key comes from `--key` or `DAS_LOADTEST_KEY` and is never printed or written. Exit codes: 0, 2 for a profile, key or option that cannot be used, 4 when the Gateway cannot be reached. `das loadtest-compare` exits 1 when throughput fell or the p99 rose by more than `--max-regression` (a ratio, default 0.1), 0 when not, 2 for reports it cannot compare (different profiles).
+- The Gateway's default per-key rate limit (60 requests per second) would measure itself: raise or turn off `client_limits` for the key a load test uses. The end-to-end stub LLM takes `STUB_LATENCY_MS` and `STUB_FAILURE_RATE`, so a run measures DAS and not a provider.
+
+**One reference run, on one machine, not a guarantee** (details and the raw reports are in [`docs/capacity/README.md`](docs/capacity/README.md)): 2 Managers and 2 Workers in Docker Compose on a 10-CPU, 16 GiB Apple silicon laptop, a stub LLM answering in 50 ms, the `ramp` profile. On RabbitMQ all 2310 Requests completed and the stack kept inside its limits up to **20 Requests per second**, queueing beyond that. On the HTTP transport it kept inside them up to **10**, and above that many submits timed out; why has not been investigated. A real LLM takes seconds, so your numbers will be lower.
+
+### Phase 7 settings
+
+| Field | Default | Range | Purpose |
+|---|---|---|---|
+| `redis.mode` | standalone | standalone or sentinel | One Redis by `url`, or the master Sentinel names |
+| `redis.sentinels` | none | 1 to 10 host:port, with `sentinel` | The Sentinels to ask |
+| `redis.master_name` | none | letters, digits, dots, hyphens, underscores, up to 64, with `sentinel` | The master the Sentinels monitor |
+| `redis.db` | 0 | 0 to 15 | Database, with `sentinel` |
+| `redis.password` | none | a secret, environment only | Redis password |
+| `redis.sentinel_password` | none | a secret, environment only | Sentinel password |
+| `redis.sentinel_tls` | false | true or false | TLS to the Sentinels |
+| `http.url` | required | an http or https URL | Where the HTTP broker is (the Gateway's Ops_Port) |
+| `http.token` | none | a secret of 16 to 256 characters, environment only | Token sent to the broker; required with an `http` transport |
+| `http.poll_wait` | 20 | 1 to 30 | Seconds one long poll waits for a Message |
+| `http_broker.enabled` | false | true or false, Gateway only | Serve the HTTP broker on the Ops_Port |
+| `http_broker.token` | none | a secret of 16 to 256 characters, environment only | Token the broker requires; required when enabled |
+| `http_broker.visibility_timeout` | 30 | 5 to 600 | Seconds before an unacknowledged Message is delivered again |
+| `kafka.bootstrap_servers` | required | 1 to 10 host:port | The brokers to connect to |
+| `kafka.security_protocol` | PLAINTEXT | PLAINTEXT, SSL, SASL_PLAINTEXT or SASL_SSL | How to talk to the brokers |
+| `kafka.sasl_mechanism` | PLAIN | PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512 | With a SASL protocol |
+| `kafka.sasl_username` | none | a non-empty name, with a SASL protocol | SASL user |
+| `kafka.sasl_password` | none | a secret, environment only, with a SASL protocol | SASL password |
+| `kafka.ssl_cafile` | none | a file path, with SSL or SASL_SSL | CA that signed the brokers |
+| `kafka.ssl_certfile` | none | a file path, with `ssl_keyfile` | Client certificate (mutual TLS) |
+| `kafka.ssl_keyfile` | none | a file path, with `ssl_certfile` | Client key |
+| `kafka.ssl_key_password` | none | a secret, environment only | Password of the client key |
+| `kafka.partitions` | 3 | 1 to 100 | Partitions of a topic the adapter creates |
+| `kafka.replication_factor` | 1 | 1 to 5 | Replicas of a topic the adapter creates |
+| `kafka.auto_create_topics` | true | true or false | Create topics on first use |
+| `kafka.retry_delay` | 1 | 0 to 60 | Seconds a requeued Message waits in the retry topic |
+
+`redis.url` stays what it was; it is now optional in the schema only because a `sentinel` configuration has none (`standalone` still requires it). The secrets are listed under [Configuration](#configuration) with the others and are redacted from logs.
+
+### Upgrading to Phase 7
+
+With none of the new configuration set, nothing changes: every response, message, key and metric of Phase 6 is the same, apart from the two new metrics, and the codec bytes are identical. The packages that define what is sent and stored (the codec, the models, the Lua scripts, the key layout, the planner, the Manager and the Worker) are byte for byte what they were, and the contract baseline changed only by additions. Upgrade Gateways, Managers and Workers in any order; turn features on one at a time. `das.manager` and `das.worker` import no client library (not `aiokafka`, not Redis or its Sentinel client): that is enforced by the import contract.
+
+### Not in Phase 7
+
+- **Redis Cluster.** The State_Store scripts update keys in different slots at once; Sentinel gives availability, not sharding.
+- **Multi-region.** One Redis (with its replicas) and one broker; nothing replicates between regions.
+- **Exactly-once delivery.** Every Transport is at-least-once with idempotent handling: a Message may be delivered again, and the reducer discards the duplicate.
+
 ## Configuration
 
 Each agent runs `das run --config <file>`. The YAML file sets the role and tuning; samples live in `deploy/config/`.
@@ -628,7 +761,7 @@ DAS__WORKER__CAPABILITIES=research,summarize    # lists are comma-separated
 DAS__REDIS__URL=redis://redis-host:6379/0
 ```
 
-Credentials are never accepted in the YAML file. Provide API keys and LLM credentials (`DAS__API_KEYS`, `DAS__LLM__API_KEY`, `DAS__LLM__AWS_*`) through the environment, or through a secrets file of `NAME=VALUE` lines referenced by `secrets_file:` or `DAS__SECRETS_FILE`. Credentials are redacted from logs.
+Credentials are never accepted in the YAML file. Provide API keys and LLM credentials (`DAS__API_KEYS`, `DAS__LLM__API_KEY`, `DAS__LLM__AWS_*`) and the Phase 7 secrets (`DAS__REDIS__PASSWORD`, `DAS__REDIS__SENTINEL_PASSWORD`, `DAS__HTTP__TOKEN`, `DAS__HTTP_BROKER__TOKEN`, `DAS__KAFKA__SASL_PASSWORD`, `DAS__KAFKA__SSL_KEY_PASSWORD`) through the environment, or through a secrets file of `NAME=VALUE` lines referenced by `secrets_file:` or `DAS__SECRETS_FILE`. Credentials are redacted from logs.
 
 Key settings:
 
