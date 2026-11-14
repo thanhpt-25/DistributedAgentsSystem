@@ -96,9 +96,18 @@ def old_contract() -> dict[str, Any]:
     return json.loads(raw)
 
 
+#: Phase 7 made ``redis.url`` optional in the schema, because Sentinel mode has none (Phase 7 Req 1.2); standalone mode
+#: still requires it, in ``cross_field_errors``. Every Phase 5 configuration is still valid, so this relaxation is the
+#: one thing allowed to be more than an addition. Anything else that is not an addition still fails.
+ALLOWED_RELAXATIONS = frozenset({
+    "$.config_schema.$defs.RedisConfig.properties.url.type",
+    "$.config_schema.$defs.RedisConfig.required",
+})
+
+
 def test_the_contract_baseline_changed_only_by_additions_since_phase_5(old_contract: dict[str, Any]) -> None:
     new = json.loads((ROOT / BASELINE / "contract.json").read_text(encoding="utf-8"))
-    problems = additions_only(old_contract, new)
+    problems = [p for p in additions_only(old_contract, new) if p.split(":")[0] not in ALLOWED_RELAXATIONS]
     assert problems == [], "\n".join(problems[:20])
 
 

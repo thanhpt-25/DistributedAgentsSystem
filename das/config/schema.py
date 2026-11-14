@@ -61,6 +61,8 @@ SECRET_FIELDS: tuple[str, ...] = (
     "tracing.otlp_headers",
     "gateway.cursor_secret",
     "webhook_secrets",
+    "redis.password",
+    "redis.sentinel_password",
 )
 
 #: Credential fields that hold a map of named secrets. Each entry comes from
@@ -127,13 +129,52 @@ class RabbitMQConfig(_Section):
         return None if v is None else _check_scheme(v, ("http", "https"))
 
 
+#: Why ``redis.mode: cluster`` is refused (Phase 7 Req 1.3).
+CLUSTER_REFUSAL = (
+    "redis.mode cluster is not supported: the State_Store scripts update keys in different slots at once, "
+    "so Redis Cluster cannot run them; use standalone or sentinel"
+)
+_SENTINEL_ADDRESS = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?:[1-9][0-9]{0,4}$")
+#: The Redis keys that only ``mode: sentinel`` accepts; ``mode: standalone`` takes ``url`` alone (Req 1.1).
+SENTINEL_ONLY_FIELDS: tuple[str, ...] = ("sentinels", "master_name", "db", "sentinel_tls", "sentinel_password")
+
+
 class RedisConfig(_Section):
-    url: str
+    """Where the State_Store lives: one Redis by ``url`` (``standalone``), or the master that Redis Sentinel names
+    (``sentinel``, Phase 7 Req 1). The mode-dependent rules, each naming its field, are in ``cross_field_errors``."""
+
+    mode: str = "standalone"
+    url: str | None = None
+    sentinels: Annotated[list[str], BeforeValidator(_split_csv), Field(min_length=1, max_length=10)] | None = None
+    master_name: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")] | None = None
+    db: int = Field(default=0, ge=0, le=15)
+    #: Secrets: environment or secrets file only (``DAS__REDIS__PASSWORD``, ``DAS__REDIS__SENTINEL_PASSWORD``).
+    password: SecretStr | None = None
+    sentinel_password: SecretStr | None = None
+    sentinel_tls: bool = False
+
+    @field_validator("mode")
+    @classmethod
+    def _mode(cls, v: str) -> str:
+        mode = v.strip().lower()
+        if mode == "cluster":
+            raise ValueError(CLUSTER_REFUSAL)
+        if mode not in ("standalone", "sentinel"):
+            raise ValueError("must be standalone or sentinel")
+        return mode
 
     @field_validator("url")
     @classmethod
-    def _url(cls, v: str) -> str:
-        return _check_scheme(v, ("redis", "rediss", "unix"))
+    def _url(cls, v: str | None) -> str | None:
+        return None if v is None else _check_scheme(v, ("redis", "rediss", "unix"))
+
+    @field_validator("sentinels")
+    @classmethod
+    def _sentinels(cls, v: list[str] | None) -> list[str] | None:
+        for address in v or []:
+            if _SENTINEL_ADDRESS.fullmatch(address) is None or int(address.rsplit(":", 1)[1]) > 65535:
+                raise ValueError("each sentinel must be host:port with a port from 1 to 65535")
+        return v
 
 
 class GrpcConfig(_Section):
@@ -674,6 +715,10 @@ class AgentConfig(_Section):
         if self.gateway.cursor_secret is not None:
             values.append(self.gateway.cursor_secret.get_secret_value())
         values.extend(s.get_secret_value() for s in self.webhook_secrets.values())
+        if self.redis is not None:
+            values.extend(
+                s.get_secret_value() for s in (self.redis.password, self.redis.sentinel_password) if s is not None
+            )
         if self.llm is not None:
             for s in (
                 self.llm.api_key,
@@ -729,6 +774,34 @@ def _section_present(data: Mapping[str, Any], name: str) -> bool:
     return value is not _MISSING and value is not None
 
 
+def _redis_mode_errors(data: Mapping[str, Any]) -> list[FieldError]:
+    """The Redis rules that depend on ``mode`` (Phase 7 Req 1.1, 1.2), each naming the field it is about.
+
+    A mode that is not ``standalone`` or ``sentinel`` is reported by the field itself, so this says nothing then."""
+    if not _section_present(data, "redis"):
+        return []
+    raw = _lookup(data, "redis.mode")
+    mode = "standalone" if raw is _MISSING else raw.strip().lower() if isinstance(raw, str) else None
+    present = {name: _lookup(data, f"redis.{name}") not in (_MISSING, None) for name in ("url", *SENTINEL_ONLY_FIELDS)}
+    errors: list[FieldError] = []
+    if mode == "standalone":
+        if not present["url"]:
+            errors.append(FieldError("redis.url", "field required for redis.mode standalone"))
+        errors.extend(
+            FieldError(f"redis.{name}", "only allowed with redis.mode sentinel")
+            for name in SENTINEL_ONLY_FIELDS
+            if present[name]
+        )
+    elif mode == "sentinel":
+        if present["url"]:
+            errors.append(FieldError("redis.url", "must not be set with redis.mode sentinel; use sentinels"))
+        if not present["sentinels"]:
+            errors.append(FieldError("redis.sentinels", "field required for redis.mode sentinel (1 to 10 host:port)"))
+        if not present["master_name"]:
+            errors.append(FieldError("redis.master_name", "field required for redis.mode sentinel"))
+    return errors
+
+
 def cross_field_errors(data: Mapping[str, Any]) -> list[FieldError]:
     """Role-dependent and cross-field checks on the raw resolved mapping.
 
@@ -760,6 +833,8 @@ def cross_field_errors(data: Mapping[str, Any]) -> list[FieldError]:
                         "(set DAS__API_KEYS or the secrets file)",
                     )
                 )
+
+    errors.extend(_redis_mode_errors(data))
 
     # Tools (Phase 6 Req 5.3, 5.9): only a Worker enables them, and http_fetch needs an allow-list.
     enabled = _valid(ToolsConfig, "enabled", _lookup(data, "tools.enabled"))

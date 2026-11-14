@@ -41,6 +41,17 @@ A write that reached the old master but not the replica is lost by Redis's async
 that, as at-least-once delivery plus idempotent handling already cover it: the queue redelivers the Job_Result and the
 reducer discards a duplicate.
 
+What the fault-injection test (Property 3, `tests/property/test_failover.py`) found, and the design accepts: the retry sits in
+the redis-py client (`FailoverRetry`), not in the store, because the store makes 43 direct calls and a pipeline or a script
+goes through the same connection. A failure of any of the three kinds (reset before the command, reply lost after it, or
+`READONLY`) at any command of a real Request, up to three at a time, leaves exactly the state of a run with none. Two
+effects are not data errors and are kept: (1) a lost reply to `acquire_lease` makes the retry answer `HELD`, because the
+first try did take the Lease; the Request waits one lease duration and any Manager then takes the expired Lease (a
+re-entrant acquire could start a second driver for one Request, which is worse than the delay); (2) a lost reply to the
+final write makes the retry answer that the Lease is gone, so the driver reports `LEASE_LOST` for a Request stored as
+Completed exactly once. A submit whose reply is lost can leave an orphan Request the client never learns of; an
+Idempotency-Key (Phase 4) makes a submit exactly-once.
+
 Health: the Redis check pings through the same client; while Sentinel has no master the ping raises and the check is
 unhealthy (Req 1.7).
 
@@ -101,7 +112,11 @@ count above `delivery_limit`: publish to `das.dlq` with the standard headers, th
 
 ## Compatibility
 
-`RedisConfig` keeps `url` working unchanged. Entry points `http` and `kafka` are added beside `rabbitmq` and `grpc`; the
+`RedisConfig` keeps `url` working unchanged. One thing is more than an addition, and it is deliberate: `url` is no longer a
+*required* property in the config JSON Schema (it is `string | null`), because a `sentinel` configuration must not have one
+(Req 1.2). `standalone` still requires it, in `cross_field_errors`, with the same error naming `redis.url`. Req 5.2 is read
+as "no configuration valid in Phase 6 becomes invalid", which holds; the compatibility tests name the two baseline paths
+that changed and fail on any other non-addition. Entry points `http` and `kafka` are added beside `rabbitmq` and `grpc`; the
 loader and its refusal of unknown names are unchanged. `aiokafka` is imported lazily inside `das/transport/kafka.py`; the
 import-linter contract restricts only `das.manager` and `das.worker`, and gains `aiokafka` and
 `redis.asyncio.sentinel` in its forbidden list.

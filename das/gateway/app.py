@@ -87,6 +87,7 @@ from das.observability.tracing import NoopTracer, Tracer
 from das.ops.cost import PriceTable, estimate_cost
 from das.ops.usage import summarize_usage
 from das.registry import AgentRegistry
+from das.state.redisclient import client_from_url
 from das.state.store import IndexNotReady, StateStore, StoredRequest, StoreStatus
 from das.transport.base import Transport
 
@@ -117,7 +118,7 @@ def build_redis_client(url: str, **kwargs: Any) -> Redis:
     kwargs.setdefault("socket_timeout", REDIS_SOCKET_TIMEOUT)
     kwargs.setdefault("socket_connect_timeout", REDIS_SOCKET_TIMEOUT)
     kwargs.setdefault("decode_responses", True)
-    return Redis.from_url(url, **kwargs)
+    return client_from_url(url, **kwargs)
 
 
 class StoreUnavailable(Exception):

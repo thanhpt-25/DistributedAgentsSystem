@@ -849,15 +849,96 @@
       },
       "RedisConfig": {
         "additionalProperties": false,
+        "description": "Where the State_Store lives: one Redis by ``url`` (``standalone``), or the master that Redis Sentinel names\n(``sentinel``, Phase 7 Req 1). The mode-dependent rules, each naming its field, are in ``cross_field_errors``.",
         "properties": {
-          "url": {
-            "title": "Url",
+          "db": {
+            "default": 0,
+            "maximum": 15,
+            "minimum": 0,
+            "title": "Db",
+            "type": "integer"
+          },
+          "master_name": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Master Name"
+          },
+          "mode": {
+            "default": "standalone",
+            "title": "Mode",
             "type": "string"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Password"
+          },
+          "sentinel_password": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sentinel Password"
+          },
+          "sentinel_tls": {
+            "default": false,
+            "title": "Sentinel Tls",
+            "type": "boolean"
+          },
+          "sentinels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sentinels"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
           }
         },
-        "required": [
-          "url"
-        ],
         "title": "RedisConfig",
         "type": "object"
       },
@@ -1681,6 +1762,13 @@
     "DAS__PRICING__MODELS",
     "DAS__RABBITMQ__MANAGEMENT_URL",
     "DAS__RABBITMQ__URL",
+    "DAS__REDIS__DB",
+    "DAS__REDIS__MASTER_NAME",
+    "DAS__REDIS__MODE",
+    "DAS__REDIS__PASSWORD",
+    "DAS__REDIS__SENTINELS",
+    "DAS__REDIS__SENTINEL_PASSWORD",
+    "DAS__REDIS__SENTINEL_TLS",
     "DAS__REDIS__URL",
     "DAS__RETENTION__BATCH_SIZE",
     "DAS__RETENTION__DLQ_RECORD_TTL",
@@ -2614,6 +2702,29 @@
         "queue"
       ],
       "name": "das_queue_depth_sample_errors_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {},
+      "buckets_key": null,
+      "help": "Times the Redis client switched to a new master (Sentinel).",
+      "labels": [],
+      "name": "das_redis_failovers_total",
+      "type": "counter"
+    },
+    {
+      "allowed": {
+        "reason": [
+          "connection",
+          "readonly"
+        ]
+      },
+      "buckets_key": null,
+      "help": "Redis commands retried through a Failover, by reason.",
+      "labels": [
+        "reason"
+      ],
+      "name": "das_redis_retries_total",
       "type": "counter"
     },
     {

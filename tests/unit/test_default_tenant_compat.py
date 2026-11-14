@@ -77,12 +77,22 @@ def only_grew(old: Any, new: Any, path: str = "$") -> list[str]:
     return [] if old == new else [f"{path}: {old!r} became {new!r}"]
 
 
+#: Phase 7 made ``redis.url`` optional in the schema, because Sentinel mode has none (Phase 7 Req 1.2); standalone mode
+#: still requires it in ``cross_field_errors``, so every Phase 4 configuration is still valid. These two baseline paths
+#: are the one thing allowed to be more than an addition (see the Compatibility section of the Phase 7 design).
+ALLOWED_RELAXATIONS = frozenset({
+    "$.config_schema.$defs.RedisConfig.properties.url.type",
+    "$.config_schema.$defs.RedisConfig.required",
+})
+
+
 def test_the_contract_baseline_only_grew_since_phase_4() -> None:
     """Every route, metric, label, reason, environment variable, exit code, configuration field and default of
     Phase 4 is still there, unchanged (Req 9.6): Phase 5 adds, it does not take away."""
     phase_4 = json.loads(PHASE_4_CONTRACT.read_text(encoding="utf-8"))
     current = json.loads(CONTRACT.read_text(encoding="utf-8"))
-    assert only_grew(phase_4, current) == []
+    problems = [p for p in only_grew(phase_4, current) if p.split(":")[0] not in ALLOWED_RELAXATIONS]
+    assert problems == []
 
 
 def test_the_check_notices_what_it_is_for() -> None:

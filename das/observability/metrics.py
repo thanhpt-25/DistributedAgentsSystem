@@ -110,6 +110,8 @@ TOOL_NAMES: frozenset[str] = frozenset({"calculator", "http_fetch", "current_tim
 TOOL_OUTCOMES: frozenset[str] = frozenset({"ok", "error", "timeout"})
 #: Phase 6 Req 6.9: how a sandboxed run ended.
 SANDBOX_OUTCOMES: frozenset[str] = frozenset({"ok", "error", "timeout", "killed"})
+#: Phase 7 Req 1.8: why the Redis client retried a command through a Failover.
+REDIS_RETRY_REASONS: frozenset[str] = frozenset({"connection", "readonly"})
 REGISTRY_ROLES: frozenset[str] = _values(RegistryRole)
 REGISTRY_STATUSES: frozenset[str] = _values(RegistryStatus)
 HTTP_METHODS: frozenset[str] = _values(HttpMethod)
@@ -271,6 +273,11 @@ CATALOG: tuple[MetricSpec, ...] = (
     _spec(
         "das_sandbox_runs_total", "counter", "Sandboxed code runs, by how they ended.",
         ("outcome",), outcome=SANDBOX_OUTCOMES,
+    ),
+    _spec("das_redis_failovers_total", "counter", "Times the Redis client switched to a new master (Sentinel)."),
+    _spec(
+        "das_redis_retries_total", "counter", "Redis commands retried through a Failover, by reason.",
+        ("reason",), reason=REDIS_RETRY_REASONS,
     ),
 )
 
@@ -766,6 +773,16 @@ class WorkerMetrics(_Facade):
         self._r.inc("das_sandbox_runs_total", {"outcome": outcome})
 
 
+class RedisMetrics(_Facade):
+    """The Redis client's Failover metrics (Phase 7 Req 1.8); every role has them."""
+
+    def retry(self, reason: str) -> None:
+        self._r.inc("das_redis_retries_total", {"reason": reason})
+
+    def failover(self) -> None:
+        self._r.inc("das_redis_failovers_total")
+
+
 __all__ = [
     "ALLOWED_LABEL_NAMES",
     "CATALOG",
@@ -779,6 +796,8 @@ __all__ = [
     "MetricSpec",
     "MetricsRecorder",
     "NoopRecorder",
+    "REDIS_RETRY_REASONS",
+    "RedisMetrics",
     "RenderError",
     "SANDBOX_OUTCOMES",
     "TOOL_NAMES",

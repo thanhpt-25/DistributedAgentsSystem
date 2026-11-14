@@ -5,12 +5,12 @@ fault-injection pass. One commit per wave. Groups are numbered from 8 so they co
 
 ## Tasks
 
-- [ ] 8. Redis Sentinel client and configuration (Wave 8)
-  - [ ] 8.1 `RedisConfig` modes, validation, the refusal of `cluster`; Property 1 (Req 1.1 to 1.3, 6.1)
-  - [ ] 8.2 `das/state/redisclient.py`, the single builder used by every role; a static test that nothing else builds a client (Req 1.4)
-  - [ ] 8.3 The store's retry through a Failover and `READONLY`; `das_redis_retries_total`, `das_redis_failovers_total` (Req 1.5, 1.8)
-  - [ ] 8.4 Property 3: a fake Redis that fails at a chosen call, no double terminal state, no double result (Req 1.6, 6.3)
-  - [ ] 8.5 Health through Sentinel (Req 1.7)
+- [x] 8. Redis Sentinel client and configuration (Wave 8)
+  - [x] 8.1 `RedisConfig` modes, validation, the refusal of `cluster`; Property 1 (Req 1.1 to 1.3, 6.1)
+  - [x] 8.2 `das/state/redisclient.py`, the single builder used by every role; a static test that nothing else builds a client (Req 1.4)
+  - [x] 8.3 The store's retry through a Failover and `READONLY`; `das_redis_retries_total`, `das_redis_failovers_total` (Req 1.5, 1.8)
+  - [x] 8.4 Property 3: a fake Redis that fails at a chosen call, no double terminal state, no double result (Req 1.6, 6.3)
+  - [x] 8.5 Health through Sentinel (Req 1.7)
 - [ ] 9. HTTP transport (Wave 9)
   - [ ] 9.1 The shared transport contract suite and the in-memory fakes, run against the RabbitMQ adapter's existing fake (Req 6.2)
   - [ ] 9.2 The HTTP_Broker router: auth, limits, publish, pull with reclaim, settle, dead letter, priority (Req 2.2, 2.3, 2.5, 2.6, 2.7, 2.10)

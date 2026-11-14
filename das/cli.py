@@ -64,6 +64,8 @@ from das.errors import (
     exit_code_for,
 )
 from das.observability import Redactor, configure_logging, get_logger
+from das.observability.metrics import RedisMetrics
+from das.state.redisclient import RedisEvents, build_redis_client
 from das.transport.loader import EntryPointSource, load_transport
 
 log = get_logger("das.cli")
@@ -360,19 +362,27 @@ async def _close_quietly(what: str, close: Callable[[], Awaitable[object]]) -> N
         log.warning("close failed", component=what, error=_describe(exc))
 
 
+#: Counts the Redis client's retries and master switches; ``run_agent`` binds it to the metrics once they exist.
+REDIS_EVENTS: Final = RedisEvents()
+
+
+def _bind_redis_metrics(recorder: Any, events: RedisEvents = REDIS_EVENTS) -> None:
+    """Count the Redis client's Failover retries and master switches in ``recorder`` (Phase 7 Req 1.8), including
+    those that happened while the agent was still starting."""
+    events.bind(RedisMetrics(recorder))
+
+
 def _redis_client(config: AgentConfig) -> Any:
+    """The agent's Redis client, standalone or through Sentinel, from the one builder (Phase 7 Req 1.4)."""
     assert config.redis is not None  # enforced by the schema for every role
-    if config.role == "gateway":
-        from das.gateway.app import build_redis_client
+    from das.gateway.app import REDIS_SOCKET_TIMEOUT
 
-        return build_redis_client(config.redis.url)
-    from redis.asyncio import Redis
-
-    return Redis.from_url(
-        config.redis.url,
-        decode_responses=True,
-        socket_timeout=AGENT_REDIS_SOCKET_TIMEOUT,
-        socket_connect_timeout=AGENT_REDIS_CONNECT_TIMEOUT,
+    gateway = config.role == "gateway"
+    return build_redis_client(
+        config.redis,
+        socket_timeout=REDIS_SOCKET_TIMEOUT if gateway else AGENT_REDIS_SOCKET_TIMEOUT,
+        connect_timeout=REDIS_SOCKET_TIMEOUT if gateway else AGENT_REDIS_CONNECT_TIMEOUT,
+        observer=REDIS_EVENTS,
     )
 
 
@@ -584,14 +594,16 @@ async def run_agent(
     # also shorter than a read: the Gateway gets its own pool, sized to its stream cap (Phase 4 Req 7.7).
     events_redis: Any = None
     if role == "gateway":
-        from das.gateway.app import build_redis_client
+        from das.gateway.app import REDIS_SOCKET_TIMEOUT
         from das.gateway.events import EVENTS_SOCKET_TIMEOUT
 
         assert config.redis is not None
         events_redis = build_redis_client(
-            config.redis.url,
-            max_connections=config.events.max_connections,
+            config.redis,
             socket_timeout=EVENTS_SOCKET_TIMEOUT,
+            connect_timeout=REDIS_SOCKET_TIMEOUT,
+            max_connections=config.events.max_connections,
+            observer=REDIS_EVENTS,
         )
     registry = AgentRegistry(redis)
     store = StateStore(redis)
@@ -618,9 +630,11 @@ async def run_agent(
             return {"overall": report["status"], **report}
 
         def gateway_recorder(routes: Sequence[str]) -> MetricsRecorder:
-            return build_recorder(
+            recorder = build_recorder(
                 config.metrics, clock=ops_clock, route_templates=routes, currency=currency
             )
+            _bind_redis_metrics(recorder)
+            return recorder
 
         app = create_app(
             store,
@@ -673,6 +687,7 @@ async def run_agent(
     else:
         assert queue is not None and control is not None  # schema requires transports
         recorder = build_recorder(config.metrics, clock=ops_clock, currency=currency)
+        _bind_redis_metrics(recorder)
         agent: Any
         if role == "manager":
             from das.manager.agent import ManagerAgent, ManagerSettings

@@ -209,6 +209,8 @@ llm.aws_session_token
 tracing.otlp_headers
 gateway.cursor_secret
 webhook_secrets
+redis.password
+redis.sentinel_password
 {{- end -}}
 
 {{/*

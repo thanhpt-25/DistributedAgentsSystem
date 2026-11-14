@@ -59,7 +59,8 @@ kubectl create secret generic das-secrets \
 The chart refuses to render, and says which path, when a value would put a secret in a manifest: a URL with credentials
 in `redis.url`, `rabbitmq.url`, `rabbitmq.managementUrl`, `lifecycle.preStopDrain.gatewayUrl` or anywhere under
 `config`, and any secret field of the agent configuration under `config` (`api_keys`, `admin_api_keys`,
-`webhook_secrets`, `gateway.cursor_secret`, `llm.api_key` and the other `llm.aws_*` keys, `tracing.otlp_headers`). The
+`webhook_secrets`, `gateway.cursor_secret`, `llm.api_key` and the other `llm.aws_*` keys, `tracing.otlp_headers`,
+`redis.password` and `redis.sentinel_password`). The
 message never repeats the value.
 
 ## Install
