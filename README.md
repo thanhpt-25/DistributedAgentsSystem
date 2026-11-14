@@ -496,6 +496,126 @@ What does not carry over: **usage from before the upgrade is not in any report**
 
 Redis replication, Sentinel or Cluster; a key-management API, or keys stored in Redis (keys and tenants come from the configuration); per-tenant worker pools or queues; SSO or OAuth; billing integration; tool use or code execution; HTTP or Kafka transports; and per-tenant token or cost metrics in Prometheus (use the usage reports).
 
+## Smarter agents (Phase 6)
+
+Phase 6 lets a Job return JSON that matches a schema, lets operators pick a model per Capability and a fallback, lets a Request try a new plan after a failure, measures the Planner, and lets a Worker use tools and (carefully) run code. Every feature is **off unless you configure it**; see [Upgrading to Phase 6](#upgrading-to-phase-6) and the [settings table](#phase-6-settings).
+
+### Structured output
+
+A planned Job may carry `output_schema`, a JSON Schema object (at most 16 KiB serialized, nested at most 16 levels). The Planner is told it may add one; a plan with an invalid schema is rejected with the check `invalid_output_schema`. A Job without `output_schema` is dispatched and run exactly as before.
+
+```json
+{"jobs": [
+  {"job_id": "find", "instruction": "List three facts about the Moon.", "capabilities": ["research"],
+   "output_schema": {"type": "object", "properties": {"facts": {"type": "array", "items": {"type": "string"}, "minItems": 3}},
+                     "required": ["facts"], "additionalProperties": false}},
+  {"job_id": "write", "instruction": "Write one paragraph from the facts.", "capabilities": ["summarize"], "depends_on": ["find"]}
+]}
+```
+
+The Worker parses the completion as JSON (one Markdown code fence around it is accepted) and validates it against the schema. If it does not match, the Worker makes **one** corrective completion in the same attempt, naming the first violation's JSON path and message (never the rejected content); the tokens of both completions are in the Job_Result usage. If that is still wrong the Job fails with `output_schema_violation: <path>: <message>` and follows the normal retry and dead-letter rules. A valid result is stored as canonical JSON (sorted keys, no extra whitespace). A completion over 256 KiB is a violation without being parsed.
+
+### Models by Capability and the fallback
+
+`llm.capability_models` maps a Capability to a model name: a Worker runs a Job with the model of the Capability it was routed by, else `llm.model`. `llm.fallback_model` is a safety net: when a completion fails with a **permanent** provider error, the LLMProvider makes exactly one further completion with the fallback. An authentication or authorization error (HTTP 401 or 403) does **not** trigger it, because no other model will be let in either. The Planner and Summarizer use `llm.model` and the fallback, never a Capability model. The Job_Result header `x-llm-model` and the usage records name the model that really answered, so cost estimates use its price. `das_llm_fallbacks_total{provider, model}` counts each use, `model` being the one that failed. An empty model name is a configuration error naming the field.
+
+```yaml
+llm:
+  provider: anthropic
+  model: claude-sonnet-5-5
+  capability_models:
+    summarize: claude-haiku-5-5
+  fallback_model: claude-opus-5-5
+```
+
+### Replanning
+
+`limits.max_replans` (0 to 3) is **off by default**. Above 0, when every Job of a Request is terminal and at least one Failed or was Skipped, the Manager asks the Planner for a new plan instead of finishing the Request. The new plan keeps every Succeeded Job unchanged and replaces the rest (fresh Job ids); it is written atomically under the lease and the Request stays Running. A `request.replanned` event carries `replans`, `failed_jobs` and `new_jobs`, and the Request view has `replans` (0 when never replanned). A budget still bounds the whole Request, replanning tokens included, and a budget stop is never replanned. If replanning itself fails, the Request fails with its original error. Replaying the dead letter of a replaced Job is refused.
+
+```yaml
+limits:
+  max_replans: 1
+```
+
+### Plan evaluation
+
+`das eval-plans` runs the real Planner, with the configured provider, over a JSON Lines dataset (`--dataset`) and prints a JSON report (per-line results and the valid ratio, expectation ratio, mean attempts and total tokens).
+
+```bash
+das eval-plans --config deploy/config/manager.yaml --dataset plans.jsonl --min-pass 0.9
+```
+
+A dataset line is a JSON object with `prompt`, `capabilities` (what the Planner is offered) and an optional `expect` (`min_jobs`, `max_jobs`, `require_capabilities`, `forbid_capabilities`, `require_output_schema`):
+
+```jsonl
+{"prompt": "Research the Moon and summarize it", "capabilities": ["research", "summarize"], "expect": {"min_jobs": 2, "require_capabilities": ["summarize"]}}
+{"prompt": "Say hello", "capabilities": ["chat"], "expect": {"max_jobs": 1}}
+```
+
+Exit code **0** when both ratios reach `--min-pass` (default 0, so a run without a threshold never fails on quality), **1** when either falls short, and **2** for a dataset line or configuration that cannot be used (the line number is named; no LLM call has been made). Logs go to stderr, the report alone to stdout.
+
+### Tools
+
+A Worker can let the model call tools. Nothing is enabled by default. Each enabled tool is advertised as a Capability, `tool-calculator`, `tool-http-fetch` or `tool-current-time`; a Job that requires such Capabilities is offered **exactly** those tools, and a Job that requires none runs as before. The Worker loops: complete, run each requested tool, append the results, complete again, until the model answers in text. A Job may use `tools.max_rounds` rounds of tools and is then asked once more; a model that still asks for tools fails the Job with `tool_rounds_exceeded`. The tokens of every round are in the usage; the Job timeout and a cancel stop the loop, also during a tool call. A tool's error, refusal or timeout goes back to the model as the result text, never as a failure of the Job, cut to `tools.max_result_bytes`. Tool names and result sizes are logged, never arguments or results. `das_tool_calls_total{tool, outcome}` counts calls (`ok`, `error`, `timeout`). The LLM provider must support tools (all four do); a Worker that enables a tool with one that does not exits with code 2.
+
+- `calculator`: arithmetic through a safe parser (numbers, `+ - * / // % **`, parentheses, a few math functions), never `eval`, with limits on length, nesting, exponent and result size.
+- `http_fetch`: `GET` only, `https` only (`http` only with `allow_http`), only the hosts in `allowed_hosts` (at least one is required to enable it), the default port, no credentials in the URL, **no redirects**, a timeout and a size cap. It refuses a host that resolves to a private, loopback, link-local or reserved address, however it is written, and it connects to the address it checked, so a changing DNS answer cannot redirect it.
+- `current_time`: the current UTC time from the Worker's clock.
+
+```yaml
+tools:
+  enabled: [calculator, current_time, http_fetch]
+  max_rounds: 4
+  http_fetch:
+    allowed_hosts: [docs.example.com]
+```
+
+### Code execution
+
+> **Warning.** A Code_Worker runs code written by a language model, which a prompt can steer. The sandbox makes this safer, not safe. It is **off by default**; enable it only on a **dedicated host** you can afford to lose, and read [docs/security/code-execution.md](docs/security/code-execution.md) first (threat model, every limit, what the sandbox does not protect against, and how to run one).
+
+A Worker with `sandbox.enabled: true` advertises `code-execution`; a Job that requires it is offered one tool, `run_python`, through the tool loop above. Each run is a throwaway container with no network, a read-only root, a small scratch directory, all capabilities dropped, no privilege gain, a non-root user, and memory, CPU, process, time and output limits that have ceilings no configuration can raise (timeout 60 s, 1 GiB, 2 CPUs, 256 processes, 64 KiB of output). The code goes in on stdin: no mount, nothing on the host disk, never logged. The container is always removed. At start-up the Worker asks the container runtime and exits with code 4 naming it if it does not answer. **Never mount the container runtime's socket** into any container: the repository's Compose files and Helm chart do not, and a test fails if they ever do. `das_sandbox_runs_total{outcome}` counts runs (`ok`, `error`, `timeout`, `killed`).
+
+```yaml
+worker:
+  capabilities: [llm]
+sandbox:
+  enabled: true
+  container_cli: docker
+  image: python:3.12-slim
+  oci_runtime: runsc
+  timeout: 10
+  memory_mb: 256
+```
+
+### Phase 6 settings
+
+| Field | Default | Range | Purpose |
+|---|---|---|---|
+| `llm.capability_models` | none | Capability to non-empty model name | Model per Capability |
+| `llm.fallback_model` | none | a non-empty model name | One more try after a permanent error |
+| `limits.max_replans` | 0 | 0 to 3 | Replans per Request; 0 is off |
+| `tools.enabled` | none | calculator, http_fetch, current_time | Tools the Worker offers |
+| `tools.max_rounds` | 4 | 1 to 10 | Rounds of tool use per Job |
+| `tools.max_result_bytes` | 16384 | 256 to 262144 | Bytes of a tool result the model sees |
+| `tools.http_fetch.allowed_hosts` | none | up to 50 host names; at least 1 to enable `http_fetch` | Hosts it may fetch from |
+| `tools.http_fetch.allow_http` | false | true or false | Also allow plain `http` |
+| `tools.http_fetch.timeout` | 10 | 1 to 60 | Seconds per fetch |
+| `tools.http_fetch.max_bytes` | 1048576 | 1024 to 10485760 | Bytes of a response read |
+| `sandbox.enabled` | false | true or false | Make this Worker a Code_Worker |
+| `sandbox.container_cli` | docker | docker or podman | Container runtime CLI |
+| `sandbox.image` | python:3.12-slim | a plain image reference | Image a run starts from |
+| `sandbox.oci_runtime` | none | a plain runtime name such as runsc | Alternative OCI runtime |
+| `sandbox.timeout` | 10 | 1 to 60 | Seconds before a run is killed |
+| `sandbox.memory_mb` | 256 | 64 to 1024 | Memory of a run, no swap |
+| `sandbox.cpus` | 1 | 0.1 to 2 | CPUs of a run |
+| `sandbox.pids` | 64 | 16 to 256 | Processes of a run |
+| `sandbox.output_bytes` | 16384 | 256 to 65536 | Bytes of output kept |
+
+### Upgrading to Phase 6
+
+With none of the new configuration set, nothing changes: every response, message and metric of Phase 5 is the same, apart from one additive field, `replans` (0), in the Request view, and the additions to the OpenAPI document and the metrics catalog. A message without `output_schema` is encoded byte for byte as before, and the contract baseline changed only by additions. Upgrade Gateways, Managers and Workers in any order; turn features on one at a time. A Worker that lists `code-execution` without `sandbox.enabled` does not start.
+
 ## Configuration
 
 Each agent runs `das run --config <file>`. The YAML file sets the role and tuning; samples live in `deploy/config/`.

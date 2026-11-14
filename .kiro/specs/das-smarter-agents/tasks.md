@@ -36,6 +36,6 @@ fault-injection pass. One commit per wave.
   - [x] 6.4 `docs/security/code-execution.md`; a static test that no Compose or Helm file mounts the Docker socket or is privileged (Req 6.8)
 - [ ] 7. Documentation, compatibility and end-to-end (Wave 7)
   - [ ] 7.1 Regenerate the contract baseline (additive only, corpus byte-identical); a compatibility test with no new configuration (Req 7.1, 7.2)
-  - [ ] 7.2 README sections and drift tests; a schema test that every new field has a documented default and range (Req 7.3, 7.4)
+  - [x] 7.2 README sections and drift tests; a schema test that every new field has a documented default and range (Req 7.3, 7.4)
   - [ ] 7.3 E2E on the Compose stack: structured output, fallback, replan, a tool call (Req 1 to 3, 5)
   - [ ] 7.4 Final checkpoint: the whole suite, ruff, mypy, lint-imports
