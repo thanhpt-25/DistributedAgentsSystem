@@ -78,4 +78,5 @@ def test_pyproject_registers_the_shipped_transports() -> None:
         "rabbitmq": "das.transport.rabbitmq:RabbitMQTransport",
         "grpc": "das.transport.grpc_rpc:GrpcTransport",
         "http": "das.transport.http:HttpTransport",
+        "kafka": "das.transport.kafka:KafkaTransport",
     }

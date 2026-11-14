@@ -471,6 +471,146 @@
         "title": "HttpFetchConfig",
         "type": "object"
       },
+      "KafkaConfig": {
+        "additionalProperties": false,
+        "description": "The Kafka transport's cluster (Phase 7 Req 3): bootstrap servers, security, and how topics are made. The\npasswords are secrets (``DAS__KAFKA__SASL_PASSWORD``, ``DAS__KAFKA__SSL_KEY_PASSWORD``). Needed when a transport is\n``kafka``; the protocol rules, each naming its field, are in ``cross_field_errors``.",
+        "properties": {
+          "auto_create_topics": {
+            "default": true,
+            "title": "Auto Create Topics",
+            "type": "boolean"
+          },
+          "bootstrap_servers": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Bootstrap Servers",
+            "type": "array"
+          },
+          "partitions": {
+            "default": 3,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Partitions",
+            "type": "integer"
+          },
+          "replication_factor": {
+            "default": 1,
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Replication Factor",
+            "type": "integer"
+          },
+          "retry_delay": {
+            "default": 1,
+            "maximum": 60,
+            "minimum": 0,
+            "title": "Retry Delay",
+            "type": "number"
+          },
+          "sasl_mechanism": {
+            "default": "PLAIN",
+            "title": "Sasl Mechanism",
+            "type": "string"
+          },
+          "sasl_password": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sasl Password"
+          },
+          "sasl_username": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sasl Username"
+          },
+          "security_protocol": {
+            "default": "PLAINTEXT",
+            "title": "Security Protocol",
+            "type": "string"
+          },
+          "ssl_cafile": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Ssl Cafile"
+          },
+          "ssl_certfile": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Ssl Certfile"
+          },
+          "ssl_key_password": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Ssl Key Password"
+          },
+          "ssl_keyfile": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Ssl Keyfile"
+          }
+        },
+        "required": [
+          "bootstrap_servers"
+        ],
+        "title": "KafkaConfig",
+        "type": "object"
+      },
       "LLMConfig": {
         "additionalProperties": false,
         "properties": {
@@ -1638,6 +1778,17 @@
         "title": "Http Port",
         "type": "integer"
       },
+      "kafka": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/KafkaConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
       "limits": {
         "$ref": "#/$defs/LimitsConfig"
       },
@@ -1811,6 +1962,19 @@
     "DAS__HTTP__POLL_WAIT",
     "DAS__HTTP__TOKEN",
     "DAS__HTTP__URL",
+    "DAS__KAFKA__AUTO_CREATE_TOPICS",
+    "DAS__KAFKA__BOOTSTRAP_SERVERS",
+    "DAS__KAFKA__PARTITIONS",
+    "DAS__KAFKA__REPLICATION_FACTOR",
+    "DAS__KAFKA__RETRY_DELAY",
+    "DAS__KAFKA__SASL_MECHANISM",
+    "DAS__KAFKA__SASL_PASSWORD",
+    "DAS__KAFKA__SASL_USERNAME",
+    "DAS__KAFKA__SECURITY_PROTOCOL",
+    "DAS__KAFKA__SSL_CAFILE",
+    "DAS__KAFKA__SSL_CERTFILE",
+    "DAS__KAFKA__SSL_KEYFILE",
+    "DAS__KAFKA__SSL_KEY_PASSWORD",
     "DAS__LIMITS__BASE_BACKOFF",
     "DAS__LIMITS__CAPABILITY_WAIT",
     "DAS__LIMITS__HEARTBEAT_INTERVAL",

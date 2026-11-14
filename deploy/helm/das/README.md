@@ -60,7 +60,8 @@ The chart refuses to render, and says which path, when a value would put a secre
 in `redis.url`, `rabbitmq.url`, `rabbitmq.managementUrl`, `lifecycle.preStopDrain.gatewayUrl` or anywhere under
 `config`, and any secret field of the agent configuration under `config` (`api_keys`, `admin_api_keys`,
 `webhook_secrets`, `gateway.cursor_secret`, `llm.api_key` and the other `llm.aws_*` keys, `tracing.otlp_headers`,
-`redis.password`, `redis.sentinel_password`, `http.token` and `http_broker.token`). The
+`redis.password`, `redis.sentinel_password`, `http.token`, `http_broker.token`, `kafka.sasl_password` and
+`kafka.ssl_key_password`). The
 message never repeats the value.
 
 ## Install

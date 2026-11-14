@@ -26,7 +26,7 @@ import itertools
 import re
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, ClassVar, Final
 
 import httpx
@@ -48,6 +48,7 @@ from das.transport.base import (
     TransportUnavailable,
     validate_request_reply_timeout,
 )
+from das.transport.slots import Slots
 
 log = get_logger("das.transport.http")
 
@@ -77,38 +78,6 @@ class _Token:
     id: str
     subscription: Subscription
     settled: bool = False
-
-
-@dataclass(slots=True)
-class _Slots:
-    """How many unsettled deliveries a subscription may hold: its own ``max_in_flight`` and the shared limiter's."""
-
-    max_in_flight: int | None
-    limiter: Any
-    used: int = 0
-    _freed: asyncio.Event = field(default_factory=asyncio.Event)
-
-    async def acquire_first(self) -> None:
-        while self.max_in_flight is not None and self.used >= self.max_in_flight:
-            self._freed.clear()
-            await self._freed.wait()
-        if self.limiter is not None:
-            await self.limiter.acquire()
-        self.used += 1
-
-    def try_more(self) -> bool:
-        if self.max_in_flight is not None and self.used >= self.max_in_flight:
-            return False
-        if self.limiter is not None and not self.limiter.try_acquire():
-            return False
-        self.used += 1
-        return True
-
-    def release(self) -> None:
-        self.used = max(0, self.used - 1)
-        if self.limiter is not None:
-            self.limiter.release()
-        self._freed.set()
 
 
 def _plain(name: str) -> str:
@@ -170,7 +139,7 @@ class HttpTransport:
         self._connected = False
         self._closing = False
         self._pollers: dict[int, asyncio.Task[None]] = {}
-        self._slots: dict[int, _Slots] = {}
+        self._slots: dict[int, Slots] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._reconnect_task: asyncio.Task[None] | None = None
 
@@ -308,7 +277,7 @@ class HttpTransport:
         opts = options or SubscribeOptions()
         subscription = Subscription(destination, handler, opts, on_cancel=self._unsubscribe)
         self.registry.add(subscription)
-        self._slots[subscription.id] = _Slots(opts.max_in_flight, opts.limiter)
+        self._slots[subscription.id] = Slots(opts.max_in_flight, opts.limiter)
         self._pollers[subscription.id] = asyncio.get_running_loop().create_task(self._poll(subscription))
         return subscription
 

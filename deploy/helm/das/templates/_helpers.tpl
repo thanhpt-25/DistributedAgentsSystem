@@ -213,6 +213,8 @@ redis.password
 redis.sentinel_password
 http.token
 http_broker.token
+kafka.sasl_password
+kafka.ssl_key_password
 {{- end -}}
 
 {{/*

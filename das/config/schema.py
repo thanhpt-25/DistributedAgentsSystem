@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 from urllib.parse import urlsplit
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import (
     AfterValidator,
@@ -65,6 +65,8 @@ SECRET_FIELDS: tuple[str, ...] = (
     "redis.sentinel_password",
     "http.token",
     "http_broker.token",
+    "kafka.sasl_password",
+    "kafka.ssl_key_password",
 )
 
 #: Credential fields that hold a map of named secrets. Each entry comes from
@@ -177,6 +179,58 @@ class RedisConfig(_Section):
             if _SENTINEL_ADDRESS.fullmatch(address) is None or int(address.rsplit(":", 1)[1]) > 65535:
                 raise ValueError("each sentinel must be host:port with a port from 1 to 65535")
         return v
+
+
+KAFKA_SECURITY_PROTOCOLS: Final = ("PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL")
+KAFKA_SASL_MECHANISMS: Final = ("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512")
+_FilePath = Annotated[str, Field(min_length=1, max_length=4096)]
+
+
+class KafkaConfig(_Section):
+    """The Kafka transport's cluster (Phase 7 Req 3): bootstrap servers, security, and how topics are made. The
+    passwords are secrets (``DAS__KAFKA__SASL_PASSWORD``, ``DAS__KAFKA__SSL_KEY_PASSWORD``). Needed when a transport is
+    ``kafka``; the protocol rules, each naming its field, are in ``cross_field_errors``."""
+
+    bootstrap_servers: Annotated[list[str], BeforeValidator(_split_csv), Field(min_length=1, max_length=10)]
+    security_protocol: str = "PLAINTEXT"
+    sasl_mechanism: str = "PLAIN"
+    sasl_username: Annotated[str, Field(min_length=1, max_length=256)] | None = None
+    sasl_password: SecretStr | None = None
+    #: Files for TLS: the CA that signed the brokers, and a client certificate with its key (mutual TLS).
+    ssl_cafile: _FilePath | None = None
+    ssl_certfile: _FilePath | None = None
+    ssl_keyfile: _FilePath | None = None
+    ssl_key_password: SecretStr | None = None
+    #: Topics the adapter creates (Req 3.2); ``auto_create_topics: false`` leaves that to the operator.
+    partitions: int = Field(default=3, ge=1, le=100)
+    replication_factor: int = Field(default=1, ge=1, le=5)
+    auto_create_topics: bool = True
+    #: Seconds a requeued Message waits in the retry topic before it is delivered again.
+    retry_delay: float = Field(default=1, ge=0, le=60)
+
+    @field_validator("bootstrap_servers")
+    @classmethod
+    def _servers(cls, v: list[str]) -> list[str]:
+        for address in v:
+            if _SENTINEL_ADDRESS.fullmatch(address) is None or int(address.rsplit(":", 1)[1]) > 65535:
+                raise ValueError("each bootstrap server must be host:port with a port from 1 to 65535")
+        return v
+
+    @field_validator("security_protocol")
+    @classmethod
+    def _protocol(cls, v: str) -> str:
+        protocol = v.strip().upper()
+        if protocol not in KAFKA_SECURITY_PROTOCOLS:
+            raise ValueError(f"must be one of {', '.join(KAFKA_SECURITY_PROTOCOLS)}")
+        return protocol
+
+    @field_validator("sasl_mechanism")
+    @classmethod
+    def _mechanism(cls, v: str) -> str:
+        mechanism = v.strip().upper()
+        if mechanism not in KAFKA_SASL_MECHANISMS:
+            raise ValueError(f"must be one of {', '.join(KAFKA_SASL_MECHANISMS)}")
+        return mechanism
 
 
 BrokerToken = Annotated[SecretStr, Field(min_length=16, max_length=256)]
@@ -690,6 +744,8 @@ class AgentConfig(_Section):
     #: Phase 7 Req 2: the HTTP transport's broker address and token, and the broker the Gateway serves (off by default).
     http: HttpConfig | None = None
     http_broker: HttpBrokerConfig = Field(default_factory=HttpBrokerConfig)
+    #: Phase 7 Req 3: the Kafka transport's cluster.
+    kafka: KafkaConfig | None = None
     #: Phase 6 Req 5.3: the tools a Worker enables; the default enables none.
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     #: Phase 6 Req 6.1: the Code_Worker's sandbox; off by default.
@@ -755,6 +811,10 @@ class AgentConfig(_Section):
         for broker_token in (self.http.token if self.http is not None else None, self.http_broker.token):
             if broker_token is not None:
                 values.append(broker_token.get_secret_value())
+        if self.kafka is not None:
+            values.extend(
+                s.get_secret_value() for s in (self.kafka.sasl_password, self.kafka.ssl_key_password) if s is not None
+            )
         if self.llm is not None:
             for s in (
                 self.llm.api_key,
@@ -840,6 +900,37 @@ def _http_errors(data: Mapping[str, Any], role: Any) -> list[FieldError]:
     return errors
 
 
+def _kafka_errors(data: Mapping[str, Any]) -> list[FieldError]:
+    """The Kafka rules (Phase 7 Req 3.1, 3.9): an agent that uses the transport names the cluster; a SASL protocol
+    needs its credentials, and credentials or TLS files that the chosen protocol would never use are refused rather
+    than ignored (a password set beside ``PLAINTEXT`` would mean traffic in the clear that the operator thought was
+    protected)."""
+    errors: list[FieldError] = []
+    absent = (_MISSING, None, "")
+    if _uses_transport(data, "kafka") and _lookup(data, "transports.jobs") is not _MISSING:
+        if not _section_present(data, "kafka"):
+            errors.append(FieldError("kafka", "field required when a transport is kafka (the bootstrap servers)"))
+    if not _section_present(data, "kafka"):
+        return errors
+    raw = _lookup(data, "kafka.security_protocol")
+    protocol = raw.strip().upper() if isinstance(raw, str) else "PLAINTEXT"
+    uses_sasl, uses_tls = protocol.startswith("SASL_"), protocol.endswith("SSL")
+    for name in ("sasl_username", "sasl_password"):
+        present = _lookup(data, f"kafka.{name}") not in absent
+        if uses_sasl and not present:
+            errors.append(FieldError(f"kafka.{name}", f"required when kafka.security_protocol is {protocol}"))
+        if not uses_sasl and present:
+            errors.append(
+                FieldError(f"kafka.{name}", "only allowed with kafka.security_protocol SASL_PLAINTEXT or SASL_SSL")
+            )
+    for name in ("ssl_cafile", "ssl_certfile", "ssl_keyfile", "ssl_key_password"):
+        if not uses_tls and _lookup(data, f"kafka.{name}") not in absent:
+            errors.append(FieldError(f"kafka.{name}", "only allowed with kafka.security_protocol SSL or SASL_SSL"))
+    if (_lookup(data, "kafka.ssl_certfile") in absent) != (_lookup(data, "kafka.ssl_keyfile") in absent):
+        errors.append(FieldError("kafka.ssl_keyfile", "ssl_certfile and ssl_keyfile must be set together"))
+    return errors
+
+
 def _redis_mode_errors(data: Mapping[str, Any]) -> list[FieldError]:
     """The Redis rules that depend on ``mode`` (Phase 7 Req 1.1, 1.2), each naming the field it is about.
 
@@ -904,6 +995,7 @@ def cross_field_errors(data: Mapping[str, Any]) -> list[FieldError]:
 
     errors.extend(_redis_mode_errors(data))
     errors.extend(_http_errors(data, role))
+    errors.extend(_kafka_errors(data))
 
     # Tools (Phase 6 Req 5.3, 5.9): only a Worker enables them, and http_fetch needs an allow-list.
     enabled = _valid(ToolsConfig, "enabled", _lookup(data, "tools.enabled"))

@@ -25,6 +25,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc==1.45.1",
     "opentelemetry-exporter-otlp-proto-http==1.45.1",
     "jsonschema==4.26.0",
+    "aiokafka==0.15.0",
 ]
 
 [project.scripts]
@@ -34,6 +35,7 @@ das = "das.cli:entry_point"
 rabbitmq = "das.transport.rabbitmq:RabbitMQTransport"
 grpc = "das.transport.grpc_rpc:GrpcTransport"
 http = "das.transport.http:HttpTransport"
+kafka = "das.transport.kafka:KafkaTransport"
 
 [dependency-groups]
 dev = [
@@ -102,6 +104,10 @@ enable_error_code = ["ignore-without-code"]
 module = ["das.transport.proto", "das.transport.proto.*"]  # Generated_Code (OD 3.3)
 ignore_errors = true
 
+[[tool.mypy.overrides]]
+module = ["aiokafka", "aiokafka.*"]  # ships no py.typed marker (Phase 7 Req 3.1)
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -123,6 +129,7 @@ type = "forbidden"
 source_modules = ["das.manager", "das.worker"]
 forbidden_modules = [
     "aio_pika",
+    "aiokafka",
     "aiormq",
     "pamqp",
     "grpc",

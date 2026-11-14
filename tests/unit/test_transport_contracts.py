@@ -492,9 +492,9 @@ PLUGINS = _installed_plus(
 
 
 def test_shipped_entry_points_are_installed() -> None:
-    # The installed package metadata registers rabbitmq and grpc (v1, Req 15.3) and http (Phase 7 Req 2.1);
-    # kafka joins in wave 10.
-    assert available_transports() == ["grpc", "http", "rabbitmq"]
+    # The installed package metadata registers rabbitmq and grpc (v1, Req 15.3) and http (Phase 7 Req 2.1)
+    # and kafka (Phase 7 Req 3.1).
+    assert available_transports() == ["grpc", "http", "kafka", "rabbitmq"]
 
 
 @pytest.mark.parametrize(

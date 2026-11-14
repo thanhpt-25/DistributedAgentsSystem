@@ -40,8 +40,12 @@ def job(n: int = 1, request_id: str = "r") -> TypedMessage:
     )
 
 
-async def until(condition: Callable[[], bool], timeout: float = 8.0) -> None:
-    async with asyncio.timeout(timeout):
+#: How long ``until`` waits by default; a rig on a real broker (a cold Kafka group takes seconds) raises it.
+UNTIL_TIMEOUT = 8.0
+
+
+async def until(condition: Callable[[], bool], timeout: float | None = None) -> None:
+    async with asyncio.timeout(UNTIL_TIMEOUT if timeout is None else timeout):
         while not condition():
             await asyncio.sleep(0.01)
 

@@ -98,6 +98,17 @@ count above `delivery_limit`: publish to `das.dlq` with the standard headers, th
 `das.reply.<process-uuid>` plus correlation ids. Topics are created through `AIOKafkaAdminClient` at `start` when
 `auto_create_topics` is true.
 
+What the build found, and the design accepts: topics are created on the first publish or subscribe to a destination, which
+for an agent is its startup, because destinations are dynamic (`das.jobs.<cap>` per Capability). Kafka topic names take only
+letters, digits, `.`, `_` and `-`, so `topic_for` maps `/` to `.` and any other character to `_` (the in-memory suites could not
+see this; the real broker did). Each subscription runs two consumers, one on `.high` read first and one on the main and
+`.retry` topics, in groups `das-<topic>` and `das-<topic>-high`; the high lane gets 500 ms on its first poll because a new
+consumer's first non-blocking poll returns before its first fetch. A requeued message is held in the subscriber until its
+`das-not-before` time and is delivered straight from the `.retry` topic (no republish to the main topic), and it is in the offset
+tracker from the moment it is fetched, so the commit point cannot pass it. `kafka.retry_delay` (0 to 60 s, default 1) is the delay.
+A commit that fails on a lost connection is kept and retried when the connection is back; one refused after a rebalance is dropped.
+`QueueInspector.ready_count` is not provided for Kafka (consumer lag needs the admin API and is left out of Phase 7).
+
 ## Load tests (Req 4)
 
 - `stats.py` (pure): `percentile(samples, p)` by the nearest-rank method, `summarize(samples)`, `saturation(steps, limits)`.

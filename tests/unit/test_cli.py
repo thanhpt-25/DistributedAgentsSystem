@@ -116,7 +116,7 @@ def test_missing_transport_exits_3_before_any_connection(tmp_path: Path, monkeyp
         return 0
 
     monkeypatch.setattr(cli, "run_agent", fail_run_agent)
-    cfg = worker_cfg(transports={"jobs": "kafka", "control": "grpc"})
+    cfg = worker_cfg(transports={"jobs": "carrier", "control": "grpc"})  # no such adapter installed
     assert run_main(write(tmp_path, cfg)) == EXIT_TRANSPORT_ERROR
     assert not called  # nothing constructed or connected (Req 14.4)
 
