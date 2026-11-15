@@ -165,6 +165,8 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: npm run typecheck
         run: npm run typecheck
+      - name: npm run lint
+        run: npm run lint
       - name: npm run test:coverage
         run: npm run test:coverage
       - name: npm run build

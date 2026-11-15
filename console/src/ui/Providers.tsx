@@ -115,11 +115,17 @@ const ConfirmContext = createContext<Confirm | null>(null)
 
 export function ConfirmProvider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState<Pending | null>(null)
-  const last = useRef<Pending | null>(null) // keeps the text on screen while the modal fades out
-  if (pending) last.current = pending
-  const shown = pending ?? last.current
+  const [shown, setShown] = useState<Pending | null>(null) // keeps the text on screen while the modal fades out
 
-  const confirm = useCallback<Confirm>((options) => new Promise<boolean>((resolve) => setPending({ options, resolve })), [])
+  const confirm = useCallback<Confirm>(
+    (options) =>
+      new Promise<boolean>((resolve) => {
+        const next = { options, resolve }
+        setPending(next)
+        setShown(next)
+      }),
+    [],
+  )
   const settle = (ok: boolean) => {
     pending?.resolve(ok)
     setPending(null)

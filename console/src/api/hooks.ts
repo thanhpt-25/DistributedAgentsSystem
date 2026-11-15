@@ -133,7 +133,6 @@ export function useEventFeed(requestId: string, status?: RequestStatus) {
   useEffect(() => {
     const controller = new AbortController()
     let timer: number | undefined
-    setEvents([])
     void followEvents(requestId, {
       signal: controller.signal,
       onState: setState,
@@ -147,6 +146,7 @@ export function useEventFeed(requestId: string, status?: RequestStatus) {
     return () => {
       controller.abort()
       window.clearTimeout(timer)
+      setEvents([]) // a new request, or a reopened one, starts with an empty feed
     }
   }, [requestId, queryClient, reopened])
   return { events, state }
