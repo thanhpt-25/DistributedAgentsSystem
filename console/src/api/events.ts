@@ -11,7 +11,12 @@ export type StreamState = 'connecting' | 'live' | 'reconnecting' | 'ended' | `er
 
 const TERMINAL_EVENT = /^request\.(completed|failed|cancelled)$/
 const TERMINAL_STATUS = new Set(['Completed', 'Failed', 'Cancelled'])
-const RETRY_MS = 2000
+const RETRY_BASE_MS = 2000
+const RETRY_MAX_MS = 30_000
+
+/** Wait before reconnect number `failures` (0 for the first): doubles from 2 s to a 30 s ceiling, so an outage or a
+ *  429 on the stream limit is not hammered every 2 seconds. */
+export const retryDelay = (failures: number): number => Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** failures)
 
 /**
  * Whether this frame says the Request is finished: its terminal event, or the opening `snapshot` of a Request that
@@ -87,6 +92,7 @@ interface Follow {
 /** Follow until a terminal event, a 4xx, or abort; reconnect with Last-Event-ID otherwise. */
 export async function followEvents(requestId: string, { onEvent, onState, signal }: Follow): Promise<void> {
   let lastId = ''
+  let failures = 0 // consecutive connections that delivered nothing
   const path = `/v1/requests/${encodeURIComponent(requestId)}/events`
   while (!signal.aborted) {
     try {
@@ -104,6 +110,7 @@ export async function followEvents(requestId: string, { onEvent, onState, signal
       let sawTerminal = false
       await readFrames(res.body, (frame) => {
         if (frame.id) lastId = frame.id
+        failures = 0 // the connection works: the next drop starts from the short delay again
         onEvent(frame)
         sawTerminal ||= isTerminalFrame(frame)
         return false // keep reading: the Gateway closes the stream itself, after a finished Request's stored events
@@ -116,6 +123,7 @@ export async function followEvents(requestId: string, { onEvent, onState, signal
       if (signal.aborted) return
     }
     onState?.('reconnecting')
-    await sleep(RETRY_MS, signal)
+    await sleep(retryDelay(failures), signal)
+    failures += 1
   }
 }

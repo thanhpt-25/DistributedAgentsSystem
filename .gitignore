@@ -14,6 +14,9 @@ deploy/.env
 
 # Admin console (React): dependencies; the build output is covered by dist/ above
 node_modules/
+console/coverage/
+console/test-results/
+console/playwright-report/
 
 # Local logs
 *.log

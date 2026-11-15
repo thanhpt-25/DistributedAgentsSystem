@@ -25,7 +25,7 @@ SOCKET_WORDS = re.compile(
     re.IGNORECASE,
 )
 PRIVILEGE_WORDS = re.compile(
-    r"privileged\s*:\s*[\"']?(true|yes|on|1)\b|hostPID\s*:\s*[\"']?true|hostIPC\s*:\s*[\"']?true|"
+    r"(?<![A-Za-z])privileged\s*:\s*[\"']?(true|yes|on|1)\b|hostPID\s*:\s*[\"']?true|hostIPC\s*:\s*[\"']?true|"
     r"hostNetwork\s*:\s*[\"']?true|network_mode\s*:\s*[\"']?host|\bpid\s*:\s*[\"']?host|\bipc\s*:\s*[\"']?host|"
     r"allowPrivilegeEscalation\s*:\s*[\"']?true|--privileged|seccomp[=:]\s*unconfined|apparmor[=:]\s*unconfined",
     re.IGNORECASE,
@@ -100,7 +100,8 @@ def pod_violations(spec: dict[str, Any], where: str = "pod") -> list[str]:
     "bad",
     [
         "- /var/run/docker.sock:/var/run/docker.sock", "path: /run/containerd/containerd.sock", "privileged: true",
-        "privileged: 'true'", "    privileged:  yes", "hostNetwork: true", "hostPID: true", "network_mode: host",
+        "privileged: 'true'", "    privileged:  yes", "privileged: 1", "hostNetwork: true", "hostPID: true",
+        "network_mode: host",
         "pid: host", "allowPrivilegeEscalation: true", "docker run --privileged", "DOCKER_HOST=unix:///var/run/x",
         "security_opt: [seccomp=unconfined]", "path: /var/run/podman/podman.sock",
     ],
@@ -112,7 +113,9 @@ def test_the_text_detector_flags_every_known_way_of_handing_over_the_host(bad: s
 @pytest.mark.parametrize(
     "fine",
     ["privileged: false", "hostNetwork: false", "allowPrivilegeEscalation: false", "network_mode: bridge",
-     "image: python:3.12", "# the sandbox never mounts a thing", "readOnlyRootFilesystem: true"],
+     "image: python:3.12", "# the sandbox never mounts a thing", "readOnlyRootFilesystem: true",
+     # The word "privileged" inside another word is not a setting: this image is what lets the console run as non-root.
+     "FROM nginxinc/nginx-unprivileged:1.27-alpine"],
 )
 def test_the_text_detector_does_not_flag_ordinary_settings(fine: str) -> None:
     assert not text_violations(fine)

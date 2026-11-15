@@ -148,7 +148,7 @@ jobs:
   console:
     name: Console_Job
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: console
@@ -165,10 +165,22 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: npm run typecheck
         run: npm run typecheck
-      - name: npm test
-        run: npm test
+      - name: npm run test:coverage
+        run: npm run test:coverage
       - name: npm run build
         run: npm run build
+      # The browser tests run against the production build, served by a mock Gateway (console/e2e/mock-gateway.mjs).
+      - name: Install the browser
+        run: npm run e2e:install
+      - name: npm run e2e
+        run: npm run e2e
+      - name: Upload Playwright traces
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: console-e2e-traces-${{ github.run_id }}-${{ github.run_attempt }}
+          path: console/test-results
+          if-no-files-found: ignore
 
   integration:
     name: Integration_Job
