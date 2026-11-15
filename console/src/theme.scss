@@ -1,0 +1,144 @@
+// CoreUI with DAS's identity: warm paper, ink, one vermilion accent. Sass variables are set before the import (compile
+// time); per-colour-mode surfaces are plain CSS variables after it, so the light/dark switch needs no recompile.
+$primary: #d4532b;
+$secondary: #7a7468;
+$success: #2f8f5b;
+$info: #3b6fb6;
+$warning: #d99a1f;
+$danger: #c93a2c;
+$light: #f1ece1;
+$dark: #26211b;
+$font-family-sans-serif: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+$font-family-monospace: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+$font-size-base: 0.9375rem;
+$border-radius: 0.25rem;
+$border-radius-lg: 0.3rem;
+$body-bg: #f6f2ea;
+$body-color: #26211b;
+
+@import '@coreui/coreui/scss/coreui';
+
+:root,
+[data-coreui-theme='light'] {
+  --das-surface: #fffdf8;
+  --das-sunken: #efe9dc;
+  --das-rule: #e0d9c9;
+}
+
+[data-coreui-theme='dark'] {
+  // CoreUI derives its dark palette from a bluish grey; DAS keeps the warm ink instead.
+  --cui-body-bg: #1b1813;
+  --cui-body-bg-rgb: 27, 24, 19;
+  --cui-body-color: #ece6da;
+  --cui-body-color-rgb: 236, 230, 218;
+  --cui-secondary-color: rgb(236 230 218 / 65%);
+  --cui-tertiary-bg: #24201a;
+  --cui-border-color: #3a342b;
+  --das-surface: #24201a;
+  --das-sunken: #16130e;
+  --das-rule: #3a342b;
+}
+
+.card {
+  --cui-card-bg: var(--das-surface);
+  --cui-card-border-color: var(--das-rule);
+  --cui-card-cap-bg: transparent;
+  box-shadow: 0 1px 0 var(--das-rule), 0 12px 24px -20px rgb(40 30 20 / 35%);
+}
+
+.sidebar {
+  --cui-sidebar-bg: #26211b;
+  --cui-sidebar-brand-bg: #1d1913;
+  --cui-sidebar-header-bg: #1d1913;
+  --cui-sidebar-nav-link-active-bg: rgb(212 83 43 / 20%);
+  --cui-sidebar-nav-link-active-color: #fff;
+  --cui-sidebar-nav-link-active-icon-color: #ff8a63;
+}
+
+// The page column next to the fixed sidebar. CoreUI sets --cui-sidebar-occupy-* on the sidebar's siblings; the
+// admin template's own stylesheet (not the core CSS) turns them into padding, so it is repeated here.
+.wrapper {
+  width: 100%;
+  padding-inline: var(--cui-sidebar-occupy-start, 0) var(--cui-sidebar-occupy-end, 0);
+  transition: padding-inline 0.15s;
+}
+
+.mono { font-family: var(--cui-font-monospace); font-size: 0.92em; }
+
+.brand-mark {
+  font: 600 2rem/1 var(--cui-font-monospace);
+  letter-spacing: -0.05em;
+
+  span { color: var(--cui-primary); }
+}
+
+.sidebar .brand-mark { font-size: 1.4rem; color: #fff; }
+
+.login-page { background: var(--cui-body-bg); }
+
+// Eyebrow labels and table heads: small mono caps, the hierarchy comes from scale contrast against the figures.
+.eyebrow,
+.table > thead th {
+  font: 500 0.72rem/1.2 var(--cui-font-monospace);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--cui-secondary-color);
+}
+
+.card-header h2 {
+  margin: 0;
+  font: 600 0.8rem/1.2 var(--cui-font-monospace);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--cui-secondary-color);
+}
+
+.stat-card {
+  border-inline-start: 4px solid var(--cui-secondary);
+
+  &.tone-success { border-inline-start-color: var(--cui-success); }
+  &.tone-info { border-inline-start-color: var(--cui-info); }
+  &.tone-warning { border-inline-start-color: var(--cui-warning); }
+  &.tone-danger { border-inline-start-color: var(--cui-danger); }
+
+  .stat-value { font: 600 clamp(1.8rem, 1.4rem + 1.2vw, 2.6rem)/1.05 var(--cui-font-monospace); letter-spacing: -0.04em; }
+}
+
+.click-row { cursor: pointer; }
+
+.id-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-family: var(--cui-font-monospace);
+  font-size: 0.92em;
+  text-decoration: underline dotted;
+  white-space: nowrap;
+  cursor: copy;
+}
+
+.feed {
+  max-height: 18rem;
+  overflow: auto;
+  font: 0.78rem/1.55 var(--cui-font-monospace);
+
+  div { padding: 0.15rem 0; border-bottom: 1px dashed var(--das-rule); overflow-wrap: anywhere; }
+  b { color: var(--cui-primary); font-weight: 500; }
+}
+
+pre.block {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  max-height: 24rem;
+  overflow: auto;
+  background: var(--das-sunken);
+  border-radius: var(--cui-border-radius);
+  font: 0.8rem/1.5 var(--cui-font-monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

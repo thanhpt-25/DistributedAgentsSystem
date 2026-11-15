@@ -12,6 +12,9 @@ build/
 # Local compose secrets (copy of deploy/.env.example)
 deploy/.env
 
+# Admin console (React): dependencies; the build output is covered by dist/ above
+node_modules/
+
 # Local logs
 *.log
 
