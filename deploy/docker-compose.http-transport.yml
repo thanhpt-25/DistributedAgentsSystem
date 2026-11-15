@@ -12,8 +12,10 @@ x-http-env: &http-env
   DAS__TRANSPORTS__JOBS: http
   DAS__HTTP__URL: http://gateway:8081
   DAS__HTTP__TOKEN: ${DAS_HTTP_BROKER_TOKEN:?set DAS_HTTP_BROKER_TOKEN in deploy/.env}
-  DAS__RABBITMQ__URL: !reset null
-  DAS__RABBITMQ__MANAGEMENT_URL: !reset null
+  # Empty entries unset the two RabbitMQ variables in the container (see x-sentinel-env in docker-compose.sentinel.yml for
+  # why this is not `!reset null`: Compose 2.38 keeps the base value for that tag inside an `environment:` mapping).
+  DAS__RABBITMQ__URL:
+  DAS__RABBITMQ__MANAGEMENT_URL:
 
 x-http-deps: &http-deps
   gateway:
