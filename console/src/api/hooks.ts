@@ -74,7 +74,7 @@ export function useRequestPage(status: RequestStatus | undefined, limit: number)
 export const useRequest = (id: string) =>
   useQuery({
     queryKey: ['request', id],
-    queryFn: ({ signal }) => api<RequestView>(`/v1/requests/${encodeURIComponent(id)}`, { signal }),
+    queryFn: ({ signal }) => api<RequestView>(`/v1/requests/${encodeURIComponent(id)}?detail=true`, { signal }),
     refetchInterval: POLL_MS,
   })
 

@@ -33,6 +33,7 @@ test('shows a request with its result, and follows it live until it finishes', a
   await signIn(page, OPERATOR)
   await page.goto('/#/requests/r-done')
   await expect(page.getByText('Answer from the stub.')).toBeVisible()
+  await expect(page.getByText('Worker answer j1', { exact: true })).toBeVisible() // each worker's own result, not only the summary
   await expect(page.getByRole('log', { name: 'Live events' })).toContainText('request.completed')
   await expect(page.getByText('ended')).toBeVisible() // the stream stops by itself once the request is finished
 })
