@@ -1,0 +1,17 @@
+I am designing a job-queue service and need three things:
+1. Research: compare the Raft and Paxos consensus algorithms for leader election in a 5-node cluster. Cover failure handling, understandability, and real-world usage, and say which suits a small team.
+2. Code review: review this Python snippet for concurrency bugs and propose a fix.
+```python
+import threading
+counter = 0
+cache = {}
+def handle(req_id):
+    global counter
+    if req_id not in cache:
+        cache[req_id] = expensive(req_id)
+    counter += 1
+    return cache[req_id]
+for i in range(100):
+    threading.Thread(target=handle, args=(i % 10,)).start()
+```
+3. Summarize: combine the findings into a short recommendation memo with three action items.

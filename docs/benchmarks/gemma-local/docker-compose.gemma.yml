@@ -1,0 +1,18 @@
+# Override for deploy/docker-compose.yml: every Manager and Worker calls a host Ollama running gemma4:e4b.
+# Run from the repo root (see ../gemma-local.md):
+#   docker compose --project-directory deploy -p das-gemma --env-file docs/benchmarks/gemma-local/gemma.env.example \
+#     -f deploy/docker-compose.yml -f docs/benchmarks/gemma-local/docker-compose.gemma.yml up -d --no-build
+x-gemma-env: &gemma-env
+  DAS__LLM__PROVIDER: ollama
+  DAS__LLM__MODEL: gemma4:e4b
+  DAS__LLM__BASE_URL: http://host.docker.internal:11434
+  # A local model writing ~2000 tokens needs more than the 60 s default per call.
+  DAS__LLM__TIMEOUT: "300"
+  DAS__LIMITS__JOB_TIMEOUT: "600"
+services:
+  manager:
+    environment: *gemma-env
+  worker-research:
+    environment: *gemma-env
+  worker-review:
+    environment: *gemma-env

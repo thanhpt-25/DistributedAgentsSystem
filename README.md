@@ -27,6 +27,8 @@ docker compose -f deploy/docker-compose.yml --profile ollama up -d
 docker compose -f deploy/docker-compose.yml exec ollama ollama pull llama3.2
 ```
 
+A measured run with a local Gemma model, and how to reproduce it, is in [`docs/benchmarks/gemma-local.md`](docs/benchmarks/gemma-local.md).
+
 Stop everything with `docker compose -f deploy/docker-compose.yml down` (add `-v` to delete data).
 
 ## Observability stack (Prometheus, Grafana, Jaeger)
@@ -748,6 +750,19 @@ With none of the new configuration set, nothing changes: every response, message
 - **Redis Cluster.** The State_Store scripts update keys in different slots at once; Sentinel gives availability, not sharding.
 - **Multi-region.** One Redis (with its replicas) and one broker; nothing replicates between regions.
 - **Exactly-once delivery.** Every Transport is at-least-once with idempotent handling: a Message may be delivered again, and the reducer discards the duplicate.
+
+## Running on a local model: measured, and where you can help
+
+We ran the Compose stack against a real local model (`gemma4:e4b` in host Ollama), with one request and with three at once. **One machine, one run per setting, not a guarantee**; the full report, raw data and reproduction steps are in [`docs/benchmarks/gemma-local.md`](docs/benchmarks/gemma-local.md).
+
+| Run | Result |
+|---|---|
+| 1 request, multi-part prompt (research, code review, memo) | planned into 3 Jobs, `Completed` in **248 s**, 0 failures |
+| 3 requests at once | all `Completed` in **805 s**, 0 failures, 0 retries: about the same as three in a row (744 s) |
+
+The Gateway accepted each submit in 25 to 28 ms; the single local model was the bottleneck, so extra Managers and Workers would not have helped. The output was correct, apart from a memo header with an invented date (nothing passes the current date to the model).
+
+Open questions this raised, each small enough to try in an afternoon: why concurrency gave no speedup (`OLLAMA_NUM_PARALLEL`, or a hosted provider); a cap on concurrent LLM calls; giving agents the current date; the HTTP transport's ceiling above 10 requests per second; how much plans vary between identical prompts. The [report](docs/benchmarks/gemma-local.md#where-you-can-help) lists them with context. If a number does not reproduce on your machine, open an issue with your hardware, model and the `--out` JSON.
 
 ## Configuration
 

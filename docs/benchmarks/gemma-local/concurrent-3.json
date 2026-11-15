@@ -1,0 +1,630 @@
+{
+ "done_s": {
+  "cfcf5011-f6c1-43e0-85e1-31c96baac7da": 654.3,
+  "4fa14b2f-c178-4ec7-8c9c-0bf91f5cadea": 763.2,
+  "ddb956b4-834c-42c2-bda9-bfcdb1ddf923": 802.4
+ },
+ "bodies": {
+  "cfcf5011-f6c1-43e0-85e1-31c96baac7da": {
+   "request_id": "cfcf5011-f6c1-43e0-85e1-31c96baac7da",
+   "status": "Completed",
+   "priority": "normal",
+   "replans": 0,
+   "jobs": [
+    {
+     "job_id": "compare_consensus",
+     "state": "Succeeded"
+    },
+    {
+     "job_id": "review_python_code",
+     "state": "Succeeded"
+    },
+    {
+     "job_id": "generate_memo",
+     "state": "Succeeded"
+    }
+   ],
+   "transitions": [
+    {
+     "job_id": "compare_consensus",
+     "from_state": null,
+     "to_state": "Waiting",
+     "attempt": 0,
+     "worker_id": null,
+     "at": "2026-11-15T08:25:53.863000Z"
+    },
+    {
+     "job_id": "review_python_code",
+     "from_state": null,
+     "to_state": "Waiting",
+     "attempt": 0,
+     "worker_id": null,
+     "at": "2026-11-15T08:25:53.863000Z"
+    },
+    {
+     "job_id": "generate_memo",
+     "from_state": null,
+     "to_state": "Waiting",
+     "attempt": 0,
+     "worker_id": null,
+     "at": "2026-11-15T08:25:53.863000Z"
+    },
+    {
+     "job_id": "compare_consensus",
+     "from_state": "Waiting",
+     "to_state": "Ready",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:25:53.873000Z"
+    },
+    {
+     "job_id": "review_python_code",
+     "from_state": "Waiting",
+     "to_state": "Ready",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:25:53.873000Z"
+    },
+    {
+     "job_id": "compare_consensus",
+     "from_state": "Ready",
+     "to_state": "Dispatched",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:25:53.890000Z"
+    },
+    {
+     "job_id": "review_python_code",
+     "from_state": "Ready",
+     "to_state": "Dispatched",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:25:53.891000Z"
+    },
+    {
+     "job_id": "compare_consensus",
+     "from_state": "Dispatched",
+     "to_state": "Succeeded",
+     "attempt": 1,
+     "worker_id": "worker-b2b43d588d29-5ad168ac",
+     "at": "2026-11-15T08:28:03.473000Z"
+    },
+    {
+     "job_id": "review_python_code",
+     "from_state": "Dispatched",
+     "to_state": "Succeeded",
+     "attempt": 1,
+     "worker_id": "worker-e41ef41c5f03-be9cc359",
+     "at": "2026-11-15T08:29:07.679000Z"
+    },
+    {
+     "job_id": "generate_memo",
+     "from_state": "Waiting",
+     "to_state": "Ready",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:29:07.679000Z"
+    },
+    {
+     "job_id": "generate_memo",
+     "from_state": "Ready",
+     "to_state": "Dispatched",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:29:07.702000Z"
+    },
+    {
+     "job_id": "generate_memo",
+     "from_state": "Dispatched",
+     "to_state": "Succeeded",
+     "attempt": 1,
+     "worker_id": "worker-b2b43d588d29-5ad168ac",
+     "at": "2026-11-15T08:32:42.377000Z"
+    }
+   ],
+   "final_result": {
+    "summary": "**MEMORANDUM**\n\n**TO:** Engineering Lead, Development Team\n**FROM:** Technical Analysis Agent\n**DATE:** October 26, 2023\n**SUBJECT:** Technical Recommendations: Consensus Protocol Selection and Concurrency Best Practices for Job-Queue Service\n\n***\n\n### Executive Summary\n\nThis memo synthesizes findings regarding distributed consensus protocols and concurrent code quality. For our job-queue service, the primary recommendation is to adopt **Raft** for leader election due to its superior understandability and reduced implementation risk. Furthermore, all concurrent code must strictly adhere to synchronization best practices to prevent critical race conditions.\n\n### Key Findings\n\n**1. Consensus Protocol Comparison (Raft vs. Paxos)**\nBoth Raft and Paxos are designed to ensure a 5-node cluster maintains a quorum of 3 nodes and agrees on a single leader.\n\n*   **Raft:** Raft is explicitly designed for understandability. Its clear state machine (Follower $\\rightarrow$ Candidate $\\rightarrow$ Leader) makes failure handling highly deterministic and predictable. It is widely used in modern systems like etcd and Consul.\n*   **Paxos:** Paxos is theoretically robust but notoriously complex. Its multi-phase commit process and abstract proposal logic create a steep learning curve and increase the risk of subtle, hard-to-debug bugs.\n\n**Recommendation for a Small Team:** Raft is the overwhelmingly superior choice. For a small, resource-constrained team, Raft\u2019s simplicity drastically reduces development time, minimizes the surface area for bugs, and allows for faster onboarding compared to the complexity of Paxos.\n\n**2. Concurrency Code Review**\nThe reviewed Python snippet demonstrated critical vulnerabilities related to shared global state. The original code suffered from two major **race conditions**:\n\n*   **Lost Updates:** The operation `counter += 1` is a read-modify-write sequence that is not atomic, meaning multiple threads could read the same value and overwrite each other's updates, leading to an incorrect final count.\n*   **Non-Atomic Logic:** The cache check (`if req_id not in cache:`) and subsequent write are not atomic. This can lead to redundant computation or inconsistent state if multiple threads check for the same key simultaneously.\n\n**Proposed Fix:** The solution requires using a `threading.Lock` to protect all critical sections. By wrapping the cache access and the counter increment within a lock, we ensure that only one thread can execute the shared logic at a time, making the operations atomic and guaranteeing data integrity.\n\n### Action Items\n\nBased on these findings, the following three actions must be implemented immediately to ensure the stability and maintainability of our system:\n\n**1. Standardize on Raft for Consensus:**\nFormally adopt Raft as the consensus protocol for leader election and state replication. This decision minimizes implementation risk and allows the team to focus development efforts on business logic rather than complex distributed theory.\n\n**2. Enforce Synchronization Primitives:**\nAll new code involving shared global state (variables, caches, counters) must be wrapped in explicit synchronization mechanisms, such as `threading.Lock` or equivalent atomic operations. The pattern of reading, modifying, and writing back a shared value must always be treated as a single, atomic critical section.\n\n**3. Implement Mandatory Concurrency Code Review:**\nGiven the severity of concurrency bugs, all code touching shared state must undergo a mandatory, specialized code review. Reviewers must specifically validate the atomicity of read-modify-write operations and verify that all critical sections are properly protected by locks.",
+    "jobs": [
+     {
+      "job_id": "compare_consensus",
+      "state": "Succeeded",
+      "worker_id": "worker-b2b43d588d29-5ad168ac",
+      "input_tokens": 91,
+      "output_tokens": 2098
+     },
+     {
+      "job_id": "review_python_code",
+      "state": "Succeeded",
+      "worker_id": "worker-e41ef41c5f03-be9cc359",
+      "input_tokens": 164,
+      "output_tokens": 2179
+     },
+     {
+      "job_id": "generate_memo",
+      "state": "Succeeded",
+      "worker_id": "worker-b2b43d588d29-5ad168ac",
+      "input_tokens": 2545,
+      "output_tokens": 1169
+     }
+    ],
+    "failures": [],
+    "summarizer_usage": {
+     "input_tokens": 3290,
+     "output_tokens": 1385,
+     "total_tokens": 4675
+    },
+    "error": null
+   },
+   "token_usage": {
+    "total": {
+     "input_tokens": 6925,
+     "output_tokens": 7768,
+     "total_tokens": 14693
+    },
+    "by_operation": {
+     "plan": {
+      "input_tokens": 835,
+      "output_tokens": 937,
+      "total_tokens": 1772
+     },
+     "job": {
+      "input_tokens": 2800,
+      "output_tokens": 5446,
+      "total_tokens": 8246
+     },
+     "summarize": {
+      "input_tokens": 3290,
+      "output_tokens": 1385,
+      "total_tokens": 4675
+     }
+    },
+    "by_model": [
+     {
+      "provider": "ollama",
+      "model": "gemma4:e4b",
+      "usage": {
+       "input_tokens": 6925,
+       "output_tokens": 7768,
+       "total_tokens": 14693
+      }
+     }
+    ],
+    "by_job": {
+     "compare_consensus": {
+      "input_tokens": 91,
+      "output_tokens": 2098,
+      "total_tokens": 2189
+     },
+     "review_python_code": {
+      "input_tokens": 164,
+      "output_tokens": 2179,
+      "total_tokens": 2343
+     },
+     "generate_memo": {
+      "input_tokens": 2545,
+      "output_tokens": 1169,
+      "total_tokens": 3714
+     }
+    }
+   },
+   "estimated_cost": null,
+   "replay_history": [],
+   "budget": null,
+   "webhook": null
+  },
+  "ddb956b4-834c-42c2-bda9-bfcdb1ddf923": {
+   "request_id": "ddb956b4-834c-42c2-bda9-bfcdb1ddf923",
+   "status": "Completed",
+   "priority": "normal",
+   "replans": 0,
+   "jobs": [
+    {
+     "job_id": "compare_consensus",
+     "state": "Succeeded"
+    },
+    {
+     "job_id": "review_python_concurrency",
+     "state": "Succeeded"
+    },
+    {
+     "job_id": "generate_recommendation",
+     "state": "Succeeded"
+    }
+   ],
+   "transitions": [
+    {
+     "job_id": "compare_consensus",
+     "from_state": null,
+     "to_state": "Waiting",
+     "attempt": 0,
+     "worker_id": null,
+     "at": "2026-11-15T08:26:28.190000Z"
+    },
+    {
+     "job_id": "review_python_concurrency",
+     "from_state": null,
+     "to_state": "Waiting",
+     "attempt": 0,
+     "worker_id": null,
+     "at": "2026-11-15T08:26:28.190000Z"
+    },
+    {
+     "job_id": "generate_recommendation",
+     "from_state": null,
+     "to_state": "Waiting",
+     "attempt": 0,
+     "worker_id": null,
+     "at": "2026-11-15T08:26:28.190000Z"
+    },
+    {
+     "job_id": "compare_consensus",
+     "from_state": "Waiting",
+     "to_state": "Ready",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:26:28.199000Z"
+    },
+    {
+     "job_id": "review_python_concurrency",
+     "from_state": "Waiting",
+     "to_state": "Ready",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:26:28.199000Z"
+    },
+    {
+     "job_id": "compare_consensus",
+     "from_state": "Ready",
+     "to_state": "Dispatched",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:26:28.215000Z"
+    },
+    {
+     "job_id": "review_python_concurrency",
+     "from_state": "Ready",
+     "to_state": "Dispatched",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:26:28.216000Z"
+    },
+    {
+     "job_id": "review_python_concurrency",
+     "from_state": "Dispatched",
+     "to_state": "Succeeded",
+     "attempt": 1,
+     "worker_id": "worker-e41ef41c5f03-be9cc359",
+     "at": "2026-11-15T08:30:11.924000Z"
+    },
+    {
+     "job_id": "compare_consensus",
+     "from_state": "Dispatched",
+     "to_state": "Succeeded",
+     "attempt": 1,
+     "worker_id": "worker-b2b43d588d29-5ad168ac",
+     "at": "2026-11-15T08:31:24.807000Z"
+    },
+    {
+     "job_id": "generate_recommendation",
+     "from_state": "Waiting",
+     "to_state": "Ready",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:31:24.807000Z"
+    },
+    {
+     "job_id": "generate_recommendation",
+     "from_state": "Ready",
+     "to_state": "Dispatched",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:31:24.835000Z"
+    },
+    {
+     "job_id": "generate_recommendation",
+     "from_state": "Dispatched",
+     "to_state": "Succeeded",
+     "attempt": 1,
+     "worker_id": "worker-b2b43d588d29-5ad168ac",
+     "at": "2026-11-15T08:33:30.200000Z"
+    }
+   ],
+   "final_result": {
+    "summary": "## MEMORANDUM\n\n**TO:** Engineering Lead, Distributed Systems\n**FROM:** Worker Agent\n**DATE:** October 26, 2023\n**SUBJECT:** Design Recommendations for Job-Queue Service: Consensus and Concurrency Mitigation\n\n---\n\n### Executive Summary\n\nThis memo synthesizes findings from the consensus algorithm comparison (Raft vs. Paxos) and the Python concurrency code review. The job-queue service requires both strong consistency guarantees and robust handling of shared state.\n\nThe key takeaway is that **Raft** is the optimal consensus mechanism for our team due to its superior understandability and lower implementation risk compared to Paxos. Furthermore, all interactions with shared state (e.g., job counters, status caches) must be rigorously protected using explicit synchronization primitives to prevent race conditions.\n\nBased on these findings, I recommend the following three distinct, actionable items for the job-queue service design.\n\n### Key Technical Takeaways\n\n1.  **Consensus Choice:** Raft is the recommended consensus algorithm. It provides the necessary safety and liveness guarantees while offering a clear, structured state machine that minimizes development overhead and debugging complexity for a small team.\n2.  **Concurrency Risk:** The service must assume a multi-threaded environment where multiple workers access shared resources simultaneously. Failure to protect critical sections will lead to lost updates, inconsistent job counts, and redundant computation.\n3.  **Implementation Strategy:** We must prioritize utilizing battle-tested, external libraries for complex logic (like consensus) and implementing internal state access using explicit locking mechanisms.\n\n### \ud83d\ude80 Three Actionable Design Recommendations\n\n#### 1. Implement Consensus via Library Abstraction (Raft)\nThe job-queue service must use a Raft-based library (e.g., etcd client, Consul client) to manage the authoritative state (e.g., the list of active jobs, job ownership, and service configuration).\n\n*   **Action:** Do not attempt to implement the Raft protocol from scratch. Abstract the consensus logic entirely behind a dedicated client library.\n*   **Benefit:** This immediately mitigates the highest risk factor\u2014the complexity of distributed consensus\u2014allowing the team to focus on job-specific business logic rather than protocol mechanics.\n\n#### 2. Enforce Atomic Operations on Shared State (Locking)\nAny component that reads, modifies, or checks a shared, mutable resource (e.g., a global job counter, a job status cache, or a job assignment map) must wrap its logic in a synchronization lock.\n\n*   **Action:** Implement a centralized `StateStore` module that wraps all shared data structures (like Python dictionaries or counters) using `threading.Lock` context managers (`with lock:`).\n*   **Benefit:** This guarantees that the read-modify-write cycle is atomic, eliminating race conditions, lost updates, and ensuring that job counts and status updates are always consistent, regardless of thread interleaving.\n\n#### 3. Isolate State Management from Business Logic (Separation of Concerns)\nThe job-queue service should be architected with a clear separation between the *Consensus Layer* (the source of truth) and the *Worker/Business Logic Layer* (the code that processes jobs).\n\n*   **Action:** Design the service such that the core job processing logic only interacts with the `StateStore` interface. The `StateStore` is responsible for communicating with the Raft client and applying necessary locks.\n*   **Benefit:** This modularity ensures that if the underlying consensus mechanism needs to be swapped or updated, the core job processing logic remains untouched, drastically improving maintainability and testability.",
+    "jobs": [
+     {
+      "job_id": "compare_consensus",
+      "state": "Succeeded",
+      "worker_id": "worker-b2b43d588d29-5ad168ac",
+      "input_tokens": 108,
+      "output_tokens": 2486
+     },
+     {
+      "job_id": "review_python_concurrency",
+      "state": "Succeeded",
+      "worker_id": "worker-e41ef41c5f03-be9cc359",
+      "input_tokens": 182,
+      "output_tokens": 2203
+     },
+     {
+      "job_id": "generate_recommendation",
+      "state": "Succeeded",
+      "worker_id": "worker-b2b43d588d29-5ad168ac",
+      "input_tokens": 2961,
+      "output_tokens": 1456
+     }
+    ],
+    "failures": [],
+    "summarizer_usage": {
+     "input_tokens": 3892,
+     "output_tokens": 1361,
+     "total_tokens": 5253
+    },
+    "error": null
+   },
+   "token_usage": {
+    "total": {
+     "input_tokens": 7978,
+     "output_tokens": 8677,
+     "total_tokens": 16655
+    },
+    "by_operation": {
+     "plan": {
+      "input_tokens": 835,
+      "output_tokens": 1171,
+      "total_tokens": 2006
+     },
+     "job": {
+      "input_tokens": 3251,
+      "output_tokens": 6145,
+      "total_tokens": 9396
+     },
+     "summarize": {
+      "input_tokens": 3892,
+      "output_tokens": 1361,
+      "total_tokens": 5253
+     }
+    },
+    "by_model": [
+     {
+      "provider": "ollama",
+      "model": "gemma4:e4b",
+      "usage": {
+       "input_tokens": 7978,
+       "output_tokens": 8677,
+       "total_tokens": 16655
+      }
+     }
+    ],
+    "by_job": {
+     "compare_consensus": {
+      "input_tokens": 108,
+      "output_tokens": 2486,
+      "total_tokens": 2594
+     },
+     "review_python_concurrency": {
+      "input_tokens": 182,
+      "output_tokens": 2203,
+      "total_tokens": 2385
+     },
+     "generate_recommendation": {
+      "input_tokens": 2961,
+      "output_tokens": 1456,
+      "total_tokens": 4417
+     }
+    }
+   },
+   "estimated_cost": null,
+   "replay_history": [],
+   "budget": null,
+   "webhook": null
+  },
+  "4fa14b2f-c178-4ec7-8c9c-0bf91f5cadea": {
+   "request_id": "4fa14b2f-c178-4ec7-8c9c-0bf91f5cadea",
+   "status": "Completed",
+   "priority": "normal",
+   "replans": 0,
+   "jobs": [
+    {
+     "job_id": "research_consensus",
+     "state": "Succeeded"
+    },
+    {
+     "job_id": "review_python_concurrency",
+     "state": "Succeeded"
+    },
+    {
+     "job_id": "generate_memo",
+     "state": "Succeeded"
+    }
+   ],
+   "transitions": [
+    {
+     "job_id": "research_consensus",
+     "from_state": null,
+     "to_state": "Waiting",
+     "attempt": 0,
+     "worker_id": null,
+     "at": "2026-11-15T08:27:02.162000Z"
+    },
+    {
+     "job_id": "review_python_concurrency",
+     "from_state": null,
+     "to_state": "Waiting",
+     "attempt": 0,
+     "worker_id": null,
+     "at": "2026-11-15T08:27:02.162000Z"
+    },
+    {
+     "job_id": "generate_memo",
+     "from_state": null,
+     "to_state": "Waiting",
+     "attempt": 0,
+     "worker_id": null,
+     "at": "2026-11-15T08:27:02.162000Z"
+    },
+    {
+     "job_id": "research_consensus",
+     "from_state": "Waiting",
+     "to_state": "Ready",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:27:02.167000Z"
+    },
+    {
+     "job_id": "review_python_concurrency",
+     "from_state": "Waiting",
+     "to_state": "Ready",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:27:02.167000Z"
+    },
+    {
+     "job_id": "research_consensus",
+     "from_state": "Ready",
+     "to_state": "Dispatched",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:27:02.179000Z"
+    },
+    {
+     "job_id": "review_python_concurrency",
+     "from_state": "Ready",
+     "to_state": "Dispatched",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:27:02.179000Z"
+    },
+    {
+     "job_id": "research_consensus",
+     "from_state": "Dispatched",
+     "to_state": "Succeeded",
+     "attempt": 1,
+     "worker_id": "worker-b2b43d588d29-5ad168ac",
+     "at": "2026-11-15T08:34:27.491000Z"
+    },
+    {
+     "job_id": "review_python_concurrency",
+     "from_state": "Dispatched",
+     "to_state": "Succeeded",
+     "attempt": 1,
+     "worker_id": "worker-e41ef41c5f03-be9cc359",
+     "at": "2026-11-15T08:35:25.087000Z"
+    },
+    {
+     "job_id": "generate_memo",
+     "from_state": "Waiting",
+     "to_state": "Ready",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:35:25.087000Z"
+    },
+    {
+     "job_id": "generate_memo",
+     "from_state": "Ready",
+     "to_state": "Dispatched",
+     "attempt": 1,
+     "worker_id": null,
+     "at": "2026-11-15T08:35:25.099000Z"
+    },
+    {
+     "job_id": "generate_memo",
+     "from_state": "Dispatched",
+     "to_state": "Succeeded",
+     "attempt": 1,
+     "worker_id": "worker-b2b43d588d29-5ad168ac",
+     "at": "2026-11-15T08:36:56.875000Z"
+    }
+   ],
+   "final_result": {
+    "summary": "## MEMORANDUM\n\n**TO:** Engineering Leadership Team\n**FROM:** Worker Agent\n**DATE:** October 26, 2023\n**SUBJECT:** Architectural Recommendations: Consensus Implementation and Concurrency Safety\n\n### \ud83d\udcdd Executive Summary\n\nThis memo synthesizes findings from the consensus algorithm comparison (Raft vs. Paxos) and the Python concurrency review. The core recommendation is to prioritize **developer simplicity and maintainability** across both distributed and local state management. For consensus, Raft is the clear choice. For local concurrency, strict adherence to atomic operations using locks is mandatory.\n\n### \ud83d\udd0d Key Findings Synthesis\n\n**1. Consensus Layer (Raft vs. Paxos):**\nWhile Paxos is theoretically robust, its complexity poses an unacceptable risk and time sink for a small, fast-moving team. Raft provides sufficient, battle-tested robustness while offering a significantly clearer, state-machine model. Its high adoption rate (etcd, Consul) ensures abundant community support and reduces implementation risk.\n\n**2. Concurrency Layer (Python Review):**\nThe review highlighted critical race conditions in handling shared mutable state (`cache` and `counter`). These bugs stem from non-atomic operations (e.g., Check-Then-Act, Read-Modify-Write). The fix requires wrapping all critical sections with synchronization primitives, specifically `threading.Lock`, to guarantee that operations execute as a single, uninterrupted unit.\n\n**Conclusion:** Both domains\u2014distributed state and local state\u2014require a focus on **simplicity, clarity, and guaranteed atomicity** to ensure system reliability and development velocity.\n\n### \ud83d\ude80 Action Items\n\nBased on these findings, I recommend the following three distinct actions:\n\n**1. Adopt Raft for Consensus:**\nImmediately select Raft as the consensus algorithm for all new distributed state management components. This decision minimizes the cognitive load on the team, accelerates development, and leverages the vast ecosystem of battle-tested Raft implementations (e.g., using existing libraries for etcd or Consul patterns).\n\n**2. Enforce Atomic Operations via Locking:**\nMandate the use of synchronization primitives (`threading.Lock` or equivalent) for *all* code sections that read or write shared, mutable resources (dictionaries, counters, global variables). Code reviews must explicitly check for the presence of locks around critical sections to prevent race conditions and non-atomic updates.\n\n**3. Standardize Concurrency Review Checklists:**\nUpdate the team's coding standards and pull request checklists to include a mandatory \"Concurrency Safety\" review step. This checklist must guide developers to identify potential shared state access points and verify that the necessary locking mechanisms are in place, treating concurrency bugs as a high-severity failure mode.",
+    "jobs": [
+     {
+      "job_id": "research_consensus",
+      "state": "Succeeded",
+      "worker_id": "worker-b2b43d588d29-5ad168ac",
+      "input_tokens": 90,
+      "output_tokens": 1993
+     },
+     {
+      "job_id": "review_python_concurrency",
+      "state": "Succeeded",
+      "worker_id": "worker-e41ef41c5f03-be9cc359",
+      "input_tokens": 164,
+      "output_tokens": 1967
+     },
+     {
+      "job_id": "generate_memo",
+      "state": "Succeeded",
+      "worker_id": "worker-b2b43d588d29-5ad168ac",
+      "input_tokens": 2431,
+      "output_tokens": 1121
+     }
+    ],
+    "failures": [],
+    "summarizer_usage": {
+     "input_tokens": 3187,
+     "output_tokens": 1048,
+     "total_tokens": 4235
+    },
+    "error": null
+   },
+   "token_usage": {
+    "total": {
+     "input_tokens": 6707,
+     "output_tokens": 7307,
+     "total_tokens": 14014
+    },
+    "by_operation": {
+     "plan": {
+      "input_tokens": 835,
+      "output_tokens": 1178,
+      "total_tokens": 2013
+     },
+     "job": {
+      "input_tokens": 2685,
+      "output_tokens": 5081,
+      "total_tokens": 7766
+     },
+     "summarize": {
+      "input_tokens": 3187,
+      "output_tokens": 1048,
+      "total_tokens": 4235
+     }
+    },
+    "by_model": [
+     {
+      "provider": "ollama",
+      "model": "gemma4:e4b",
+      "usage": {
+       "input_tokens": 6707,
+       "output_tokens": 7307,
+       "total_tokens": 14014
+      }
+     }
+    ],
+    "by_job": {
+     "research_consensus": {
+      "input_tokens": 90,
+      "output_tokens": 1993,
+      "total_tokens": 2083
+     },
+     "review_python_concurrency": {
+      "input_tokens": 164,
+      "output_tokens": 1967,
+      "total_tokens": 2131
+     },
+     "generate_memo": {
+      "input_tokens": 2431,
+      "output_tokens": 1121,
+      "total_tokens": 3552
+     }
+    }
+   },
+   "estimated_cost": null,
+   "replay_history": [],
+   "budget": null,
+   "webhook": null
+  }
+ }
+}
