@@ -36,11 +36,19 @@ let state = freshState()
 const agentView = (a) => ({ ...a, last_heartbeat: ago(0), drained: a.status === 'Draining' && a.in_flight === 0 })
 const listItem = (r) => ({ ...r, job_count: 2, token_usage: { input: 100, output: 50, total: 150 } })
 
+// The Gateway's `?detail=true` Job: what was asked, and the Worker's answer once it is in.
+const jobView = (job_id, instruction, depends_on, state, answered) => ({
+  job_id, state, instruction, capabilities: ['research'], depends_on, attempt: answered ? 1 : 0, worker_id: answered ? 'w1' : null, reason: null,
+  result: answered
+    ? { attempt: 1, status: 'Succeeded', content: `Worker answer ${job_id}`, error: null, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, duration_ms: 40 }
+    : null,
+})
+
 function requestView(r) {
   const done = r.status === 'Completed'
   return {
     request_id: r.request_id, status: r.status, priority: 'normal', replans: 0,
-    jobs: [{ job_id: 'j1', state: done ? 'Succeeded' : 'Dispatched' }, { job_id: 'j2', state: done ? 'Succeeded' : 'Waiting' }],
+    jobs: [jobView('j1', 'Search the sources', [], done ? 'Succeeded' : 'Dispatched', done), jobView('j2', 'Write it up', ['j1'], done ? 'Succeeded' : 'Waiting', done)],
     transitions: [{ job_id: 'j1', from_state: null, to_state: 'Ready', attempt: 0, at: r.created_at }],
     token_usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 }, estimated_cost: null,
     replay_history: [], budget: null, webhook: null,

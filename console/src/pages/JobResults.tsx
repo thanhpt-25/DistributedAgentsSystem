@@ -39,10 +39,12 @@ function JobPanel({ job }: { job: JobView }) {
 }
 
 export default function JobResultsCard({ jobs }: { jobs: JobView[] }) {
-  if (jobs.length === 0) return null
+  // A Gateway older than `?detail=true` answers without these fields: show nothing rather than fail the page.
+  const detailed = jobs.filter((j) => 'instruction' in j)
+  if (detailed.length === 0) return null
   return (
     <Section title="Worker results" flush>
-      {jobs.map((j) => <JobPanel key={j.job_id} job={j} />)}
+      {detailed.map((j) => <JobPanel key={j.job_id} job={j} />)}
     </Section>
   )
 }
