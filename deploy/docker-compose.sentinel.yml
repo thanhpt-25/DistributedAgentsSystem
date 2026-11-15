@@ -15,7 +15,11 @@
 # data (the volume belongs to the master).
 
 x-sentinel-env: &sentinel-env
-  DAS__REDIS__URL: !reset null
+  # An empty entry unsets the variable in the container: the base file's own idiom for "no value" (see the DAS__LLM__*
+  # names). Not `!reset null`: Docker Compose 2.38, the version on GitHub's ubuntu-24.04 runners, keeps the base value
+  # for that tag inside an `environment:` mapping, and the agents then refuse to start (redis.url together with
+  # redis.mode sentinel). A host variable of the same name would pass through and fail the same way, naming the field.
+  DAS__REDIS__URL:
   DAS__REDIS__MODE: sentinel
   DAS__REDIS__SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
   DAS__REDIS__MASTER_NAME: das

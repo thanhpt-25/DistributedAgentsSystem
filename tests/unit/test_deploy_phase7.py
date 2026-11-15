@@ -2,8 +2,9 @@
 
 ``docker-compose.sentinel.yml``: one master (the base ``redis`` service), one replica and three Sentinels under
 ``--profile sentinel``, with every agent switched to Sentinel mode. ``docker-compose.http-transport.yml``: the Gateway
-serves the broker, the agents use it for Jobs, RabbitMQ is not started. Read as text and YAML (``!reset`` is read as a
-marker), and, when ``docker compose`` is installed, merged with the base file the way an operator would."""
+serves the broker, the agents use it for Jobs, RabbitMQ is not started. Read as text and YAML, and, when
+``docker compose`` is installed, merged with the base file the way an operator would. A variable is unset with an empty
+entry (``NAME:``), never with ``!reset null``: see ``test_the_overrides_unset_variables_with_an_empty_entry``."""
 
 from __future__ import annotations
 
@@ -21,19 +22,11 @@ DEPLOY = Path(__file__).resolve().parents[2] / "deploy"
 SENTINEL = DEPLOY / "docker-compose.sentinel.yml"
 HTTP = DEPLOY / "docker-compose.http-transport.yml"
 AGENTS = ("gateway", "manager", "worker-research", "worker-review")
-RESET = "!reset"
 TOKEN = "0123456789abcdef0123"
 
 
-class _Loader(yaml.SafeLoader):
-    """SafeLoader that reads Compose's ``!reset`` tag as the string ``"!reset"``."""
-
-
-_Loader.add_constructor("!reset", lambda loader, node: RESET)
-
-
 def load(path: Path) -> dict[str, Any]:
-    return yaml.load(path.read_text(), Loader=_Loader)  # noqa: S506 - the loader above is a SafeLoader
+    return yaml.safe_load(path.read_text())
 
 
 def environment(service: dict[str, Any]) -> dict[str, Any]:
@@ -88,7 +81,8 @@ def test_every_agent_is_switched_to_sentinel_mode_without_a_redis_url() -> None:
     services = load(SENTINEL)["services"]
     for name in AGENTS:
         env = environment(services[name])
-        assert env["DAS__REDIS__URL"] == RESET, f"{name} keeps a standalone Redis URL"
+        assert "DAS__REDIS__URL" in env, f"{name} does not unset the standalone Redis URL"
+        assert env["DAS__REDIS__URL"] is None, f"{name} keeps a standalone Redis URL"
         assert env["DAS__REDIS__MODE"] == "sentinel" and env["DAS__REDIS__MASTER_NAME"] == "das"
         assert env["DAS__REDIS__SENTINELS"] == "sentinel-1:26379,sentinel-2:26379,sentinel-3:26379"
         assert set(services[name]["depends_on"]) == {"sentinel-1", "sentinel-2", "sentinel-3"}
@@ -105,12 +99,22 @@ def test_the_sentinel_file_holds_no_password() -> None:
     assert "PASSWORD" not in text and "requirepass" not in text
 
 
+@pytest.mark.parametrize("path", [SENTINEL, HTTP], ids=lambda p: p.name)
+def test_the_overrides_unset_variables_with_an_empty_entry(path: Path) -> None:
+    """``NAME: !reset null`` inside ``environment:`` keeps the base value on Docker Compose 2.38, the version on
+    GitHub's ubuntu-24.04 runners: a Sentinel agent would get a Redis URL as well and refuse to start. An empty entry
+    (``NAME:``) leaves the variable out of the container on every Compose version tried (2.38.2 and 5.7.0)."""
+    code = [line for line in path.read_text().splitlines() if not line.lstrip().startswith("#")]
+    assert not [line for line in code if "!reset" in line], f"{path.name}: unset a variable with `NAME:`, not `!reset`"
+
+
 @needs_compose
 def test_merged_with_the_base_file_the_agents_have_sentinel_settings_and_no_url() -> None:
     config = merged(SENTINEL, profiles=("sentinel",))
     for name in AGENTS:
         env = config["services"][name]["environment"]
-        assert "DAS__REDIS__URL" not in env and env["DAS__REDIS__MODE"] == "sentinel", name
+        # Unset means no value: Compose prints the variable as null, or leaves it out, depending on its version.
+        assert env.get("DAS__REDIS__URL") is None and env["DAS__REDIS__MODE"] == "sentinel", name
     assert {"redis", "redis-replica", "sentinel-1", "sentinel-2", "sentinel-3"} <= set(config["services"])
 
 
@@ -130,7 +134,8 @@ def test_the_gateway_serves_the_broker_and_the_agents_use_it_for_jobs() -> None:
     for name in ("manager", "worker-research", "worker-review"):
         env = environment(services[name])
         assert env["DAS__TRANSPORTS__JOBS"] == "http" and env["DAS__HTTP__URL"] == "http://gateway:8081", name
-        assert env["DAS__RABBITMQ__URL"] == RESET, f"{name} is still given a RabbitMQ URL"
+        assert "DAS__RABBITMQ__URL" in env, f"{name} does not unset the RabbitMQ URL"
+        assert env["DAS__RABBITMQ__URL"] is None, f"{name} is still given a RabbitMQ URL"
 
 
 def test_the_token_comes_from_one_required_variable_and_is_never_written_in_the_file() -> None:
@@ -158,7 +163,7 @@ def test_merged_with_the_base_file_the_stack_runs_without_rabbitmq() -> None:
     for name in ("manager", "worker-research", "worker-review"):
         env = config["services"][name]["environment"]
         assert env["DAS__TRANSPORTS__JOBS"] == "http" and env["DAS__HTTP__TOKEN"] == TOKEN
-        assert "DAS__RABBITMQ__URL" not in env and "DAS__RABBITMQ__MANAGEMENT_URL" not in env
+        assert env.get("DAS__RABBITMQ__URL") is None and env.get("DAS__RABBITMQ__MANAGEMENT_URL") is None
     assert config["services"]["gateway"]["environment"]["DAS__HTTP_BROKER__TOKEN"] == TOKEN
 
 
