@@ -39,9 +39,10 @@ function RequireAdmin({ children }: { children: ReactNode }) {
   return caps.admin ? children : <Navigate to="/" replace />
 }
 
-export default function App() {
+/** `client` lets a test start from an empty query cache; the app itself uses the shared one. */
+export default function App({ client = queryClient }: { client?: QueryClient }) {
   return (
-    <QueryClientProvider client={queryClient}>
+    <QueryClientProvider client={client}>
       <ThemeProvider>
         <ToastProvider>
           <ConfirmProvider>

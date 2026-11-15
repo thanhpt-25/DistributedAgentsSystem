@@ -39,7 +39,12 @@ Sign in with an API key. The console probes what the key may do and shows only t
 - **Filters live in the URL** (`#/requests?status=Failed`), so a view can be shared.
 - **Same origin.** `deploy/config/console.nginx.conf` serves the build and proxies `/v1` and `/healthz` to the Gateway, so no
   CORS is needed. SSE needs `proxy_buffering off`. nginx also sends the Content-Security-Policy; the page loads no inline script.
-- **The key lives in `sessionStorage`**: gone when the tab closes, never in a cookie. A 401 signs you out.
+- **The image** (`deploy/docker/console.Dockerfile`) pins both base images by digest, runs as the non-root `nginx` user and
+  listens on 8080. The nginx config is a template: `DAS_GATEWAY_URL` (default `http://gateway:8080`) and `DAS_RESOLVER`
+  (default `127.0.0.11`, Docker's DNS) point it at the Gateway, so the same image runs outside Compose (on Kubernetes, set
+  the Service URL and the cluster DNS address). There is no Helm chart for the console yet.
+- **The key lives in `sessionStorage`**: gone when the tab closes, never in a cookie. The Gateway rejecting it (401 or 403)
+  signs you out; an outage does not, and the live feed backs off from 2 s to 30 s while the Gateway is away.
 - **Gateway strings are never HTML.** React escapes them, and a test forbids `dangerouslySetInnerHTML`.
 
 ```
@@ -54,11 +59,18 @@ src/lib/      pure helpers (formatting, usage maths), unit-tested
 ## Checks
 
 ```bash
-npm run typecheck     # tsc, strict
-npm test              # vitest: formatting, usage maths, SSE parsing
-npm run build         # typecheck + production bundle in dist/
+npm run typecheck       # tsc, strict
+npm test                # Vitest: the pure logic, and every page in jsdom against a stubbed Gateway
+npm run test:coverage   # the same, with a coverage floor (statements and lines 85%, functions 80%, branches 70%)
+npm run build           # typecheck + production bundle in dist/
+npm run e2e:install     # once: the Chromium that Playwright drives
+npm run e2e             # ten browser flows against dist/ and e2e/mock-gateway.mjs (run `npm run build` first)
 uv run pytest tests/unit/test_console_static.py   # API paths exist in ROUTE_SCOPES, pins, Dockerfile, nginx
 ```
+
+The component tests (`src/**/*.test.tsx`) render a page inside the app's real providers and answer `fetch` from a table of
+routes (`src/test/gateway.tsx`); an unlisted call answers 404. The browser tests (`e2e/`) cover the critical flows end to end:
+sign-in, the live feed, submit, cancel, drain, replay, a read-only key, a Gateway outage during a reload, and the colour mode.
 
 Not covered, because the Gateway has no endpoint for it: audit entries (they are log lines), Redis or RabbitMQ internals, and
 editing configuration. Use the observability stack (Grafana, Prometheus, Jaeger; linked in the sidebar) for metric history.

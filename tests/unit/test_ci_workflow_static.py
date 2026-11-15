@@ -33,7 +33,7 @@ SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 CHECK_CMD = re.compile(r"^uv run (ruff|mypy|lint-imports|pytest)\b")
 FENCE = re.compile(r"^```[^\n]*\n(.*?)^```", re.MULTILINE | re.DOTALL)
 
-EXPECTED_TIMEOUTS = {"fast": 15, "client": 10, "console": 10, "integration": 30, "e2e": 30, "k8s": 30}
+EXPECTED_TIMEOUTS = {"fast": 15, "client": 10, "console": 15, "integration": 30, "e2e": 30, "k8s": 30}
 # Jobs that run no Python: no uv, so the "every job sets up uv" rule does not apply (console/, checked in
 # tests/unit/test_console_static.py).
 NODE_JOBS = frozenset({"console"})

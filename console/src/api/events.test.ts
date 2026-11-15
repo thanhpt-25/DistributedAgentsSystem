@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { isTerminalFrame, parseFrame, splitFrames } from './events'
+import { isTerminalFrame, parseFrame, retryDelay, splitFrames } from './events'
+
+describe('retryDelay', () => {
+  it('doubles from two seconds', () => {
+    expect([0, 1, 2, 3].map(retryDelay)).toEqual([2000, 4000, 8000, 16000])
+  })
+  it('stops growing at thirty seconds, however long the outage', () => {
+    expect(retryDelay(4)).toBe(30_000)
+    expect(retryDelay(50)).toBe(30_000)
+  })
+})
 
 describe('isTerminalFrame', () => {
   const frame = (event: string, data: unknown) => ({ event, id: '1-0', data })

@@ -15,4 +15,4 @@ services:
     ports:
       # Loopback only, like every other operator UI in the base stack (RabbitMQ management, Prometheus, Grafana, Jaeger).
       # Plain HTTP carries the API key: to expose the console, put TLS in front of it and change this deliberately.
-      - "127.0.0.1:${DAS_CONSOLE_PORT:-8088}:80"
+      - "127.0.0.1:${DAS_CONSOLE_PORT:-8088}:8080"

@@ -96,10 +96,33 @@ def test_ci_runs_the_console_checks_with_pinned_actions() -> None:
     assert "needs" not in job and "if" not in job, "the console job runs on every push, like `fast`"
     assert job["defaults"]["run"]["working-directory"] == "console"
     runs = [s["run"] for s in job["steps"] if "run" in s]
-    assert runs == ["npm ci --no-audit --no-fund", "npm run typecheck", "npm test", "npm run build"]
+    assert runs == [
+        "npm ci --no-audit --no-fund", "npm run typecheck", "npm run test:coverage", "npm run build",
+        "npm run e2e:install", "npm run e2e",
+    ]
     for step in job["steps"]:
         if "uses" in step:
             assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", step["uses"]), f"pin {step['uses']} to a commit SHA"
+
+
+def test_dockerfile_pins_images_by_digest_and_runs_unprivileged() -> None:
+    dockerfile = (ROOT / "deploy/docker/console.Dockerfile").read_text()
+    stages = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
+    assert len(stages) == 2
+    for stage in stages:
+        assert re.search(r"@sha256:[0-9a-f]{64}", stage), f"pin the base image by digest: {stage}"
+    assert "nginx-unprivileged" in stages[-1], "the runtime stage must not run as root"
+    assert "/etc/nginx/templates/default.conf.template" in dockerfile, "the entrypoint renders the config from here"
+    assert "DAS_GATEWAY_URL=" in dockerfile and "DAS_RESOLVER=" in dockerfile, "the template's variables need defaults"
+    assert "HEALTHCHECK" in dockerfile
+
+
+def test_nginx_config_is_a_template_that_listens_on_an_unprivileged_port() -> None:
+    conf = (ROOT / "deploy/config/console.nginx.conf").read_text()
+    assert "${DAS_GATEWAY_URL}" in conf and "${DAS_RESOLVER}" in conf, "no hardcoded Compose-only hostnames"
+    assert re.search(r"listen\s+8080;", conf), "a non-root user cannot bind port 80"
+    compose = yaml.safe_load((ROOT / "deploy/docker-compose.console.yml").read_text())
+    assert all(str(p).endswith(":8080") for p in compose["services"]["console"]["ports"])
 
 
 MAX_FUNCTION_LINES = 50
