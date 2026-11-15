@@ -189,8 +189,25 @@ def _transition_views(snap: StoredRequest) -> list[dict[str, Any]]:
     return [view for _, view in heapq.merge(jobs, reqs, key=lambda item: item[0])]
 
 
+def _job_detail(snap: StoredRequest, job_id: str) -> dict[str, Any]:
+    """What one Job was asked and what its Worker answered, for ``?detail=true``.
+
+    ``result`` is the Job_Result of the Job's current attempt, ``None`` until a Worker has answered."""
+    rec = snap.jobs[job_id]
+    res = snap.results.get((job_id, rec.attempt)) if rec.attempt >= 1 else None
+    return {
+        "instruction": rec.job.instruction,
+        "capabilities": list(rec.job.capabilities),
+        "depends_on": list(rec.job.depends_on),
+        "attempt": rec.attempt,
+        "worker_id": rec.worker_id,
+        "reason": rec.reason,
+        "result": res.model_dump(mode="json", exclude={"request_id", "job_id", "worker_id"}) if res else None,
+    }
+
+
 def request_view(
-    snap: StoredRequest, price_table: PriceTable | None = None
+    snap: StoredRequest, price_table: PriceTable | None = None, *, detail: bool = False
 ) -> dict[str, Any]:
     """Status body for ``GET /v1/requests/{id}`` (1.2, 13.9; Phase 2 Req 9.8, 10.3, 13.2).
 
@@ -199,13 +216,19 @@ def request_view(
     ``replay_history``. Phase 4 adds ``budget`` (Req 5.9) and ``webhook`` (Req 8.9), both ``null``
     when the Request has none. ``snap`` must be loaded with ``include_usage=True`` and
     ``include_client=True``.
+
+    ``detail=True`` (``?detail=true``) adds the instruction, attempt, Worker and Job_Result to each ``jobs`` entry;
+    the default body is unchanged because the status endpoint is polled and a result can be long.
     """
     body: dict[str, Any] = {
         "request_id": snap.request_id,
         "status": snap.status.value,
         "priority": snap.priority,  # Phase 5 Req 7.3: ``normal`` when none is stored
         "replans": snap.replans,  # Phase 6 Req 3.6: 0 for a Request never replanned
-        "jobs": [{"job_id": jid, "state": rec.state.value} for jid, rec in snap.jobs.items()],
+        "jobs": [
+            {"job_id": jid, "state": rec.state.value, **(_job_detail(snap, jid) if detail else {})}
+            for jid, rec in snap.jobs.items()
+        ],
         "transitions": _transition_views(snap),
     }
     if snap.status is RequestStatus.COMPLETED and snap.final_result is not None:
@@ -478,7 +501,7 @@ def create_app(
         # A Request of another tenant answers exactly like one that does not exist (Phase 5 Req 3.2).
         if snap is None or not can_see(request.state.principal, snap.tenant):
             return _error(status.HTTP_404_NOT_FOUND, NOT_FOUND)
-        return request_view(snap, price_table)
+        return request_view(snap, price_table, detail=request.query_params.get("detail") == "true")
 
     @v1.post(
         "/requests/{request_id}/cancel", status_code=status.HTTP_202_ACCEPTED, responses=CANCEL_RESPONSES

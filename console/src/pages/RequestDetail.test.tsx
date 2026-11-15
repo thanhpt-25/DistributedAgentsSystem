@@ -7,7 +7,14 @@ import RequestDetail from './RequestDetail'
 
 const view = (over: Record<string, unknown> = {}) => ({
   request_id: 'r-1', status: 'Running', priority: 'normal', replans: 0,
-  jobs: [{ job_id: 'j1', state: 'Succeeded' }, { job_id: 'j2', state: 'Dispatched' }],
+  jobs: [
+    {
+      job_id: 'j1', state: 'Succeeded', instruction: 'Find the sources', capabilities: ['research'], depends_on: [],
+      attempt: 1, worker_id: 'w1', reason: null,
+      result: { attempt: 1, status: 'Succeeded', content: 'Three sources found', error: null, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, duration_ms: 1500 },
+    },
+    { job_id: 'j2', state: 'Dispatched', instruction: 'Write it up', capabilities: ['writing'], depends_on: ['j1'], attempt: 1, worker_id: 'w2', reason: null, result: null },
+  ],
   transitions: [
     { job_id: 'j1', from_state: null, to_state: 'Ready', attempt: 0, at: '2026-11-15T10:00:00Z' },
     { job_id: 'j1', from_state: 'Ready', to_state: 'Succeeded', attempt: 1, worker_id: 'w1', at: '2026-11-15T10:00:05Z' },
@@ -31,7 +38,16 @@ describe('Request detail', () => {
     expect(screen.getByText('1000')).toBeInTheDocument()
     expect(screen.getByText('No price table: cost unknown.')).toBeInTheDocument()
     expect(screen.getAllByText('Succeeded').length).toBeGreaterThanOrEqual(2) // the job and its transition
-    expect(screen.getByText(/attempt 1/)).toBeInTheDocument()
+    expect(screen.getAllByText(/attempt 1/).length).toBeGreaterThanOrEqual(1) // the transition line and the job panel
+  })
+
+  it('shows what each worker was asked and answered', async () => {
+    const calls = renderDetail({ 'GET /v1/requests/r-1': view() })
+    expect(await screen.findByText('Three sources found')).toBeInTheDocument()
+    expect(screen.getByText('Find the sources')).toBeInTheDocument()
+    expect(screen.getByText('Write it up')).toBeInTheDocument()
+    expect(screen.getByText('No result yet.')).toBeInTheDocument()
+    expect(calls.find((c) => c.path === '/v1/requests/r-1')?.query.get('detail')).toBe('true')
   })
 
   it('streams events into the live feed', async () => {

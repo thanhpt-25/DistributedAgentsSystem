@@ -6,6 +6,7 @@ import { useCancelRequest, useEventFeed, useRequest } from '../api/hooks'
 import type { Budget, RequestView, Transition } from '../api/types'
 import { duration, num, shortId } from '../lib/format'
 import DataTable from '../ui/DataTable'
+import JobResultsCard from './JobResults'
 import { CenteredSpinner, CopyId, ErrorAlert, KeyValue, PageHeader, RelTime, Section, StatusBadge } from '../ui/parts'
 import { useConfirm } from '../ui/Providers'
 
@@ -234,6 +235,8 @@ export default function RequestDetail() {
         }
       />
       <SummaryCard view={view} done={done} />
+      <Outcome view={view} />
+      <JobResultsCard jobs={view.jobs} />
       <CRow className="g-3">
         <CCol lg={6}>
           <JobsCard view={view} />
@@ -250,7 +253,6 @@ export default function RequestDetail() {
           <LiveEventsCard feed={feed} />
         </CCol>
       </CRow>
-      <Outcome view={view} />
     </>
   )
 }

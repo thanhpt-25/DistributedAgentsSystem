@@ -66,12 +66,34 @@ export interface JobReport {
   output_tokens: number
 }
 
+/** A Worker's answer for one attempt of a Job (the Gateway's `?detail=true` view). */
+export interface JobOutput {
+  attempt: number
+  status: 'Succeeded' | 'Failed' | 'TimedOut' | 'Cancelled'
+  content: string
+  error: string | null
+  usage: { input_tokens: number; output_tokens: number; total_tokens: number }
+  duration_ms: number
+}
+
+export interface JobView {
+  job_id: string
+  state: JobState
+  instruction: string
+  capabilities: string[]
+  depends_on: string[]
+  attempt: number
+  worker_id: string | null
+  reason: string | null
+  result: JobOutput | null
+}
+
 export interface RequestView {
   request_id: string
   status: RequestStatus
   priority: Priority
   replans: number
-  jobs: { job_id: string; state: JobState }[]
+  jobs: JobView[]
   transitions: Transition[]
   final_result?: { summary: string | null; jobs: JobReport[]; failures: unknown[]; error?: string | null }
   error?: string
