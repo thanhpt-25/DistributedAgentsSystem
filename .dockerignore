@@ -14,6 +14,10 @@ dist
 build
 tests
 deploy
+# ...except what the console image copies (deploy/docker/console.Dockerfile)
+!deploy/config/console.nginx.conf
+console/node_modules
+console/dist
 CLAUDE.md
 .env
 .env.*

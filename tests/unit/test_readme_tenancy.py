@@ -194,7 +194,7 @@ def job_names() -> list[str]:
 
 def test_the_kubernetes_section_names_every_job_of_the_workflow_for_branch_protection() -> None:
     text = section("Kubernetes (Helm chart)")
-    assert len(job_names()) == 8 and "Kind_Job" in job_names()
+    assert len(job_names()) == 9 and "Kind_Job" in job_names() and "Console_Job" in job_names()
     for name in job_names():
         assert f"`{name}`" in text, f"the Kubernetes section does not name the status check `{name}`"
     assert "deploy/helm/das/README.md" in text and (ROOT / "deploy" / "helm" / "das" / "README.md").is_file()

@@ -33,7 +33,10 @@ SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 CHECK_CMD = re.compile(r"^uv run (ruff|mypy|lint-imports|pytest)\b")
 FENCE = re.compile(r"^```[^\n]*\n(.*?)^```", re.MULTILINE | re.DOTALL)
 
-EXPECTED_TIMEOUTS = {"fast": 15, "client": 10, "integration": 30, "e2e": 30, "k8s": 30}
+EXPECTED_TIMEOUTS = {"fast": 15, "client": 10, "console": 10, "integration": 30, "e2e": 30, "k8s": 30}
+# Jobs that run no Python: no uv, so the "every job sets up uv" rule does not apply (console/, checked in
+# tests/unit/test_console_static.py).
+NODE_JOBS = frozenset({"console"})
 EXPECTED_FAST_CHECKS = [
     "uv run ruff check",
     "uv run mypy",
@@ -155,6 +158,8 @@ def check_uv_version(text: str) -> list[str]:
     for job_id, job in _jobs(data).items():
         if "UV_VERSION" in (job.get("env") or {}):
             problems.append(f"job {job_id} overrides UV_VERSION")
+        if job_id in NODE_JOBS:
+            continue
         setups = [s for s in job.get("steps", []) if str(s.get("uses", "")).startswith("astral-sh/setup-uv@")]
         if not setups:
             problems.append(f"job {job_id} has no astral-sh/setup-uv step")
@@ -529,7 +534,7 @@ def test_readme_ci_section_names_every_job(readme_text: str) -> None:
     """Requirement 11.6: the job names are what branch protection refers to."""
     section = re.search(r"^## Continuous integration\n(.*?)(?=^## |\Z)", readme_text, re.MULTILINE | re.DOTALL)
     assert section, "README.md has no `## Continuous integration` section"
-    for job in ("Fast_Job", "Client_Job", "Integration_Job", "E2E_Job", KIND_JOB_NAME):
+    for job in ("Fast_Job", "Client_Job", "Console_Job", "Integration_Job", "E2E_Job", KIND_JOB_NAME):
         assert job in section.group(1), f"the README CI section does not name {job}"
     assert "`k8s`" in section.group(1) and "DAS_K8S_E2E" in section.group(1)
 

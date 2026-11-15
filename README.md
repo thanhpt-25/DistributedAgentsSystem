@@ -365,7 +365,7 @@ Docker Compose stays a supported way to run DAS. The chart in `deploy/helm/das/`
 helm install das deploy/helm/das -f my-values.yaml
 ```
 
-The chart's own [README](deploy/helm/das/README.md) covers the prerequisites, the Secret keys, the values, tenants, the grace period rule, KEDA, draining and how to test it. CI renders the chart for two values files with `helm lint`, `helm template` and `kubeconform -strict`, and the `k8s` job installs it on a throwaway kind cluster. If you protect a branch, the required status checks are the job names of the workflow: `Fast_Job`, `Client_Job (Python 3.10)`, `Client_Job (Python 3.11)`, `Client_Job (Python 3.12)`, `Client_Job (Python 3.13)`, `Integration_Job`, `E2E_Job` and `Kind_Job`.
+The chart's own [README](deploy/helm/das/README.md) covers the prerequisites, the Secret keys, the values, tenants, the grace period rule, KEDA, draining and how to test it. CI renders the chart for two values files with `helm lint`, `helm template` and `kubeconform -strict`, and the `k8s` job installs it on a throwaway kind cluster. If you protect a branch, the required status checks are the job names of the workflow: `Fast_Job`, `Client_Job (Python 3.10)`, `Client_Job (Python 3.11)`, `Client_Job (Python 3.12)`, `Client_Job (Python 3.13)`, `Console_Job`, `Integration_Job`, `E2E_Job` and `Kind_Job`.
 
 ## Scaling
 
@@ -1028,12 +1028,13 @@ Transport adapters are discovered through the `das.transports` entry-point group
 
 ## Continuous integration
 
-The workflow `.github/workflows/ci.yml` (named **CI**) has five jobs. Every job installs uv 0.13.6 and runs the commands listed below, which are the same commands as in [Development](#development). `fast`, `integration`, `e2e`, and `k8s` use Python 3.12 and run `uv sync --locked` first. `client` sets up each supported Python itself and does not sync, because it tests the client package in an isolated environment. Each job reports its own status check on the commit and pull request; `client` reports one per Python (`Client_Job (Python 3.10)` and so on).
+The workflow `.github/workflows/ci.yml` (named **CI**) has six jobs. Every job except `console` installs uv 0.13.6 and runs the commands listed below, which are the same commands as in [Development](#development). `fast`, `integration`, `e2e`, and `k8s` use Python 3.12 and run `uv sync --locked` first. `client` sets up each supported Python itself and does not sync, because it tests the client package in an isolated environment. `console` builds the admin console (`console/`) with Node 22 and uses no Python. Each job reports its own status check on the commit and pull request; `client` reports one per Python (`Client_Job (Python 3.10)` and so on).
 
 | Job | Commands | Runs on | Timeout |
 |---|---|---|---|
 | `fast` (Fast_Job) | `uv run ruff check`, `uv run mypy`, `uv run lint-imports`, `uv run pytest tests/unit tests/property tests/contract` (which includes the Helm chart's rendered-output tests), then `helm lint`, `helm template` and `kubeconform -strict` on the chart for `deploy/helm/das/ci/values-min.yaml` and for `deploy/helm/das/ci/values-all.yaml` (every optional feature on) | every push to any branch (not tags); pull requests when opened, synchronized, or reopened; manual run | 15 min |
 | `client` (Client_Job) | the client package suite from [Development](#development), once for each of Python 3.10, 3.11, 3.12, and 3.13 | same as `fast`; does not wait for it | 10 min per Python |
+| `console` (Console_Job) | in `console/`: `npm ci`, `npm run typecheck`, `npm test`, `npm run build` | same as `fast`; does not wait for it | 10 min |
 | `integration` (Integration_Job) | `uv run pytest tests/integration --ignore=tests/integration/e2e --ignore=tests/integration/k8s`, then the repeat-run check (`... --count 20 -v`) | push to `main`; manual run | 30 min |
 | `e2e` (E2E_Job) | checks Docker Compose is 2.30 or later, then `uv run pytest tests/integration/e2e` | push to `main`; manual run | 30 min |
 | `k8s` (Kind_Job) | installs helm, kind and kubectl, builds the three images, then `uv run pytest tests/integration/k8s` with `DAS_K8S_E2E=1` | push to `main`; manual run | 30 min |

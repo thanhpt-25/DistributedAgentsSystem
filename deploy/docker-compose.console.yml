@@ -1,0 +1,18 @@
+# Admin console (Phase 8): a React/CoreUI app served by nginx, which also proxies /v1 and /healthz to the Gateway.
+# Layer it on the base stack:
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.console.yml up -d --build
+# then open http://localhost:8088 and sign in with an API key (an Admin_API_Key unlocks every page).
+# Developing the UI instead? `cd console && npm install && npm run dev` proxies to the Gateway on localhost:8080.
+services:
+  console:
+    image: das-console:local
+    build:
+      context: ..
+      dockerfile: deploy/docker/console.Dockerfile
+    depends_on:
+      - gateway
+    networks: [das]  # the base stack's network: without it the console cannot resolve `gateway`
+    ports:
+      # Loopback only, like every other operator UI in the base stack (RabbitMQ management, Prometheus, Grafana, Jaeger).
+      # Plain HTTP carries the API key: to expose the console, put TLS in front of it and change this deliberately.
+      - "127.0.0.1:${DAS_CONSOLE_PORT:-8088}:80"

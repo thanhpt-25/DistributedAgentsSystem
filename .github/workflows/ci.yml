@@ -144,6 +144,32 @@ jobs:
       - name: uv run pytest clients/python/tests
         run: uv run --isolated --no-project --with-editable clients/python --with pytest==9.1.1 --with pytest-asyncio==1.4.0 --with respx==0.23.1 pytest clients/python/tests -c clients/python/pyproject.toml --rootdir clients/python
 
+  # The admin console (console/, React + CoreUI). A Node job: it needs no uv and no Python, and it does not wait for `fast`.
+  console:
+    name: Console_Job
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: npm ci
+        run: npm ci --no-audit --no-fund
+      - name: npm run typecheck
+        run: npm run typecheck
+      - name: npm test
+        run: npm test
+      - name: npm run build
+        run: npm run build
+
   integration:
     name: Integration_Job
     needs: fast
