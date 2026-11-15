@@ -3,7 +3,7 @@ import type { JobView } from '../api/types'
 import { num } from '../lib/format'
 import { Section, StatusBadge } from '../ui/parts'
 
-const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`
+const took = (ms: number): string => (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`)
 
 function JobPanel({ job }: { job: JobView }) {
   const res = job.result
@@ -16,7 +16,7 @@ function JobPanel({ job }: { job: JobView }) {
         <span className="small text-body-secondary">
           {job.worker_id ?? 'no worker'}
           {job.attempt > 0 ? ` · attempt ${job.attempt}` : ''}
-          {res ? ` · ${num(res.usage.input_tokens)} in / ${num(res.usage.output_tokens)} out · ${seconds(res.duration_ms)}` : ''}
+          {res ? ` · ${num(res.usage.input_tokens)} in / ${num(res.usage.output_tokens)} out · ${took(res.duration_ms)}` : ''}
         </span>
       </summary>
       <div className="d-grid gap-2 mt-3">
