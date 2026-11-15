@@ -81,7 +81,7 @@ function useRejectedKeyListener(active: boolean, signOut: (message?: string) => 
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
-  const [status, setStatus] = useState<Status>('loading')
+  const [status, setStatus] = useState<Status>(() => (getKey() ? 'loading' : 'anonymous'))
   const [caps, setCaps] = useState<Capabilities>(ANONYMOUS)
   const [error, setError] = useState<string | undefined>()
   const { tenant, setTenant, restoreTenant } = useTenant()
@@ -119,8 +119,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const saved = getKey()
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time restore of the stored key; the status starts at `loading` when there is one
     if (saved) void signIn(saved)
-    else setStatus('anonymous')
   }, [signIn])
   useRejectedKeyListener(status === 'authenticated', signOut)
 

@@ -97,7 +97,7 @@ def test_ci_runs_the_console_checks_with_pinned_actions() -> None:
     assert job["defaults"]["run"]["working-directory"] == "console"
     runs = [s["run"] for s in job["steps"] if "run" in s]
     assert runs == [
-        "npm ci --no-audit --no-fund", "npm run typecheck", "npm run test:coverage", "npm run build",
+        "npm ci --no-audit --no-fund", "npm run typecheck", "npm run lint", "npm run test:coverage", "npm run build",
         "npm run e2e:install", "npm run e2e",
     ]
     for step in job["steps"]:
