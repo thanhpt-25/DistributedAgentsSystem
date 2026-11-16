@@ -91,7 +91,7 @@ from das.manager.machine import MachineConfig
 from das.manager.planner import Planner, PlannerConfig
 from das.manager.retention import IndexBackfill, RetentionSweeper, TenantIndexBackfill
 from das.manager.samplers import QueueDepthSampler, RegistryGauges
-from das.manager.summarizer import Summarizer
+from das.manager.summarizer import SUMMARIZER_CALL_TIMEOUT, Summarizer
 from das.observability import get_logger
 from das.observability.metrics import (
     LLMMetricsObserver,
@@ -247,6 +247,7 @@ class ManagerAgent:
         llm: Any = None,
         planner: Planner | None = None,
         summarizer: Summarizer | None = None,
+        summarizer_timeout: float = SUMMARIZER_CALL_TIMEOUT,
         clock: Clock | None = None,
         tweak_deps: Callable[[DriverDeps], DriverDeps] | None = None,
         recorder: MetricsRecorder | None = None,
@@ -262,7 +263,7 @@ class ManagerAgent:
             if llm is None:
                 raise ValueError("llm is required unless planner and summarizer are given")
             planner = planner or Planner(llm)
-            summarizer = summarizer or Summarizer(llm)
+            summarizer = summarizer or Summarizer(llm, call_timeout=summarizer_timeout)
         self.settings = settings
         self._queue = queue
         self._control = control

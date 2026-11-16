@@ -20,16 +20,16 @@ grpc:
   advertise_port: 50051
 
 worker:
-  concurrency_limit: 4
+  concurrency_limit: 1
 
 llm:
   temperature: 0.2
-  max_output_tokens: 4096
-  timeout: 60
-  retry_count: 3
+  max_output_tokens: 1024
+  timeout: 600
+  retry_count: 0
 
 limits:
-  job_timeout: 300
+  job_timeout: 900
   heartbeat_interval: 5
   # Keep below stop_grace_period in docker-compose.yml.
   shutdown_timeout: 30
