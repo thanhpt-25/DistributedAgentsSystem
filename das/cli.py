@@ -725,6 +725,7 @@ async def run_agent(
         if role == "manager":
             from das.manager.agent import ManagerAgent, ManagerSettings
 
+            assert config.llm is not None
             agent = ManagerAgent(
                 ManagerSettings.from_config(config),
                 queue=queue,
@@ -732,6 +733,7 @@ async def run_agent(
                 store=store,
                 registry=registry,
                 llm=llm,
+                summarizer_timeout=config.llm.timeout,
                 recorder=recorder,
                 tracer=tracer,
                 supervisor=supervisor,

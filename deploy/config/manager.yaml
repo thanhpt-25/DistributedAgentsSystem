@@ -19,9 +19,9 @@ grpc:
 
 llm:
   temperature: 0.2
-  max_output_tokens: 4096
-  timeout: 60
-  retry_count: 3
+  max_output_tokens: 1024
+  timeout: 600
+  retry_count: 0
 
 limits:
   max_prompt_length: 32000
